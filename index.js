@@ -5,6 +5,16 @@ const path = require('path');
 const os = require('os');
 const ffmpeg = require('fluent-ffmpeg');
 const FormData = require('form-data');
+const { execSync } = require('child_process');
+
+// Locate ffmpeg/ffprobe — Nixpacks installs them via Nix so the path
+// may not be on Node's default PATH. Detect and set explicitly.
+try {
+  ffmpeg.setFfmpegPath(execSync('which ffmpeg').toString().trim());
+  ffmpeg.setFfprobePath(execSync('which ffprobe').toString().trim());
+} catch (_) {
+  console.warn('ffmpeg not found via which — relying on default PATH');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
