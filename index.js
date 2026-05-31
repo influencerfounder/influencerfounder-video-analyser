@@ -111,7 +111,7 @@ Return a JSON object with exactly these fields:
 
   } catch (err) {
     const status = err.response?.status || 500;
-    const message = err.response?.data?.message || err.message;
+    const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
     res.status(status).json({ success: false, error: message });
   }
 }
@@ -189,7 +189,7 @@ Return a JSON object with exactly these fields:
 
   } catch (err) {
     const status = err.response?.status || 500;
-    const message = err.response?.data?.message || err.message;
+    const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
     res.status(status).json({ success: false, error: message });
   }
 });
