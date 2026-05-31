@@ -788,7 +788,7 @@ function formatPostForClient(post) {
 // Sends video URL to Claude via Kie.ai and returns full deconstruction
 // ─────────────────────────────────────────
 
-app.post('/api/viral/analyse', async (req, res) => {
+async function handleViralAnalyse(req, res) {
   log('SERVER', 'Received: viral/analyse request');
   try {
     const axios = require('axios');
@@ -934,6 +934,104 @@ Return a JSON object with exactly these fields:
 
   } catch (err) {
     error('SERVER', 'Error in viral/analyse', err);
+    const status = err.response?.status || 500;
+    const message = err.response?.data?.message || err.message;
+    res.status(status).json({ success: false, error: message });
+  }
+}
+
+app.post('/api/viral/analyse', handleViralAnalyse);
+app.post('/api/analyse', handleViralAnalyse);
+
+// ─────────────────────────────────────────
+// CLONE — Copy Viral Video tab
+// Accepts videoUrl, returns clonePrompt + optional frames/transcript
+// ─────────────────────────────────────────
+
+app.post('/api/clone', async (req, res) => {
+  log('SERVER', 'Received: clone request');
+  try {
+    const axios = require('axios');
+    const { videoUrl } = req.body;
+
+    if (!videoUrl) {
+      return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+    }
+
+    const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+    if (!ANTHROPIC_API_KEY) {
+      return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY not configured' });
+    }
+
+    const systemPrompt = `You are an expert AI video director specialising in replicating viral short-form videos with AI-generated influencer characters.
+Your job is to analyse a viral video and produce a single, detailed Wan 2.6 text-to-video prompt that clones the exact visual style, scene, camera work, lighting, and energy — with [INFLUENCER] as the subject.
+Always respond with valid JSON only. No markdown, no explanation outside the JSON.`;
+
+    const userPrompt = `Analyse this viral video URL and clone it: ${videoUrl}
+
+Return a JSON object with exactly these fields:
+{
+  "transcript": "verbatim transcript if speech is present, otherwise describe the visual narrative beat by beat",
+  "metadata": {
+    "duration": "estimated duration in seconds as a string, e.g. '15s'",
+    "frameCount": 0,
+    "hasAudio": true or false
+  },
+  "scene_analysis": {
+    "setting": "precise environment — indoors/outdoors, location type, background details",
+    "lighting": "lighting type, direction, quality, colour temperature",
+    "camera": "shot type (close-up/mid/wide), angle, movement (static/handheld/push-in/pan), framing",
+    "subject_action": "what the subject is doing — movement, gestures, energy level",
+    "colour_grade": "colour palette and mood (warm/cool/desaturated/vibrant/cinematic)",
+    "editing_style": "pacing — fast cuts/slow/single take, any notable transitions"
+  },
+  "clone_prompt": "A single, complete, ready-to-use Wan 2.6 video generation prompt that clones every visual element of the original — setting, lighting, camera angle and movement, colour grade, energy — but replaces the original subject with [INFLUENCER]. This prompt must be detailed enough to generate the video immediately. Use present tense, be specific about every visual element. Start with the shot type and camera movement."
+}`;
+
+    const claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2000,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }]
+    }, {
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const rawText = claudeResponse.data?.content?.[0]?.text || '';
+    if (!rawText) {
+      return res.status(500).json({ success: false, error: 'Empty response from Claude' });
+    }
+
+    let parsed;
+    try {
+      let jsonStr = rawText
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+      const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+      if (jsonMatch) jsonStr = jsonMatch[0];
+      parsed = JSON.parse(jsonStr);
+    } catch (e) {
+      log('SERVER', 'Failed to parse clone response: ' + rawText.substring(0, 500));
+      return res.status(500).json({ success: false, error: 'Failed to parse response: ' + e.message });
+    }
+
+    log('SERVER', 'Clone analysis complete');
+    res.json({
+      success: true,
+      frames: [],
+      transcript: parsed.transcript || '',
+      metadata: parsed.metadata || { duration: '~15s', frameCount: 0, hasAudio: false },
+      clonePrompt: parsed.clone_prompt || ''
+    });
+
+  } catch (err) {
+    error('SERVER', 'Error in clone', err);
     const status = err.response?.status || 500;
     const message = err.response?.data?.message || err.message;
     res.status(status).json({ success: false, error: message });
