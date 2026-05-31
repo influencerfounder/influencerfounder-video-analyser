@@ -1,5 +1,10 @@
 const express = require('express');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const ffmpeg = require('fluent-ffmpeg');
+const FormData = require('form-data');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,7 +24,7 @@ app.use((req, res, next) => {
 // ─────────────────────────────────────────
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.0.1', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.1.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -121,10 +126,12 @@ app.post('/api/analyse', handleViralAnalyse);
 
 // ─────────────────────────────────────────
 // CLONE — Copy Viral Video tab
-// Analyses a video URL and returns a Wan 2.6 clone prompt
+// Downloads video → extracts frames → transcribes audio → Claude vision
 // ─────────────────────────────────────────
 
 app.post('/api/clone', async (req, res) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-'));
+
   try {
     const { videoUrl } = req.body;
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
@@ -132,65 +139,106 @@ app.post('/api/clone', async (req, res) => {
     const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
     if (!ANTHROPIC_API_KEY) return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY not configured' });
 
-    const systemPrompt = `You are an expert AI video director specialising in replicating viral short-form videos with AI-generated influencer characters.
-Analyse a viral video and produce a single detailed Wan 2.6 text-to-video prompt that clones the exact visual style, scene, camera work, lighting, and energy — with [INFLUENCER] as the subject.
-Always respond with valid JSON only. No markdown, no explanation outside the JSON.`;
+    // 1. Download video
+    const videoPath = path.join(tmpDir, 'video.mp4');
+    const videoRes = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 200 * 1024 * 1024 });
+    fs.writeFileSync(videoPath, Buffer.from(videoRes.data));
 
-    const userPrompt = `Analyse this viral video URL and clone it: ${videoUrl}
+    // 2. Probe duration
+    const duration = await new Promise((resolve) => {
+      ffmpeg.ffprobe(videoPath, (err, meta) => resolve(err ? 15 : (meta?.format?.duration || 15)));
+    });
 
-Return a JSON object with exactly these fields:
-{
-  "transcript": "verbatim transcript if speech present, otherwise describe the visual narrative beat by beat",
-  "metadata": {
-    "duration": "estimated duration as a string e.g. '15s'",
-    "frameCount": 0,
-    "hasAudio": true
-  },
-  "scene_analysis": {
-    "setting": "precise environment — indoors/outdoors, location type, background details",
-    "lighting": "lighting type, direction, quality, colour temperature",
-    "camera": "shot type, angle, movement, framing",
-    "subject_action": "what the subject is doing — movement, gestures, energy level",
-    "colour_grade": "colour palette and mood",
-    "editing_style": "pacing — fast cuts/slow/single take, notable transitions"
-  },
-  "clone_prompt": "A single complete ready-to-use Wan 2.6 video generation prompt that clones every visual element of the original — setting, lighting, camera angle and movement, colour grade, energy — but replaces the original subject with [INFLUENCER]. Must be detailed enough to generate immediately. Use present tense. Start with the shot type and camera movement."
-}`;
+    // 3. Extract 6 frames evenly distributed
+    const framesDir = path.join(tmpDir, 'frames');
+    fs.mkdirSync(framesDir);
+    const timestamps = Array.from({ length: 6 }, (_, i) => Math.max(0.1, (duration / 7) * (i + 1)));
+
+    await Promise.all(timestamps.map((ts, i) =>
+      new Promise((resolve, reject) => {
+        ffmpeg(videoPath)
+          .seekInput(ts)
+          .outputOptions(['-vframes 1', '-q:v 3'])
+          .output(path.join(framesDir, `frame-${i}.jpg`))
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      })
+    ));
+
+    const frameFiles = fs.readdirSync(framesDir).sort();
+    const frameDataUrls = frameFiles.map(f => {
+      const b64 = fs.readFileSync(path.join(framesDir, f)).toString('base64');
+      return `data:image/jpeg;base64,${b64}`;
+    });
+    const frameBase64s = frameFiles.map(f => fs.readFileSync(path.join(framesDir, f)).toString('base64'));
+
+    // 4. Transcribe audio with Whisper (skip gracefully if no key)
+    let transcript = '';
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (OPENAI_API_KEY) {
+      try {
+        const audioPath = path.join(tmpDir, 'audio.mp3');
+        await new Promise((resolve, reject) => {
+          ffmpeg(videoPath)
+            .noVideo()
+            .audioCodec('libmp3lame')
+            .audioBitrate('64k')
+            .output(audioPath)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
+        });
+
+        if (fs.existsSync(audioPath) && fs.statSync(audioPath).size > 1000) {
+          const form = new FormData();
+          form.append('file', fs.createReadStream(audioPath), { filename: 'audio.mp3', contentType: 'audio/mpeg' });
+          form.append('model', 'whisper-1');
+          const whisperRes = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
+            headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...form.getHeaders() },
+            timeout: 60000
+          });
+          transcript = whisperRes.data?.text || '';
+        }
+      } catch (_) { /* transcription optional */ }
+    }
+
+    // 5. Send frames + transcript to Claude vision
+    const imageContent = frameBase64s.map(b64 => ({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/jpeg', data: b64 }
+    }));
+
+    const userText = transcript
+      ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the Wan 2.6 prompt.`
+      : `These ${frameBase64s.length} frames were extracted from the viral video (no audio). Create the Wan 2.6 prompt.`;
 
     const claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
       model: 'claude-sonnet-4-6',
-      max_tokens: 2000,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }]
+      max_tokens: 1000,
+      system: 'You are a video director. Study these frames and transcript carefully and create a Wan 2.6 prompt that recreates this EXACT video 1:1 — same scene, camera angle, lighting, composition, energy, movement, clothing style. Replace the original creator with [INFLUENCER]. Return only the Wan 2.6 prompt text, no JSON, no explanation.',
+      messages: [{ role: 'user', content: [...imageContent, { type: 'text', text: userText }] }]
     }, {
       headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
     });
 
-    const rawText = claudeResponse.data?.content?.[0]?.text || '';
-    if (!rawText) return res.status(500).json({ success: false, error: 'Empty response from Claude' });
-
-    let parsed;
-    try {
-      let jsonStr = rawText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
-      const m = jsonStr.match(/\{[\s\S]*\}/);
-      if (m) jsonStr = m[0];
-      parsed = JSON.parse(jsonStr);
-    } catch (e) {
-      return res.status(500).json({ success: false, error: 'Failed to parse response: ' + e.message });
-    }
+    const clonePrompt = claudeResponse.data?.content?.[0]?.text?.trim() || '';
+    if (!clonePrompt) return res.status(500).json({ success: false, error: 'Empty response from Claude' });
 
     res.json({
       success: true,
-      frames: [],
-      transcript: parsed.transcript || '',
-      metadata: parsed.metadata || { duration: '~15s', frameCount: 0, hasAudio: false },
-      clonePrompt: parsed.clone_prompt || ''
+      frames: frameDataUrls,
+      transcript,
+      metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
+      clonePrompt
     });
 
   } catch (err) {
     const status = err.response?.status || 500;
     const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
     res.status(status).json({ success: false, error: message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
   }
 });
 
