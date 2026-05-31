@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 // ─────────────────────────────────────────
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.0.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.0.1', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
