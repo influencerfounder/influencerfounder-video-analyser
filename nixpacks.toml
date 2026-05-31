@@ -3,3 +3,4 @@ nixPkgs = ["ffmpeg"]
 
 [start]
 cmd = "node index.js"
+
