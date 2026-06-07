@@ -178,6 +178,25 @@ app.post('/api/clone', async (req, res) => {
     });
     const frameBase64s = frameFiles.map(f => fs.readFileSync(path.join(framesDir, f)).toString('base64'));
 
+    // 3b. Extract the TRUE opening frame (t≈0) separately — distinct from the
+    // 6 evenly-spaced samples above, which start at duration/7 (~14% in) and
+    // can land on a different scene than the video's actual opening shot.
+    let firstFrameUrl = '';
+    try {
+      const firstFramePath = path.join(framesDir, 'frame-opening.jpg');
+      await new Promise((resolve, reject) => {
+        ffmpeg(videoPath)
+          .seekInput(0.1)
+          .outputOptions(['-vframes 1', '-q:v 3'])
+          .output(firstFramePath)
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
+      const openingB64 = fs.readFileSync(firstFramePath).toString('base64');
+      firstFrameUrl = `data:image/jpeg;base64,${openingB64}`;
+    } catch (_) { /* fall back to frames[0] on the client if this fails */ }
+
     // 4. Transcribe audio with Whisper (skip gracefully if no key)
     let transcript = '';
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -233,6 +252,7 @@ app.post('/api/clone', async (req, res) => {
     res.json({
       success: true,
       frames: frameDataUrls,
+      firstFrameUrl: firstFrameUrl || frameDataUrls[0] || '',
       transcript,
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
       clonePrompt
