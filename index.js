@@ -28,6 +28,14 @@ app.use((req, res, next) => {
 // HEALTH CHECK
 // ─────────────────────────────────────────
 
+// Log yt-dlp availability on startup
+const { execSync } = require('child_process');
+try {
+  const ytDlpPath = execSync('which yt-dlp 2>/dev/null || echo "NOT FOUND"', { encoding: 'utf8' }).trim();
+  const ytDlpVer  = execSync('yt-dlp --version 2>/dev/null || echo "N/A"', { encoding: 'utf8' }).trim();
+  console.log(`[startup] yt-dlp: ${ytDlpPath} (${ytDlpVer})`);
+} catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
+
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.1.0', timestamp: new Date().toISOString() });
 });
@@ -150,17 +158,22 @@ app.post('/api/clone', async (req, res) => {
     const isPermalink = /instagram\.com\/(p|reel|reels)\/|tiktok\.com\/@[^/]+\/video\/|tiktok\.com\/t\//.test(videoUrl);
 
     if (isPermalink) {
-      // Use yt-dlp system binary (installed via nixpacks.toml) — no Python/npm needed
+      // Use yt-dlp — try common install paths
+      const { execFile, execSync } = require('child_process');
+      let ytDlpBin = 'yt-dlp';
+      try {
+        ytDlpBin = execSync('which yt-dlp || echo /usr/local/bin/yt-dlp', { encoding: 'utf8' }).trim().split('\n')[0];
+      } catch(_) {}
+
       await new Promise((resolve, reject) => {
-        const { execFile } = require('child_process');
-        execFile('yt-dlp', [
+        execFile(ytDlpBin, [
           '-o', videoPath,
           '-f', 'mp4/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
           '--no-playlist',
           '--quiet',
           '--no-warnings',
           videoUrl,
-        ], { timeout: 60000 }, (err, stdout, stderr) => {
+        ], { timeout: 90000 }, (err, stdout, stderr) => {
           if (err) return reject(new Error('yt-dlp failed: ' + (stderr || err.message)));
           resolve();
         });
