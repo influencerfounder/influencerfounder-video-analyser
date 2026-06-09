@@ -146,7 +146,34 @@ app.post('/api/clone', async (req, res) => {
 
     // 1. Download video
     const videoPath = path.join(tmpDir, 'video.mp4');
-    const videoRes = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 200 * 1024 * 1024 });
+
+    // Reject Instagram/TikTok public permalink URLs upfront — they redirect to HTML login pages
+    const isPermalink = /instagram\.com\/(p|reel|reels)\/|tiktok\.com\/@[^/]+\/video\//.test(videoUrl);
+    if (isPermalink) {
+      return res.status(400).json({
+        success: false,
+        error: 'Instagram and TikTok public URLs cannot be downloaded directly — please download the video file first and upload it, or paste a direct CDN video URL.'
+      });
+    }
+
+    const videoRes = await axios.get(videoUrl, {
+      responseType: 'arraybuffer',
+      timeout: 60000,
+      maxContentLength: 200 * 1024 * 1024,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; bot)' }
+    });
+
+    // Check the response is actually a video, not an HTML error page
+    const contentType = videoRes.headers['content-type'] || '';
+    const firstBytes = Buffer.from(videoRes.data).slice(0, 20).toString('latin1');
+    const isHtml = contentType.includes('text/html') || firstBytes.startsWith('<!') || firstBytes.startsWith('<h');
+    if (isHtml) {
+      return res.status(400).json({
+        success: false,
+        error: 'URL returned an HTML page instead of a video file. Please download the video and upload it directly.'
+      });
+    }
+
     fs.writeFileSync(videoPath, Buffer.from(videoRes.data));
 
     // 2. Probe duration
