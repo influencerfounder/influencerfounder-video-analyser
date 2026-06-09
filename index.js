@@ -150,14 +150,20 @@ app.post('/api/clone', async (req, res) => {
     const isPermalink = /instagram\.com\/(p|reel|reels)\/|tiktok\.com\/@[^/]+\/video\/|tiktok\.com\/t\//.test(videoUrl);
 
     if (isPermalink) {
-      // Use yt-dlp to download Instagram/TikTok URLs — handles auth headers automatically
-      const ytDlp = require('yt-dlp-exec');
-      await ytDlp(videoUrl, {
-        output: videoPath,
-        format: 'mp4/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        noPlaylist: true,
-        quiet: true,
-        noWarnings: true,
+      // Use yt-dlp system binary (installed via nixpacks.toml) — no Python/npm needed
+      await new Promise((resolve, reject) => {
+        const { execFile } = require('child_process');
+        execFile('yt-dlp', [
+          '-o', videoPath,
+          '-f', 'mp4/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+          '--no-playlist',
+          '--quiet',
+          '--no-warnings',
+          videoUrl,
+        ], { timeout: 60000 }, (err, stdout, stderr) => {
+          if (err) return reject(new Error('yt-dlp failed: ' + (stderr || err.message)));
+          resolve();
+        });
       });
       if (!fs.existsSync(videoPath) || fs.statSync(videoPath).size < 1000) {
         return res.status(400).json({ success: false, error: 'Could not download video from this URL. The post may be private or the link may have expired.' });
