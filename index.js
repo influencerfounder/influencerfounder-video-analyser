@@ -154,22 +154,30 @@ app.post('/api/clone', async (req, res) => {
       ffmpeg.ffprobe(videoPath, (err, meta) => resolve(err ? 15 : (meta?.format?.duration || 15)));
     });
 
-    // 3. Extract 6 frames evenly distributed
+    // 3. Extract 6 frames evenly distributed — SEQUENTIAL to avoid parallel memory spike
+    // (Promise.all spawned 6 ffmpeg processes at once; Railway killed with SIGKILL on OOM)
     const framesDir = path.join(tmpDir, 'frames');
     fs.mkdirSync(framesDir);
     const timestamps = Array.from({ length: 6 }, (_, i) => Math.max(0.1, (duration / 7) * (i + 1)));
 
-    await Promise.all(timestamps.map((ts, i) =>
-      new Promise((resolve, reject) => {
-        ffmpeg(videoPath)
-          .seekInput(ts)
-          .outputOptions(['-vframes 1', '-q:v 3'])
-          .output(path.join(framesDir, `frame-${i}.jpg`))
-          .on('end', resolve)
-          .on('error', reject)
-          .run();
-      })
-    ));
+    const extractFrame = (ts, outPath) => new Promise((resolve, reject) => {
+      ffmpeg(videoPath)
+        .seekInput(ts)
+        .outputOptions([
+          '-vframes 1',
+          '-q:v 5',           // slightly lower quality = smaller file, less memory
+          '-vf scale=640:-1', // cap width at 640px — Claude vision doesn't need full res
+          '-threads 1'        // single-threaded = predictable low RAM per ffmpeg call
+        ])
+        .output(outPath)
+        .on('end', resolve)
+        .on('error', reject)
+        .run();
+    });
+
+    for (let i = 0; i < timestamps.length; i++) {
+      await extractFrame(timestamps[i], path.join(framesDir, `frame-${i}.jpg`));
+    }
 
     const frameFiles = fs.readdirSync(framesDir).sort();
     const frameDataUrls = frameFiles.map(f => {
@@ -178,21 +186,11 @@ app.post('/api/clone', async (req, res) => {
     });
     const frameBase64s = frameFiles.map(f => fs.readFileSync(path.join(framesDir, f)).toString('base64'));
 
-    // 3b. Extract the TRUE opening frame (t≈0) separately — distinct from the
-    // 6 evenly-spaced samples above, which start at duration/7 (~14% in) and
-    // can land on a different scene than the video's actual opening shot.
+    // 3b. Extract the TRUE opening frame (t≈0) separately — sequential, same low-mem options
     let firstFrameUrl = '';
     try {
       const firstFramePath = path.join(framesDir, 'frame-opening.jpg');
-      await new Promise((resolve, reject) => {
-        ffmpeg(videoPath)
-          .seekInput(0.1)
-          .outputOptions(['-vframes 1', '-q:v 3'])
-          .output(firstFramePath)
-          .on('end', resolve)
-          .on('error', reject)
-          .run();
-      });
+      await extractFrame(0.1, firstFramePath);
       const openingB64 = fs.readFileSync(firstFramePath).toString('base64');
       firstFrameUrl = `data:image/jpeg;base64,${openingB64}`;
     } catch (_) { /* fall back to frames[0] on the client if this fails */ }
