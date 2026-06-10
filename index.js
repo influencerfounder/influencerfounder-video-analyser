@@ -203,11 +203,12 @@ app.post('/api/clone', async (req, res) => {
       ffmpeg.ffprobe(videoPath, (err, meta) => resolve(err ? 15 : (meta?.format?.duration || 15)));
     });
 
-    // 3. Extract 6 frames evenly distributed — SEQUENTIAL to avoid parallel memory spike
-    // (Promise.all spawned 6 ffmpeg processes at once; Railway killed with SIGKILL on OOM)
+    // 3. Extract 10 frames evenly distributed — SEQUENTIAL to avoid parallel memory spike
+    // (Promise.all spawned several ffmpeg processes at once; Railway killed with SIGKILL on OOM)
     const framesDir = path.join(tmpDir, 'frames');
     fs.mkdirSync(framesDir);
-    const timestamps = Array.from({ length: 6 }, (_, i) => Math.max(0.1, (duration / 7) * (i + 1)));
+    const FRAME_COUNT = 10;
+    const timestamps = Array.from({ length: FRAME_COUNT }, (_, i) => Math.max(0.1, (duration / (FRAME_COUNT + 1)) * (i + 1)));
 
     const extractFrame = (ts, outPath) => new Promise((resolve, reject) => {
       ffmpeg(videoPath)
