@@ -203,12 +203,16 @@ app.post('/api/clone', async (req, res) => {
       ffmpeg.ffprobe(videoPath, (err, meta) => resolve(err ? 15 : (meta?.format?.duration || 15)));
     });
 
-    // 3. Extract 16 frames evenly distributed — SEQUENTIAL to avoid parallel memory spike
-    // (Promise.all spawned several ffmpeg processes at once; Railway killed with SIGKILL on OOM)
+    // 3. Extract frames — duration-aware budget (8-12 frames), single-pass fps extraction.
+    // Mirrors the /watch skill's auto-fps approach (short clips get denser sampling per
+    // second, longer clips are capped) but capped lower (max 12) since every frame is
+    // shown as a clickable thumbnail in the Recreate tab's frame picker — 40 thumbnails
+    // for a 60s video would be unusable. One ffmpeg pass covers the whole clip instead
+    // of N sequential seeks (faster + lower memory).
     const framesDir = path.join(tmpDir, 'frames');
     fs.mkdirSync(framesDir);
-    const FRAME_COUNT = 16;
-    const timestamps = Array.from({ length: FRAME_COUNT }, (_, i) => Math.max(0.1, (duration / (FRAME_COUNT + 1)) * (i + 1)));
+    const FRAME_COUNT = Math.max(8, Math.min(12, Math.round(duration)));
+    const fps = Math.min(2.0, FRAME_COUNT / Math.max(duration, 0.1));
 
     const extractFrame = (ts, outPath) => new Promise((resolve, reject) => {
       ffmpeg(videoPath)
@@ -225,9 +229,19 @@ app.post('/api/clone', async (req, res) => {
         .run();
     });
 
-    for (let i = 0; i < timestamps.length; i++) {
-      await extractFrame(timestamps[i], path.join(framesDir, `frame-${String(i).padStart(2, '0')}.jpg`));
-    }
+    await new Promise((resolve, reject) => {
+      ffmpeg(videoPath)
+        .outputOptions([
+          `-vf fps=${fps},scale=640:-1`,
+          '-frames:v', String(FRAME_COUNT),
+          '-q:v 5',
+          '-threads 1'
+        ])
+        .output(path.join(framesDir, 'frame-%02d.jpg'))
+        .on('end', resolve)
+        .on('error', reject)
+        .run();
+    });
 
     const frameFiles = fs.readdirSync(framesDir).sort();
     const frameDataUrls = frameFiles.map(f => {
