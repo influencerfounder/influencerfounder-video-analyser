@@ -203,16 +203,19 @@ app.post('/api/clone', async (req, res) => {
       ffmpeg.ffprobe(videoPath, (err, meta) => resolve(err ? 15 : (meta?.format?.duration || 15)));
     });
 
-    // 3. Extract frames — duration-aware budget (8-12 frames), single-pass fps extraction.
-    // Mirrors the /watch skill's auto-fps approach (short clips get denser sampling per
-    // second, longer clips are capped) but capped lower (max 12) since every frame is
-    // shown as a clickable thumbnail in the Recreate tab's frame picker — 40 thumbnails
-    // for a 60s video would be unusable. One ffmpeg pass covers the whole clip instead
-    // of N sequential seeks (faster + lower memory).
+    // 3. Extract frames for Claude's analysis — SAME duration-based budget as the /watch
+    // skill's auto_fps (short clips sampled densely, long clips capped at 80, single-pass
+    // fps extraction):
+    //   <=30s -> max(12, round(duration))   (e.g. 7s -> 12, 25s -> 25)
+    //   <=60s -> 40   |   <=180s -> 60   |   <=600s -> 80   |   >600s -> 80
     const framesDir = path.join(tmpDir, 'frames');
     fs.mkdirSync(framesDir);
-    const FRAME_COUNT = Math.max(8, Math.min(12, Math.round(duration)));
-    const fps = Math.min(2.0, FRAME_COUNT / Math.max(duration, 0.1));
+    const ANALYSIS_FRAME_COUNT =
+      duration <= 30  ? Math.max(12, Math.round(duration)) :
+      duration <= 60  ? 40 :
+      duration <= 180 ? 60 :
+      80;
+    const fps = Math.min(2.0, ANALYSIS_FRAME_COUNT / Math.max(duration, 0.1));
 
     const extractFrame = (ts, outPath) => new Promise((resolve, reject) => {
       ffmpeg(videoPath)
@@ -233,22 +236,38 @@ app.post('/api/clone', async (req, res) => {
       ffmpeg(videoPath)
         .outputOptions([
           `-vf fps=${fps},scale=640:-1`,
-          '-frames:v', String(FRAME_COUNT),
+          '-frames:v', String(ANALYSIS_FRAME_COUNT),
           '-q:v 5',
           '-threads 1'
         ])
-        .output(path.join(framesDir, 'frame-%02d.jpg'))
+        .output(path.join(framesDir, 'frame-%03d.jpg'))
         .on('end', resolve)
         .on('error', reject)
         .run();
     });
 
     const frameFiles = fs.readdirSync(framesDir).sort();
-    const frameDataUrls = frameFiles.map(f => {
+
+    // Claude vision gets ALL extracted analysis frames (up to 80) for a thorough read.
+    const frameBase64s = frameFiles.map(f => fs.readFileSync(path.join(framesDir, f)).toString('base64'));
+
+    // The frame PICKER (clickable thumbnails in the Recreate tab) is capped at 12 —
+    // showing all 80 thumbnails for a long video would be unusable. Evenly sample
+    // up to 12 frames across the full analysis set so the picker still spans the
+    // whole clip.
+    const PICKER_MAX = 12;
+    let pickerFiles = frameFiles;
+    if (frameFiles.length > PICKER_MAX) {
+      const picked = new Set();
+      for (let i = 0; i < PICKER_MAX; i++) {
+        picked.add(frameFiles[Math.round(i * (frameFiles.length - 1) / (PICKER_MAX - 1))]);
+      }
+      pickerFiles = frameFiles.filter(f => picked.has(f));
+    }
+    const frameDataUrls = pickerFiles.map(f => {
       const b64 = fs.readFileSync(path.join(framesDir, f)).toString('base64');
       return `data:image/jpeg;base64,${b64}`;
     });
-    const frameBase64s = frameFiles.map(f => fs.readFileSync(path.join(framesDir, f)).toString('base64'));
 
     // 3b. Extract the TRUE opening frame (t≈0) separately — sequential, same low-mem options
     let firstFrameUrl = '';
