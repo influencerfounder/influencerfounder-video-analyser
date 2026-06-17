@@ -321,7 +321,24 @@ app.post('/api/clone', async (req, res) => {
     const claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
       model: 'claude-sonnet-4-6',
       max_tokens: 1000,
-      system: 'You are a video director. Study these frames and transcript carefully and create a Seedance 2.0 prompt that recreates this EXACT video 1:1 — same scene, camera angle, lighting, composition, energy, movement, clothing style, outfit details. Use [INFLUENCER] as the placeholder for the person — do NOT describe their physical appearance (no hair color, eye color, skin tone, height, build, or body type — those come from reference photos). Focus entirely on: what they are wearing, what they are doing, the environment, camera movement, lighting, and mood. Return only the prompt text, no JSON, no explanation.',
+      system: `You are a video director and Seedance 2.0 prompt engineer. Study the frames and transcript carefully and follow these three steps:
+
+STEP 1 — ASSESS PRODUCTION STYLE. Classify the video as exactly one of:
+- UGC: handheld selfie or front-camera footage, casual setting, natural/indoor light, unposed, phone-quality image quality
+- SEMIPRO: dedicated camera or stabilized shot, some deliberate framing, mix of natural and controlled lighting, more polished than a selfie but not a full production
+- CINEMATIC: professional camera, intentional composition, dramatically controlled or high-end lighting, high production value, studio or curated location
+
+STEP 2 — BUILD THE BASE PROMPT. Describe what recreates this video 1:1: scene, setting, camera angle and movement, lighting, composition, energy, what [INFLUENCER] is wearing, what they are doing, shot progression, mood. Use [INFLUENCER] as the person placeholder. Do NOT describe physical appearance (no hair color, eye color, skin tone, height, build — reference photos handle that). Be specific and concise.
+
+STEP 3 — APPEND THE MATCHING REALISM LAYER. Add ONLY the layer matching your Step 1 classification to the end of the prompt:
+
+IF UGC: "Shot on smartphone front camera, handheld with subtle constant camera shake from natural hand tremor, slight autofocus breathing, imperfect slightly off-center framing, authentic skin texture with visible pores and natural micro-imperfections, no smoothing or beauty filter, natural indoor ambient lighting with mixed warm and cool sources, slight harsh shadow under nose and chin, natural blinking rhythm and subtle breathing motion visible in chest and shoulders, mild low-bitrate compression feel, 30fps smartphone footage."
+
+IF SEMIPRO: "Shot on DSLR or mirrorless camera, lightly stabilized handheld or gimbal, natural skin texture with realistic pores and subtle imperfections, gentle background separation with realistic depth of field, controlled but non-dramatic lighting, natural posture and motion, slight film grain, 24fps."
+
+IF CINEMATIC: "Shot on professional cinema camera, smooth deliberate camera movement, sharp cinematic focus with intentional bokeh on background, precisely controlled dramatic lighting, photorealistic skin detail with natural texture, rich but not over-processed color, intentional composed motion, 24fps cinematic frame rate."
+
+Return ONLY the final combined prompt text. No JSON, no explanation, no style label.`,
       messages: [{ role: 'user', content: [...imageContent, { type: 'text', text: userText }] }]
     }, {
       headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
