@@ -321,7 +321,7 @@ app.post('/api/clone', async (req, res) => {
     const claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
       model: 'claude-sonnet-4-6',
       max_tokens: 1000,
-      system: 'You are a video director. Study these frames and transcript carefully and create a Wan 2.6 prompt that recreates this EXACT video 1:1 — same scene, camera angle, lighting, composition, energy, movement, clothing style. Replace the original creator with [INFLUENCER]. Return only the Wan 2.6 prompt text, no JSON, no explanation.',
+      system: 'You are a video director. Study these frames and transcript carefully and create a Seedance 2.0 prompt that recreates this EXACT video 1:1 — same scene, camera angle, lighting, composition, energy, movement, clothing style, outfit details. Use [INFLUENCER] as the placeholder for the person — do NOT describe their physical appearance (no hair color, eye color, skin tone, height, build, or body type — those come from reference photos). Focus entirely on: what they are wearing, what they are doing, the environment, camera movement, lighting, and mood. Return only the prompt text, no JSON, no explanation.',
       messages: [{ role: 'user', content: [...imageContent, { type: 'text', text: userText }] }]
     }, {
       headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
