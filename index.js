@@ -375,6 +375,154 @@ Return ONLY the final combined prompt text. No JSON, no explanation, no style la
 });
 
 // ─────────────────────────────────────────
+// FACE SWAP — frame-by-frame identity lock
+// ─────────────────────────────────────────
+
+const { execFile } = require('child_process');
+const PYTHON = '/opt/venv/bin/python3';
+const FACESWAP_SCRIPT = path.join(__dirname, 'faceswap.py');
+
+// In-memory job store (Railway is long-running, not serverless)
+const faceswapJobs = new Map(); // jobId -> { status, videoPath, error, createdAt }
+
+function cleanOldJobs() {
+  const cutoff = Date.now() - 60 * 60 * 1000; // 1 hour
+  for (const [id, job] of faceswapJobs) {
+    if (job.createdAt < cutoff) {
+      if (job.tmpDir) try { fs.rmSync(job.tmpDir, { recursive: true, force: true }); } catch (_) {}
+      faceswapJobs.delete(id);
+    }
+  }
+}
+
+async function runFaceswap(jobId, videoUrl, faceUrl) {
+  const job = faceswapJobs.get(jobId);
+  const tmpDir = path.join(os.tmpdir(), `faceswap_${jobId}`);
+  job.tmpDir = tmpDir;
+
+  try {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const videoPath  = path.join(tmpDir, 'input.mp4');
+    const facePath   = path.join(tmpDir, 'face.jpg');
+    const framesDir  = path.join(tmpDir, 'frames');
+    const swappedDir = path.join(tmpDir, 'swapped');
+    const outputPath = path.join(tmpDir, 'output.mp4');
+    fs.mkdirSync(framesDir, { recursive: true });
+    fs.mkdirSync(swappedDir, { recursive: true });
+
+    // 1. Download video + face image
+    job.step = 'downloading';
+    console.log(`[faceswap:${jobId}] downloading video...`);
+    const [vidResp, faceResp] = await Promise.all([
+      axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 60000 }),
+      axios.get(faceUrl,  { responseType: 'arraybuffer', timeout: 30000 }),
+    ]);
+    fs.writeFileSync(videoPath, vidResp.data);
+    fs.writeFileSync(facePath,  faceResp.data);
+    console.log(`[faceswap:${jobId}] downloaded. video=${(vidResp.data.byteLength/1024).toFixed(0)}KB`);
+
+    // 2. Extract frames at 24fps
+    job.step = 'extracting_frames';
+    console.log(`[faceswap:${jobId}] extracting frames...`);
+    await new Promise((resolve, reject) => {
+      ffmpeg(videoPath)
+        .outputOptions(['-vf', 'fps=24,scale=iw:ih', '-q:v', '2'])
+        .output(path.join(framesDir, 'frame_%04d.jpg'))
+        .on('end', resolve)
+        .on('error', reject)
+        .run();
+    });
+    const frameCount = fs.readdirSync(framesDir).length;
+    console.log(`[faceswap:${jobId}] extracted ${frameCount} frames`);
+
+    // 3. Python face swap
+    job.step = 'swapping_faces';
+    job.frameCount = frameCount;
+    console.log(`[faceswap:${jobId}] running InsightFace on ${frameCount} frames...`);
+    await new Promise((resolve, reject) => {
+      const py = execFile(PYTHON, [FACESWAP_SCRIPT, facePath, framesDir, swappedDir], { timeout: 10 * 60 * 1000 });
+      py.stderr.on('data', d => process.stdout.write(d));
+      py.stdout.on('data', d => process.stdout.write(d));
+      py.on('close', code => code === 0 ? resolve() : reject(new Error(`faceswap.py exited ${code}`)));
+    });
+    console.log(`[faceswap:${jobId}] face swap complete`);
+
+    // 4. Reassemble video with original audio
+    job.step = 'reassembling';
+    console.log(`[faceswap:${jobId}] reassembling video...`);
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(path.join(swappedDir, 'frame_%04d.jpg')).inputFPS(24)
+        .input(videoPath)
+        .outputOptions(['-map', '0:v:0', '-map', '1:a:0?', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', '-movflags', '+faststart'])
+        .output(outputPath)
+        .on('end', resolve)
+        .on('error', (err) => {
+          // Try without audio if audio stream missing
+          ffmpeg()
+            .input(path.join(swappedDir, 'frame_%04d.jpg')).inputFPS(24)
+            .outputOptions(['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart'])
+            .output(outputPath)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
+        })
+        .run();
+    });
+    console.log(`[faceswap:${jobId}] reassembly done`);
+
+    job.status = 'done';
+    job.videoPath = outputPath;
+    console.log(`[faceswap:${jobId}] ✅ complete`);
+
+  } catch (err) {
+    console.error(`[faceswap:${jobId}] ❌ error:`, err.message);
+    job.status = 'error';
+    job.error = err.message;
+  }
+}
+
+// POST /api/faceswap — start async face swap job
+app.post('/api/faceswap', async (req, res) => {
+  cleanOldJobs();
+  const { videoUrl, faceUrl } = req.body;
+  if (!videoUrl || !faceUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl or faceUrl' });
+
+  const jobId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  faceswapJobs.set(jobId, { status: 'processing', step: 'queued', createdAt: Date.now() });
+
+  // Run async — don't await
+  runFaceswap(jobId, videoUrl, faceUrl).catch(() => {});
+
+  res.json({ success: true, jobId });
+});
+
+// GET /api/faceswap/status/:jobId
+app.get('/api/faceswap/status/:jobId', (req, res) => {
+  const job = faceswapJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ success: false, error: 'Job not found' });
+  res.json({
+    success: true,
+    status: job.status,   // 'processing' | 'done' | 'error'
+    step: job.step,
+    frameCount: job.frameCount,
+    error: job.error || null,
+  });
+});
+
+// GET /api/faceswap/download/:jobId — serve the processed video
+app.get('/api/faceswap/download/:jobId', (req, res) => {
+  const job = faceswapJobs.get(req.params.jobId);
+  if (!job || job.status !== 'done' || !job.videoPath) {
+    return res.status(404).json({ success: false, error: 'Video not ready' });
+  }
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Disposition', 'attachment; filename="faceswap_output.mp4"');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  fs.createReadStream(job.videoPath).pipe(res);
+});
+
+// ─────────────────────────────────────────
 // START
 // ─────────────────────────────────────────
 
