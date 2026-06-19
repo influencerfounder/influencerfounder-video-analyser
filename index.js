@@ -523,6 +523,69 @@ app.get('/api/faceswap/download/:jobId', (req, res) => {
 });
 
 // ─────────────────────────────────────────
+// TEMP VIDEO HOST — download & serve for fal.ai video_urls
+// ─────────────────────────────────────────
+
+const tempVideos = new Map(); // token -> { filePath, createdAt }
+
+function cleanOldTempVideos() {
+  const cutoff = Date.now() - 30 * 60 * 1000; // 30 min TTL
+  for (const [token, v] of tempVideos) {
+    if (v.createdAt < cutoff) {
+      try { fs.unlinkSync(v.filePath); } catch (_) {}
+      tempVideos.delete(token);
+    }
+  }
+}
+
+// POST /api/temp-video — download video via yt-dlp, return a public URL fal.ai can fetch
+app.post('/api/temp-video', async (req, res) => {
+  cleanOldTempVideos();
+  const { videoUrl } = req.body;
+  if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+
+  const token = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+
+  try {
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const execFileAsync = promisify(execFile);
+
+    // Find yt-dlp binary
+    let ytDlpPath;
+    try { ytDlpPath = (await execFileAsync('which', ['yt-dlp'])).stdout.trim(); } catch (_) { ytDlpPath = '/usr/local/bin/yt-dlp'; }
+
+    console.log(`[tempvid:${token}] downloading: ${videoUrl.slice(0, 60)}`);
+    await execFileAsync(ytDlpPath, [
+      '--no-playlist', '-f', 'mp4/best[height<=720]', '--merge-output-format', 'mp4',
+      '-o', outputPath, videoUrl,
+    ], { timeout: 120000 });
+
+    if (!fs.existsSync(outputPath)) throw new Error('yt-dlp download produced no output file');
+    const stat = fs.statSync(outputPath);
+    console.log(`[tempvid:${token}] downloaded: ${Math.round(stat.size / 1024)}KB`);
+
+    tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
+    const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
+    res.json({ success: true, videoUrl: publicUrl, token });
+  } catch (err) {
+    try { fs.unlinkSync(outputPath); } catch (_) {}
+    console.error(`[tempvid:${token}] error:`, err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/temp-video/:token — serve the downloaded video
+app.get('/api/temp-video/:token', (req, res) => {
+  const v = tempVideos.get(req.params.token);
+  if (!v || !fs.existsSync(v.filePath)) return res.status(404).json({ error: 'Video not found or expired' });
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  fs.createReadStream(v.filePath).pipe(res);
+});
+
+// ─────────────────────────────────────────
 // START
 // ─────────────────────────────────────────
 
