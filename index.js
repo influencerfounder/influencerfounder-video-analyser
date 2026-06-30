@@ -614,6 +614,142 @@ app.get('/api/temp-video/:token', (req, res) => {
 });
 
 // ─────────────────────────────────────────
+// AUTO CAPTIONS — burns Instagram-style word-timed subtitles onto a
+// talking-head video. Mike-only feature (gated on the Vercel side) — the
+// Whisper transcription call has a real per-use cost, so this endpoint
+// itself stays ungated (simple, stateless) and the caller is responsible
+// for deciding who gets to use it.
+// ─────────────────────────────────────────
+
+const CAPTION_FONT_PATH = path.join(__dirname, 'assets', 'fonts', 'Caption-Bold.ttf');
+
+// ffmpeg drawtext text= values need specific characters escaped or the
+// filter string parser breaks (colons separate filter options, backslashes
+// and quotes have their own meaning). Order matters — escape backslashes first.
+function escapeDrawtext(text) {
+  return String(text)
+    .replace(/\\/g, '\\\\\\\\')
+    .replace(/:/g, '\\:')
+    .replace(/'/g, "\\'")
+    .replace(/%/g, '\\%');
+}
+
+async function getVideoDimensions(videoPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(videoPath, (err, meta) => {
+      if (err) return reject(err);
+      const stream = meta.streams.find(s => s.codec_type === 'video');
+      if (!stream) return reject(new Error('No video stream found'));
+      resolve({ width: stream.width, height: stream.height });
+    });
+  });
+}
+
+// Groups Whisper's word-level timestamps into 2-3 word caption chunks.
+function groupWordsIntoChunks(words, groupSize = 3) {
+  const chunks = [];
+  for (let i = 0; i < words.length; i += groupSize) {
+    const group = words.slice(i, i + groupSize);
+    if (!group.length) continue;
+    chunks.push({
+      text: group.map(w => w.word.trim()).join(' '),
+      start: group[0].start,
+      end: group[group.length - 1].end
+    });
+  }
+  return chunks;
+}
+
+app.post('/api/burn-captions', async (req, res) => {
+  const { videoUrl, scriptText } = req.body;
+  if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+
+  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+  if (!OPENAI_API_KEY) return res.status(500).json({ success: false, error: 'OPENAI_API_KEY not configured' });
+
+  const token = `cap_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'captions-'));
+  const videoPath = path.join(tmpDir, 'input.mp4');
+  const audioPath = path.join(tmpDir, 'audio.mp3');
+  const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+
+  try {
+    // 1. Download the source video
+    const videoRes = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 60000 });
+    fs.writeFileSync(videoPath, Buffer.from(videoRes.data));
+
+    const { width, height } = await getVideoDimensions(videoPath);
+
+    // 2. Extract audio for transcription
+    await new Promise((resolve, reject) => {
+      ffmpeg(videoPath)
+        .noVideo()
+        .audioCodec('libmp3lame')
+        .audioBitrate('64k')
+        .output(audioPath)
+        .on('end', resolve)
+        .on('error', reject)
+        .run();
+    });
+
+    // 3. Whisper with word-level timestamps — works regardless of which TTS
+    // engine produced the voice, so it's one uniform path for all 3 talking-
+    // head engines (InfiniteTalk / Kling Avatar / OmniHuman).
+    const form = new FormData();
+    form.append('file', fs.createReadStream(audioPath), { filename: 'audio.mp3', contentType: 'audio/mpeg' });
+    form.append('model', 'whisper-1');
+    form.append('response_format', 'verbose_json');
+    form.append('timestamp_granularities[]', 'word');
+    if (scriptText) form.append('prompt', String(scriptText).slice(0, 500));
+
+    const whisperRes = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
+      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...form.getHeaders() },
+      timeout: 60000
+    });
+
+    const words = whisperRes.data?.words || [];
+    if (!words.length) throw new Error('Whisper returned no word-level timestamps — cannot build captions');
+
+    const chunks = groupWordsIntoChunks(words, 3);
+
+    // 4. Build one drawtext filter per chunk, each only visible during its
+    // own time window — centered, bold white, dark outline (Instagram's
+    // basic auto-caption look). Static per-chunk display, no karaoke animation.
+    const fontSize = Math.round(height * 0.07);
+    const filters = chunks.map(c =>
+      `drawtext=fontfile='${CAPTION_FONT_PATH}':text='${escapeDrawtext(c.text)}':fontsize=${fontSize}:fontcolor=white:borderw=${Math.round(fontSize * 0.12)}:bordercolor=black:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${c.start},${c.end})'`
+    );
+
+    if (!filters.length) throw new Error('No caption chunks generated');
+
+    // 5. Burn the captions onto the video
+    await new Promise((resolve, reject) => {
+      ffmpeg(videoPath)
+        .outputOptions(['-vf', filters.join(','), '-c:a', 'copy'])
+        .output(outputPath)
+        .on('end', resolve)
+        .on('error', reject)
+        .run();
+    });
+
+    if (!fs.existsSync(outputPath)) throw new Error('Caption burn-in produced no output file');
+
+    // Reuse the existing temp-video serving infrastructure (same Map/route
+    // already used to hand fal.ai a fetchable URL) instead of building a
+    // second mechanism.
+    tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
+    const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
+    res.json({ success: true, videoUrl: publicUrl, token, chunkCount: chunks.length });
+  } catch (err) {
+    const message = err.response?.data?.error?.message || err.message;
+    console.error('[burn-captions] error:', message);
+    res.status(500).json({ success: false, error: message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
+// ─────────────────────────────────────────
 // START
 // ─────────────────────────────────────────
 
