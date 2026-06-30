@@ -353,12 +353,14 @@ STEP 1 — CLASSIFY PRODUCTION STYLE as exactly one of:
 - SEMIPRO: dedicated camera or gimbal, deliberate framing, mix of natural and controlled lighting
 - CINEMATIC: professional camera, intentional composition, controlled/dramatic lighting, high production value
 
-STEP 2 — BUILD THE BASE PROMPT using this structure: Subject + Action + Environment + Camera + Lighting + Style. Rules:
+STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject + Action + Environment + Camera + Lighting + Style. Rules:
+- Open with the shot scaffold as the very first clause: aspect ratio (9:16 vertical), total duration, and the production style classified in Step 1 (e.g. "Vertical 9:16, 8s, UGC handheld selfie capture:") — never bury this mid-prompt
 - Use [INFLUENCER] as the person placeholder — do NOT describe physical appearance (no hair color, eye color, skin tone, height, build — reference photos handle that)
 - Describe outfit, action, environment, mood, shot progression
 - Use ONE camera movement only — never combine (e.g. "slow dolly in" OR "static locked shot" — never "dolly in while panning left")
 - Name specific lighting direction and quality (e.g. "soft key light 45° camera left, warm fill from right window" not just "natural lighting")
-- Use timestamp beats for shot progression: [0-2s]: opening beat. [2-5s]: main action. Keep each beat to 1-2 sentences.
+- If any beat shows hands touching an object (phone, cup, product, fabric), anchor the hand explicitly to it (e.g. "fingers grip the phone case") — free-floating hand descriptions are the most common cause of hand artifacts
+- Use timestamp beats for shot progression: [0-2s]: opening beat. [2-5s]: main action. Keep each beat to 1-2 sentences. In at least one beat, include a natural involuntary micro-movement (a blink, a breath, a glance-and-return, a small weight shift) — without this, close-up/selfie-style beats render as a frozen, glassy stare
 - Target 60-100 words total for the base prompt. Never exceed 150 words — Seedance ignores details beyond that.
 
 STEP 3 — APPEND the matching realism layer (one sentence block, added after the base prompt):
