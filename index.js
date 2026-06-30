@@ -11,6 +11,30 @@ const ffprobeStatic = require('ffprobe-static');
 ffmpeg.setFfmpegPath(ffmpegStatic);
 ffmpeg.setFfprobePath(ffprobeStatic.path);
 
+// ─────────────────────────────────────────
+// yt-dlp cookie auth — Instagram increasingly returns "empty media response"
+// for unauthenticated scrapes, even on public posts, and tells you to pass
+// cookies. INSTAGRAM_COOKIES_B64 is a base64-encoded Netscape-format
+// cookies.txt exported from a logged-in browser session. Written to a temp
+// file once and reused — yt-dlp needs a real file path, not stdin.
+// ─────────────────────────────────────────
+let _cookiesFilePath = null;
+function getCookieArgs() {
+  if (_cookiesFilePath) return ['--cookies', _cookiesFilePath];
+  const b64 = process.env.INSTAGRAM_COOKIES_B64;
+  if (!b64) return [];
+  try {
+    const txt = Buffer.from(b64, 'base64').toString('utf8');
+    const filePath = path.join(os.tmpdir(), 'instagram_cookies.txt');
+    fs.writeFileSync(filePath, txt);
+    _cookiesFilePath = filePath;
+    return ['--cookies', filePath];
+  } catch (e) {
+    console.error('[yt-dlp] Failed to write cookies file from INSTAGRAM_COOKIES_B64:', e.message);
+    return [];
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -172,6 +196,7 @@ app.post('/api/clone', async (req, res) => {
           '--no-playlist',
           '--quiet',
           '--no-warnings',
+          ...getCookieArgs(),
           videoUrl,
         ], { timeout: 90000 }, (err, stdout, stderr) => {
           if (err) return reject(new Error('yt-dlp failed: ' + (stderr || err.message)));
@@ -559,6 +584,7 @@ app.post('/api/temp-video', async (req, res) => {
     console.log(`[tempvid:${token}] downloading: ${videoUrl.slice(0, 60)}`);
     await execFileAsync(ytDlpPath, [
       '--no-playlist', '-f', 'mp4/best[height<=720]', '--merge-output-format', 'mp4',
+      ...getCookieArgs(),
       '-o', outputPath, videoUrl,
     ], { timeout: 120000 });
 
