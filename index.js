@@ -372,7 +372,7 @@ IF SEMIPRO: "Shot on DSLR or mirrorless, lightly stabilized handheld or gimbal, 
 IF CINEMATIC: "Shot on professional cinema camera, smooth deliberate single camera movement, sharp cinematic focus with intentional background bokeh, precisely controlled dramatic lighting, photorealistic skin detail with natural texture, rich but not over-processed color, intentional composed motion, 24fps."
 
 STEP 4 — APPEND this quality suffix at the very end of every prompt regardless of style:
-"Sharp clarity, natural colors, stable picture, no blur, no ghosting, no flickering, no jitter, avoid bent limbs."
+"Sharp clarity, natural colors, stable picture, no blur, no ghosting, no flickering, no jitter, avoid bent limbs. No music — natural ambient background sound only."
 
 Return ONLY the final combined prompt text. No JSON, no explanation, no style label.`,
       messages: [{ role: 'user', content: [...imageContent, { type: 'text', text: userText }] }]
