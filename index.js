@@ -304,9 +304,19 @@ app.post('/api/clone', async (req, res) => {
     } catch (_) { /* fall back to frames[0] on the client if this fails */ }
 
     // 4. Transcribe audio with Whisper (skip gracefully if no key)
+    // Transcription failure must never block the clone/prompt flow — but a
+    // silent catch(_) meant every failure mode (missing key, ffmpeg failure,
+    // Whisper 4xx/5xx, quota) looked identical to "this video has no audio"
+    // from the client's perspective, with no way to tell them apart. Now
+    // captured into transcriptError and returned alongside transcript/
+    // hasAudio so a real failure is visible instead of silently indistinguishable
+    // from a genuinely silent video.
     let transcript = '';
+    let transcriptError = '';
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    if (OPENAI_API_KEY) {
+    if (!OPENAI_API_KEY) {
+      transcriptError = 'OPENAI_API_KEY not configured on the analyser service';
+    } else {
       try {
         const audioPath = path.join(tmpDir, 'audio.mp3');
         await new Promise((resolve, reject) => {
@@ -330,7 +340,10 @@ app.post('/api/clone', async (req, res) => {
           });
           transcript = whisperRes.data?.text || '';
         }
-      } catch (_) { /* transcription optional */ }
+        // else: audio track exists but is essentially empty/silent — not an error.
+      } catch (err) {
+        transcriptError = err.response?.data?.error?.message || err.message || 'Whisper transcription failed';
+      }
     }
 
     // 5. Send frames + transcript to Claude vision
@@ -388,6 +401,7 @@ Return ONLY the final combined prompt text. No JSON, no explanation, no style la
       frames: frameDataUrls,
       firstFrameUrl: firstFrameUrl || frameDataUrls[0] || '',
       transcript,
+      transcriptError: transcriptError || undefined,
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
       clonePrompt
     });
