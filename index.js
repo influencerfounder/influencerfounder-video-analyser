@@ -64,6 +64,37 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.1.0', timestamp: new Date().toISOString() });
 });
 
+// TEMP DIAGNOSTIC — verifying GROQ_API_KEY works end to end. Remove after verification.
+app.get('/api/_temp_test_groq', async (req, res) => {
+  if (req.query.debugToken !== 'zx9qK2mN7pL4vR8w') return res.status(401).json({ error: 'Unauthorized' });
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'groqtest-'));
+  try {
+    const GROQ_API_KEY = process.env.GROQ_API_KEY;
+    if (!GROQ_API_KEY) return res.json({ error: 'GROQ_API_KEY not set' });
+    const audioUrl = req.query.audioUrl;
+    const srcPath = path.join(tmpDir, 'src.mp3');
+    const audioRes = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 20000 });
+    fs.writeFileSync(srcPath, audioRes.data);
+    const audioPath = path.join(tmpDir, 'audio.mp3');
+    await new Promise((resolve, reject) => {
+      ffmpeg(srcPath).noVideo().audioCodec('libmp3lame').audioBitrate('64k').output(audioPath)
+        .on('end', resolve).on('error', reject).run();
+    });
+    const form = new FormData();
+    form.append('file', fs.createReadStream(audioPath), { filename: 'audio.mp3', contentType: 'audio/mpeg' });
+    form.append('model', 'whisper-large-v3-turbo');
+    const whisperRes = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', form, {
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, ...form.getHeaders() },
+      timeout: 30000, validateStatus: () => true
+    });
+    res.json({ status: whisperRes.status, data: whisperRes.data });
+  } catch (err) {
+    res.json({ error: err.response?.data || err.message });
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 // ─────────────────────────────────────────
 // VIRAL LAB — ANALYSE VIDEO
 // Full deconstruction: virality scorecard, hook, blueprint, Wan 2.6 prompt
