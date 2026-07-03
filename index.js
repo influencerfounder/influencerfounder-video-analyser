@@ -170,7 +170,7 @@ app.post('/api/clone', async (req, res) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-'));
 
   try {
-    const { videoUrl, transcribe } = req.body;
+    const { videoUrl, locationId } = req.body;
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
     const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -303,7 +303,7 @@ app.post('/api/clone', async (req, res) => {
       firstFrameUrl = `data:image/jpeg;base64,${openingB64}`;
     } catch (_) { /* fall back to frames[0] on the client if this fails */ }
 
-    // 4. Transcribe audio with Whisper (skip gracefully if no key)
+    // 4. Transcribe audio with Groq's Whisper endpoint (skip gracefully if no key)
     // Transcription failure must never block the clone/prompt flow — but a
     // silent catch(_) meant every failure mode (missing key, ffmpeg failure,
     // Whisper 4xx/5xx, quota) looked identical to "this video has no audio"
@@ -311,20 +311,19 @@ app.post('/api/clone', async (req, res) => {
     // captured into transcriptError and returned alongside transcript/
     // hasAudio so a real failure is visible instead of silently indistinguishable
     // from a genuinely silent video.
-    // Whisper is billed to a single shared OPENAI_API_KEY (not per-student BYOK like
-    // ElevenLabs/Kie.ai elsewhere in this stack), so it's gated to the owner account
-    // only via the `transcribe` flag the Vercel proxy sets — every other caller
-    // skips this block entirely at zero cost, no transcriptError shown (this is an
-    // intentional restriction, not a failure, so the UI just shows nothing rather
-    // than an error students can't act on).
+    // Switched from OpenAI Whisper to Groq's OpenAI-compatible Whisper endpoint
+    // 2026-07-01 — Groq's free tier (2,000 requests/day, no credit card required)
+    // is generous enough to open this to every student rather than gating it to
+    // the owner account like the OpenAI version was. locationId is only logged
+    // (not used to gate access) so usage against the shared free-tier cap is
+    // traceable to an account if it's ever needed.
     let transcript = '';
     let transcriptError = '';
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    if (!transcribe) {
-      // not the owner account — feature not enabled for this caller
-    } else if (!OPENAI_API_KEY) {
-      transcriptError = 'OPENAI_API_KEY not configured on the analyser service';
+    const GROQ_API_KEY = process.env.GROQ_API_KEY;
+    if (!GROQ_API_KEY) {
+      transcriptError = 'GROQ_API_KEY not configured on the analyser service';
     } else {
+      console.log(`[transcribe] request from locationId=${locationId || 'unknown'}`);
       try {
         const audioPath = path.join(tmpDir, 'audio.mp3');
         await new Promise((resolve, reject) => {
@@ -341,9 +340,9 @@ app.post('/api/clone', async (req, res) => {
         if (fs.existsSync(audioPath) && fs.statSync(audioPath).size > 1000) {
           const form = new FormData();
           form.append('file', fs.createReadStream(audioPath), { filename: 'audio.mp3', contentType: 'audio/mpeg' });
-          form.append('model', 'whisper-1');
-          const whisperRes = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
-            headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...form.getHeaders() },
+          form.append('model', 'whisper-large-v3-turbo');
+          const whisperRes = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', form, {
+            headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, ...form.getHeaders() },
             timeout: 60000
           });
           transcript = whisperRes.data?.text || '';
