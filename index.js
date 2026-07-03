@@ -170,7 +170,7 @@ app.post('/api/clone', async (req, res) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-'));
 
   try {
-    const { videoUrl } = req.body;
+    const { videoUrl, transcribe } = req.body;
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
     const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -311,10 +311,18 @@ app.post('/api/clone', async (req, res) => {
     // captured into transcriptError and returned alongside transcript/
     // hasAudio so a real failure is visible instead of silently indistinguishable
     // from a genuinely silent video.
+    // Whisper is billed to a single shared OPENAI_API_KEY (not per-student BYOK like
+    // ElevenLabs/Kie.ai elsewhere in this stack), so it's gated to the owner account
+    // only via the `transcribe` flag the Vercel proxy sets — every other caller
+    // skips this block entirely at zero cost, no transcriptError shown (this is an
+    // intentional restriction, not a failure, so the UI just shows nothing rather
+    // than an error students can't act on).
     let transcript = '';
     let transcriptError = '';
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    if (!OPENAI_API_KEY) {
+    if (!transcribe) {
+      // not the owner account — feature not enabled for this caller
+    } else if (!OPENAI_API_KEY) {
       transcriptError = 'OPENAI_API_KEY not configured on the analyser service';
     } else {
       try {
