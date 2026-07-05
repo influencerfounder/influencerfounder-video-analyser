@@ -12,27 +12,42 @@ ffmpeg.setFfmpegPath(ffmpegStatic);
 ffmpeg.setFfprobePath(ffprobeStatic.path);
 
 // ─────────────────────────────────────────
-// yt-dlp cookie auth — Instagram increasingly returns "empty media response"
-// for unauthenticated scrapes, even on public posts, and tells you to pass
-// cookies. INSTAGRAM_COOKIES_B64 is a base64-encoded Netscape-format
-// cookies.txt exported from a logged-in browser session. Written to a temp
-// file once and reused — yt-dlp needs a real file path, not stdin.
+// Instagram video fetch — via Apify's instagram-reel-scraper actor.
+// yt-dlp increasingly returns "empty media response" for unauthenticated
+// Instagram scrapes even on public posts, and Instagram cookie auth means
+// exposing a real logged-in account to bot-detection/ban risk. Apify's actor
+// runs from its own managed scraping infrastructure (no Instagram login on
+// our side at all) and re-hosts the video file (includeDownloadedVideo) so
+// we're not hitting Instagram's CDN directly either.
 // ─────────────────────────────────────────
-let _cookiesFilePath = null;
-function getCookieArgs() {
-  if (_cookiesFilePath) return ['--cookies', _cookiesFilePath];
-  const b64 = process.env.INSTAGRAM_COOKIES_B64;
-  if (!b64) return [];
+async function downloadInstagramViaApify(videoUrl, outputPath) {
+  const apifyKey = process.env.APIFY_API_KEY;
+  if (!apifyKey) throw new Error('APIFY_API_KEY not configured');
+
+  let items;
   try {
-    const txt = Buffer.from(b64, 'base64').toString('utf8');
-    const filePath = path.join(os.tmpdir(), 'instagram_cookies.txt');
-    fs.writeFileSync(filePath, txt);
-    _cookiesFilePath = filePath;
-    return ['--cookies', filePath];
+    const resp = await axios.post(
+      `https://api.apify.com/v2/actors/apify~instagram-reel-scraper/run-sync-get-dataset-items?token=${apifyKey}`,
+      { username: [videoUrl], resultsLimit: 1, includeDownloadedVideo: true },
+      { timeout: 120000 }
+    );
+    items = resp.data;
   } catch (e) {
-    console.error('[yt-dlp] Failed to write cookies file from INSTAGRAM_COOKIES_B64:', e.message);
-    return [];
+    throw new Error('Apify Instagram scrape failed: ' + (e.response?.data?.error?.message || e.message));
   }
+
+  const item = Array.isArray(items) ? items[0] : null;
+  const remoteVideoUrl = item?.downloadedVideo || item?.videoUrl;
+  if (!remoteVideoUrl) {
+    throw new Error('Could not find this Instagram post — it may be private, deleted, or the link is invalid.');
+  }
+
+  const videoRes = await axios.get(remoteVideoUrl, {
+    responseType: 'arraybuffer',
+    timeout: 60000,
+    maxContentLength: 200 * 1024 * 1024,
+  });
+  fs.writeFileSync(outputPath, Buffer.from(videoRes.data));
 }
 
 const app = express();
@@ -179,9 +194,19 @@ app.post('/api/clone', async (req, res) => {
     // 1. Download video
     const videoPath = path.join(tmpDir, 'video.mp4');
 
-    const isPermalink = /instagram\.com\/(p|reel|reels)\/|tiktok\.com\/@[^/]+\/video\/|tiktok\.com\/t\//.test(videoUrl);
+    const isInstagram = /instagram\.com\/(p|reel|reels)\//.test(videoUrl);
+    const isTikTok = /tiktok\.com\/@[^/]+\/video\/|tiktok\.com\/t\//.test(videoUrl);
 
-    if (isPermalink) {
+    if (isInstagram) {
+      try {
+        await downloadInstagramViaApify(videoUrl, videoPath);
+      } catch (e) {
+        return res.status(400).json({ success: false, error: e.message });
+      }
+      if (!fs.existsSync(videoPath) || fs.statSync(videoPath).size < 1000) {
+        return res.status(400).json({ success: false, error: 'Could not download video from this URL. The post may be private or the link may have expired.' });
+      }
+    } else if (isTikTok) {
       // Use yt-dlp — try common install paths
       const { execFile, execSync } = require('child_process');
       let ytDlpBin = 'yt-dlp';
@@ -196,7 +221,6 @@ app.post('/api/clone', async (req, res) => {
           '--no-playlist',
           '--quiet',
           '--no-warnings',
-          ...getCookieArgs(),
           videoUrl,
         ], { timeout: 90000 }, (err, stdout, stderr) => {
           if (err) return reject(new Error('yt-dlp failed: ' + (stderr || err.message)));
@@ -596,22 +620,28 @@ app.post('/api/temp-video', async (req, res) => {
   const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
 
   try {
-    const { execFile } = require('child_process');
-    const { promisify } = require('util');
-    const execFileAsync = promisify(execFile);
+    const isInstagram = /instagram\.com\/(p|reel|reels)\//.test(videoUrl);
 
-    // Find yt-dlp binary
-    let ytDlpPath;
-    try { ytDlpPath = (await execFileAsync('which', ['yt-dlp'])).stdout.trim(); } catch (_) { ytDlpPath = '/usr/local/bin/yt-dlp'; }
+    if (isInstagram) {
+      console.log(`[tempvid:${token}] downloading via Apify: ${videoUrl.slice(0, 60)}`);
+      await downloadInstagramViaApify(videoUrl, outputPath);
+    } else {
+      const { execFile } = require('child_process');
+      const { promisify } = require('util');
+      const execFileAsync = promisify(execFile);
 
-    console.log(`[tempvid:${token}] downloading: ${videoUrl.slice(0, 60)}`);
-    await execFileAsync(ytDlpPath, [
-      '--no-playlist', '-f', 'mp4/best[height<=720]', '--merge-output-format', 'mp4',
-      ...getCookieArgs(),
-      '-o', outputPath, videoUrl,
-    ], { timeout: 120000 });
+      // Find yt-dlp binary
+      let ytDlpPath;
+      try { ytDlpPath = (await execFileAsync('which', ['yt-dlp'])).stdout.trim(); } catch (_) { ytDlpPath = '/usr/local/bin/yt-dlp'; }
 
-    if (!fs.existsSync(outputPath)) throw new Error('yt-dlp download produced no output file');
+      console.log(`[tempvid:${token}] downloading: ${videoUrl.slice(0, 60)}`);
+      await execFileAsync(ytDlpPath, [
+        '--no-playlist', '-f', 'mp4/best[height<=720]', '--merge-output-format', 'mp4',
+        '-o', outputPath, videoUrl,
+      ], { timeout: 120000 });
+    }
+
+    if (!fs.existsSync(outputPath)) throw new Error('Download produced no output file');
     const stat = fs.statSync(outputPath);
     console.log(`[tempvid:${token}] downloaded: ${Math.round(stat.size / 1024)}KB`);
 
