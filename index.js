@@ -29,7 +29,7 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
     const resp = await axios.post(
       `https://api.apify.com/v2/actors/apify~instagram-reel-scraper/run-sync-get-dataset-items?token=${apifyKey}`,
       { username: [videoUrl], resultsLimit: 1, includeDownloadedVideo: true },
-      { timeout: 120000 }
+      { timeout: 280000 }
     );
     items = resp.data;
   } catch (e) {
