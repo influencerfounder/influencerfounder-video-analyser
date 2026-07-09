@@ -397,8 +397,10 @@ STEP 1 — CLASSIFY PRODUCTION STYLE as exactly one of:
 - SEMIPRO: dedicated camera or gimbal, deliberate framing, mix of natural and controlled lighting
 - CINEMATIC: professional camera, intentional composition, controlled/dramatic lighting, high production value
 
+This classification is INTERNAL — it only decides which realism layer to append in Step 3. Never print the label word (UGC / SEMIPRO / CINEMATIC) anywhere in the output. When genuinely torn between UGC and SEMIPRO, default to UGC — most viral short-form is phone-shot.
+
 STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject + Action + Environment + Camera + Lighting + Style. Rules:
-- Open with the shot scaffold as the very first clause: aspect ratio (9:16 vertical), total duration, and the production style classified in Step 1 (e.g. "Vertical 9:16, 8s, UGC handheld selfie capture:") — never bury this mid-prompt
+- Open with a short capture-style scaffold as the very first clause — a plain-language phrase describing the shooting style from Step 1, but do NOT write the label word itself and do NOT include aspect ratio or duration (the tool sets 9:16 and the clip length separately, so baking them into the text is redundant and can conflict). E.g. "Handheld selfie capture:" or "Gimbal-stabilized broadcast capture:" — never "Vertical 9:16, 8s, SEMIPRO ...". Never bury this mid-prompt
 - Use [INFLUENCER] as the person placeholder — do NOT describe physical appearance (no hair color, eye color, skin tone, height, build — reference photos handle that)
 - Describe outfit, action, environment, mood, shot progression
 - Use ONE camera movement only — never combine (e.g. "slow dolly in" OR "static locked shot" — never "dolly in while panning left")
