@@ -736,6 +736,60 @@ app.post('/api/burn-captions', async (req, res) => {
 });
 
 // ─────────────────────────────────────────
+// CLIP SEQUENCING — stitch multiple generated clips into one longer video.
+// Downloads each clip, normalizes it (1080x1920 / 24fps / h264, audio stripped —
+// no-music rule + avoids audio-concat mismatch), then concats via the demuxer.
+// Re-encode-then-copy is the reliable path: the concat demuxer breaks on clips
+// with differing codec/fps/SAR, which generated clips often have. (2026-07-11)
+// ─────────────────────────────────────────
+app.post('/api/stitch', async (req, res) => {
+  const { videoUrls } = req.body;
+  if (!Array.isArray(videoUrls) || videoUrls.length < 2) {
+    return res.status(400).json({ success: false, error: 'Need at least 2 video URLs to stitch' });
+  }
+  const urls = videoUrls.filter(u => typeof u === 'string' && u.trim()).slice(0, 6); // cap at 6 (~90s)
+  if (urls.length < 2) return res.status(400).json({ success: false, error: 'Need at least 2 valid video URLs' });
+
+  const token = `seq_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stitch-'));
+  const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+  try {
+    // 1. Download + normalize each clip sequentially (low RAM on Hobby plan)
+    const normPaths = [];
+    for (let i = 0; i < urls.length; i++) {
+      const raw = path.join(tmpDir, `raw_${i}.mp4`);
+      const norm = path.join(tmpDir, `norm_${i}.mp4`);
+      const dl = await axios.get(urls[i], { responseType: 'arraybuffer', timeout: 60000 });
+      fs.writeFileSync(raw, Buffer.from(dl.data));
+      await new Promise((resolve, reject) => {
+        ffmpeg(raw)
+          .videoFilters('scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1')
+          .outputOptions(['-r 24', '-c:v libx264', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
+          .output(norm).on('end', resolve).on('error', reject).run();
+      });
+      normPaths.push(norm);
+    }
+    // 2. Concat the normalized clips (all identical specs now → safe -c copy)
+    const listPath = path.join(tmpDir, 'list.txt');
+    fs.writeFileSync(listPath, normPaths.map(p => `file '${p}'`).join('\n'));
+    await new Promise((resolve, reject) => {
+      ffmpeg().input(listPath).inputOptions(['-f concat', '-safe 0'])
+        .outputOptions(['-c copy', '-threads 1'])
+        .output(outputPath).on('end', resolve).on('error', reject).run();
+    });
+    tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
+    const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
+    console.log(`[stitch:${token}] stitched ${normPaths.length} clips`);
+    res.json({ success: true, videoUrl: publicUrl, token, clipCount: normPaths.length });
+  } catch (err) {
+    console.error(`[stitch:${token}] error:`, err.message);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
+// ─────────────────────────────────────────
 // START
 // ─────────────────────────────────────────
 
