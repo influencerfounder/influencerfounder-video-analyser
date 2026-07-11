@@ -84,97 +84,10 @@ app.get('/', (req, res) => {
 // Full deconstruction: virality scorecard, hook, blueprint, Wan 2.6 prompt
 // ─────────────────────────────────────────
 
-async function handleViralAnalyse(req, res) {
-  try {
-    const { videoUrl } = req.body;
-    if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+// (Legacy handleViralAnalyse removed 2026-07-10 — it passed only the video URL as TEXT
+// to Claude, which cannot fetch URLs, so every 'analysis' it returned was hallucinated.
+// The real frame-based analysis lives in the Vercel service: POST /api/viral/analyse.)
 
-    const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-    if (!ANTHROPIC_API_KEY) return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY not configured' });
-
-    const systemPrompt = `You are an expert viral content analyst and AI influencer video strategist.
-Your job is to deconstruct viral social media videos and produce actionable recreation blueprints.
-Always respond in valid JSON format only. No markdown, no explanation outside the JSON.`;
-
-    const userPrompt = `Analyse this viral video: ${videoUrl}
-
-Return a JSON object with exactly these fields:
-{
-  "metadata": { "duration": "estimated duration", "format": "9:16 or 16:9", "platform": "TikTok/Instagram/YouTube", "content_type": "talking head/lifestyle/walk/tutorial/etc" },
-  "virality_scorecard": {
-    "curiosity": { "score": 0-10, "reason": "why" },
-    "novelty": { "score": 0-10, "reason": "why" },
-    "emotional_trigger": { "score": 0-10, "emotion": "what emotion", "reason": "why" },
-    "relatability": { "score": 0-10, "reason": "why" },
-    "visual_interest": { "score": 0-10, "reason": "why" },
-    "shareability": { "score": 0-10, "reason": "why" },
-    "rewatch_potential": { "score": 0-10, "reason": "why" },
-    "overall_score": 0-10,
-    "verdict": "one line verdict"
-  },
-  "hook_analysis": { "type": "hook type", "formula": "hook formula", "first_3_seconds": "what happens", "why_it_works": "psychological reason" },
-  "retention_analysis": { "first_retention_spike": "timestamp", "pattern_interrupts": ["list"], "curiosity_loops": ["list"], "payoff_timing": "when", "completion_driver": "why" },
-  "story_framework": { "structure": "structure type", "core_idea": "one sentence", "unique_angle": "what makes it different", "viewer_transformation": "before/after" },
-  "script_transcription": "full verbatim transcript with timestamps",
-  "content_identity": { "creator_archetype": "archetype", "energy_level": 0-10, "tone": "tone", "editing_style": "style", "delivery_style": "style" },
-  "hook_variations": [
-    {"type": "curiosity gap", "hook": "variation"},
-    {"type": "social proof", "hook": "variation"},
-    {"type": "problem solution", "hook": "variation"},
-    {"type": "contrarian", "hook": "variation"},
-    {"type": "identity shift", "hook": "variation"},
-    {"type": "transformation", "hook": "variation"},
-    {"type": "urgency", "hook": "variation"},
-    {"type": "simplicity", "hook": "variation"},
-    {"type": "time specific", "hook": "variation"},
-    {"type": "future pacing", "hook": "variation"}
-  ],
-  "recreation_blueprint": {
-    "concept": "what to recreate and why it works",
-    "script": "full adapted script for make money online / AI influencer niche. Replace [INFLUENCER] where the character speaks or appears.",
-    "shot_list": [{"scene": 1, "duration": "Xs", "shot_type": "close-up/mid/full body", "angle": "eye level/above/below", "movement": "static/handheld/push-in", "description": "what happens"}],
-    "setting": "environment description for Wan 2.6",
-    "lighting": "lighting description for Wan 2.6",
-    "camera": "camera movement and framing for Wan 2.6",
-    "editing_rhythm": "cut timing and pacing notes",
-    "audio": "music mood and sound design notes",
-    "wan_prompt": "Complete ready-to-use Wan 2.6 prompt. Use [INFLUENCER] as placeholder."
-  }
-}`;
-
-    const claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4000,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }]
-    }, {
-      headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
-    });
-
-    const rawText = claudeResponse.data?.content?.[0]?.text || '';
-    if (!rawText) return res.status(500).json({ success: false, error: 'Empty response from Claude' });
-
-    let analysis;
-    try {
-      let jsonStr = rawText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
-      const m = jsonStr.match(/\{[\s\S]*\}/);
-      if (m) jsonStr = m[0];
-      analysis = JSON.parse(jsonStr);
-    } catch (e) {
-      return res.status(500).json({ success: false, error: 'Failed to parse analysis: ' + e.message, raw: rawText.substring(0, 2000) });
-    }
-
-    res.json({ success: true, analysis });
-
-  } catch (err) {
-    const status = err.response?.status || 500;
-    const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-    res.status(status).json({ success: false, error: message });
-  }
-}
-
-app.post('/api/viral/analyse', handleViralAnalyse);
-app.post('/api/analyse', handleViralAnalyse);
 
 // ─────────────────────────────────────────
 // CLONE — Copy Viral Video tab
@@ -318,6 +231,23 @@ app.post('/api/clone', async (req, res) => {
       return `data:image/jpeg;base64,${b64}`;
     });
 
+    // ── Scorecard v2 (2026-07-10) ──
+    // Timestamps for the picker frames (fps-based extraction: frame n ≈ n/fps seconds)
+    const frameTimestamps = pickerFiles.map(pf => Math.round((frameFiles.indexOf(pf) / fps) * 10) / 10);
+    // Densely sample the HOOK WINDOW (first 3s): the virality scorecard weights the
+    // hook heaviest, but evenly-sampled frames on a longer clip may contain only a
+    // single frame from 0-3s — the model literally couldn't see the window it was
+    // scoring. Extracted sequentially with the same low-memory options.
+    const hookFrames = [];
+    for (const ts of [0.3, 1.0, 2.0, 3.0]) {
+      if (ts >= duration) break;
+      try {
+        const hp = path.join(framesDir, `hook-${String(ts).replace('.', '_')}.jpg`);
+        await extractFrame(ts, hp);
+        hookFrames.push({ ts, dataUrl: `data:image/jpeg;base64,${fs.readFileSync(hp).toString('base64')}` });
+      } catch (_) {}
+    }
+
     // 3b. Extract the TRUE opening frame (t≈0) separately — sequential, same low-mem options
     let firstFrameUrl = '';
     try {
@@ -432,6 +362,9 @@ Return ONLY the final combined prompt text. No JSON, no explanation, no style la
     res.json({
       success: true,
       frames: frameDataUrls,
+      frameTimestamps,
+      hookFrames,
+      durationSec: Math.round(duration * 10) / 10,
       firstFrameUrl: firstFrameUrl || frameDataUrls[0] || '',
       transcript,
       transcriptError: transcriptError || undefined,
