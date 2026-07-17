@@ -172,12 +172,15 @@ app.post('/api/clone', async (req, res) => {
     //   <=60s -> 40   |   <=180s -> 60   |   <=600s -> 80   |   >600s -> 80
     const framesDir = path.join(tmpDir, 'frames');
     fs.mkdirSync(framesDir);
-    const ANALYSIS_FRAME_COUNT =
-      duration <= 30  ? Math.max(12, Math.round(duration)) :
-      duration <= 60  ? 40 :
-      duration <= 180 ? 60 :
-      80;
-    const fps = Math.min(2.0, ANALYSIS_FRAME_COUNT / Math.max(duration, 0.1));
+    // Always spend the FULL frame budget regardless of clip length — a shorter
+    // clip gets denser sampling (more detail), never fewer frames. Previously
+    // tiered (12–80 by duration) with a 2fps ceiling, which let sub-half-second
+    // beats (fast cuts, quick gestures) fall between frames on exactly the
+    // quick-cut clips students clone most (Mike, 2026-07-17).
+    // fps ceiling 8 = catches beats down to ~0.125s; beyond that adjacent
+    // frames are near-duplicates and only add Claude vision cost.
+    const ANALYSIS_FRAME_COUNT = 80;
+    const fps = Math.min(8.0, ANALYSIS_FRAME_COUNT / Math.max(duration, 0.1));
 
     const extractFrame = (ts, outPath) => new Promise((resolve, reject) => {
       ffmpeg(videoPath)
