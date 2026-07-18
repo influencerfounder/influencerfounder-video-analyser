@@ -98,11 +98,16 @@ app.post('/api/clone', async (req, res) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-'));
 
   try {
-    const { videoUrl, locationId } = req.body;
+    const { videoUrl, locationId, kieApiKey } = req.body;
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
+    // Cost split (2026-07-17): kieApiKey present = student account, routed to
+    // Kie.ai's Claude Sonnet 5 endpoint on their own credits (Vercel's
+    // clone-proxy decides owner-vs-student and only forwards a key for
+    // students). No kieApiKey = Mike's own account, unchanged direct-Anthropic
+    // path on Sonnet 4.6.
     const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-    if (!ANTHROPIC_API_KEY) return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY not configured' });
+    if (!kieApiKey && !ANTHROPIC_API_KEY) return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY not configured' });
 
     // 1. Download video
     const videoPath = path.join(tmpDir, 'video.mp4');
@@ -320,10 +325,7 @@ app.post('/api/clone', async (req, res) => {
       ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the Wan 2.6 prompt.`
       : `These ${frameBase64s.length} frames were extracted from the viral video (no audio). Create the Wan 2.6 prompt.`;
 
-    const claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1000,
-      system: `You are a Seedance 2.0 prompt engineer. Study the frames and transcript carefully and follow these four steps exactly.
+    const systemPrompt = `You are a Seedance 2.0 prompt engineer. Study the frames and transcript carefully and follow these four steps exactly.
 
 STEP 1 — CLASSIFY PRODUCTION STYLE as exactly one of:
 - UGC: handheld selfie/front-camera, casual setting, natural/indoor light, unposed, phone-quality
@@ -353,11 +355,21 @@ IF CINEMATIC: "Shot on professional cinema camera, smooth deliberate single came
 STEP 4 — APPEND this quality suffix at the very end of every prompt regardless of style:
 "Sharp clarity, natural colors, stable picture, no blur, no ghosting, no flickering, no jitter, avoid bent limbs. No music — natural ambient background sound only."
 
-Return ONLY the final combined prompt text. No JSON, no explanation, no style label.`,
-      messages: [{ role: 'user', content: [...imageContent, { type: 'text', text: userText }] }]
-    }, {
-      headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
-    });
+Return ONLY the final combined prompt text. No JSON, no explanation, no style label.`;
+
+    const claudeMessages = [{ role: 'user', content: [...imageContent, { type: 'text', text: userText }] }];
+
+    // Kie.ai's Claude endpoint is native Anthropic Messages format (verified
+    // 2026-07-17 with real base64 frames — identical request shape, model
+    // string and auth header are the only differences), so the same
+    // system/messages body serves both branches.
+    const claudeResponse = kieApiKey
+      ? await axios.post('https://api.kie.ai/claude/v1/messages', {
+          model: 'claude-sonnet-5', max_tokens: 1000, system: systemPrompt, messages: claudeMessages
+        }, { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' } })
+      : await axios.post('https://api.anthropic.com/v1/messages', {
+          model: 'claude-sonnet-4-6', max_tokens: 1000, system: systemPrompt, messages: claudeMessages
+        }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
 
     const clonePrompt = claudeResponse.data?.content?.[0]?.text?.trim() || '';
     if (!clonePrompt) return res.status(500).json({ success: false, error: 'Empty response from Claude' });
@@ -377,7 +389,7 @@ Return ONLY the final combined prompt text. No JSON, no explanation, no style la
 
   } catch (err) {
     const status = err.response?.status || 500;
-    const message = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+    const message = err.response?.data?.error?.message || err.response?.data?.message || err.response?.data?.msg || err.message;
     res.status(status).json({ success: false, error: message });
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
