@@ -364,29 +364,25 @@ Return ONLY the final combined prompt text. No JSON, no explanation, no style la
     let claudeResponse;
     if (kieApiKey) {
       // Kie.ai's backend has a real ceiling well under 80 images — verified
-      // live: identical requests succeed at 10-20 images but time out (their
-      // side, not ours) around 40, and the full 80-frame payload fails the
-      // same way. Anthropic direct (the owner path below) has no such limit,
-      // so this fallback is Kie-specific, not a frame-budget change overall.
-      // Fail open by retrying with progressively fewer, evenly-sampled
-      // frames rather than failing the whole analysis.
-      const tiers = [...new Set([imageContent.length, 40, 20, 10])].filter(n => n <= imageContent.length).sort((a, b) => b - a);
-      let lastErr;
-      for (const n of tiers) {
-        const subset = n === imageContent.length
-          ? imageContent
-          : Array.from({ length: n }, (_, i) => imageContent[Math.round(i * (imageContent.length - 1) / (n - 1))]);
-        const note = n < imageContent.length ? ` (${n} representative frames shown, evenly sampled from the full clip — fewer than the full extraction due to a request-size limit.)` : '';
-        try {
-          claudeResponse = await axios.post('https://api.kie.ai/claude/v1/messages', {
-            model: 'claude-sonnet-5', max_tokens: 1000, system: systemPrompt,
-            messages: [{ role: 'user', content: [...subset, { type: 'text', text: userText + note }] }]
-          }, { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' }, timeout: 100000 });
-          lastErr = null;
-          break;
-        } catch (e) { lastErr = e; }
-      }
-      if (lastErr) throw lastErr;
+      // live: identical requests succeed FAST at 10-20 images but HANG for
+      // ~90-100s before failing anywhere near 40+ (not a quick rejection —
+      // Kie's own gateway grinds on the request then times out server-side).
+      // A retry ladder starting at 80 would burn 100s+ per failed tier,
+      // blowing past clone-proxy's 120s client timeout before ever reaching
+      // a tier that works. So: go straight to the proven-fast/working tier
+      // (KIE_SAFE_FRAME_COUNT) — no wasted attempts at sizes we already know
+      // hang. Anthropic direct (the owner path below) has no such limit and
+      // keeps the full 80-frame budget unchanged.
+      const KIE_SAFE_FRAME_COUNT = 20;
+      const n = Math.min(KIE_SAFE_FRAME_COUNT, imageContent.length);
+      const subset = n === imageContent.length
+        ? imageContent
+        : Array.from({ length: n }, (_, i) => imageContent[Math.round(i * (imageContent.length - 1) / (n - 1))]);
+      const note = n < imageContent.length ? ` (${n} representative frames shown, evenly sampled from the full clip.)` : '';
+      claudeResponse = await axios.post('https://api.kie.ai/claude/v1/messages', {
+        model: 'claude-sonnet-5', max_tokens: 1000, system: systemPrompt,
+        messages: [{ role: 'user', content: [...subset, { type: 'text', text: userText + note }] }]
+      }, { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' }, timeout: 80000 });
     } else {
       claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
         model: 'claude-sonnet-4-6', max_tokens: 1000, system: systemPrompt,
