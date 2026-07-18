@@ -357,19 +357,42 @@ STEP 4 — APPEND this quality suffix at the very end of every prompt regardless
 
 Return ONLY the final combined prompt text. No JSON, no explanation, no style label.`;
 
-    const claudeMessages = [{ role: 'user', content: [...imageContent, { type: 'text', text: userText }] }];
-
     // Kie.ai's Claude endpoint is native Anthropic Messages format (verified
     // 2026-07-17 with real base64 frames — identical request shape, model
     // string and auth header are the only differences), so the same
     // system/messages body serves both branches.
-    const claudeResponse = kieApiKey
-      ? await axios.post('https://api.kie.ai/claude/v1/messages', {
-          model: 'claude-sonnet-5', max_tokens: 1000, system: systemPrompt, messages: claudeMessages
-        }, { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' } })
-      : await axios.post('https://api.anthropic.com/v1/messages', {
-          model: 'claude-sonnet-4-6', max_tokens: 1000, system: systemPrompt, messages: claudeMessages
-        }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
+    let claudeResponse;
+    if (kieApiKey) {
+      // Kie.ai's backend has a real ceiling well under 80 images — verified
+      // live: identical requests succeed at 10-20 images but time out (their
+      // side, not ours) around 40, and the full 80-frame payload fails the
+      // same way. Anthropic direct (the owner path below) has no such limit,
+      // so this fallback is Kie-specific, not a frame-budget change overall.
+      // Fail open by retrying with progressively fewer, evenly-sampled
+      // frames rather than failing the whole analysis.
+      const tiers = [...new Set([imageContent.length, 40, 20, 10])].filter(n => n <= imageContent.length).sort((a, b) => b - a);
+      let lastErr;
+      for (const n of tiers) {
+        const subset = n === imageContent.length
+          ? imageContent
+          : Array.from({ length: n }, (_, i) => imageContent[Math.round(i * (imageContent.length - 1) / (n - 1))]);
+        const note = n < imageContent.length ? ` (${n} representative frames shown, evenly sampled from the full clip — fewer than the full extraction due to a request-size limit.)` : '';
+        try {
+          claudeResponse = await axios.post('https://api.kie.ai/claude/v1/messages', {
+            model: 'claude-sonnet-5', max_tokens: 1000, system: systemPrompt,
+            messages: [{ role: 'user', content: [...subset, { type: 'text', text: userText + note }] }]
+          }, { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' }, timeout: 100000 });
+          lastErr = null;
+          break;
+        } catch (e) { lastErr = e; }
+      }
+      if (lastErr) throw lastErr;
+    } else {
+      claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
+        model: 'claude-sonnet-4-6', max_tokens: 1000, system: systemPrompt,
+        messages: [{ role: 'user', content: [...imageContent, { type: 'text', text: userText }] }]
+      }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
+    }
 
     const clonePrompt = claudeResponse.data?.content?.[0]?.text?.trim() || '';
     if (!clonePrompt) return res.status(500).json({ success: false, error: 'Empty response from Claude' });
