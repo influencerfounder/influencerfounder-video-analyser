@@ -362,16 +362,17 @@ STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject +
 - Use ONE camera movement only — never combine (e.g. "slow dolly in" OR "static locked shot" — never "dolly in while panning left")
 - Name specific lighting direction and quality (e.g. "soft key light 45° camera left, warm fill from right window" not just "natural lighting")
 - If any beat shows hands touching an object (phone, cup, product, fabric), anchor the hand explicitly to it (e.g. "fingers grip the phone case") — free-floating hand descriptions are the most common cause of hand artifacts
-- Use timestamp beats for shot progression: [0-2s]: opening beat. [2-5s]: main action. Keep each beat to 1-2 sentences. In at least one beat, include a natural involuntary micro-movement (a blink, a breath, a glance-and-return, a small weight shift) — without this, close-up/selfie-style beats render as a frozen, glassy stare
+- Use timestamp beats for shot progression: [0-2s]: opening beat. [2-5s]: main action. Keep each beat to 1-2 sentences. Weave natural involuntary human motion through the beats: a soft slightly-uneven blink (never metronomic), a visible breath with gentle shoulder rise, a glance at something specific then back (gaze always has a destination — a locked dead-center stare renders as frozen and glassy), a small weight shift. Different body parts move on slightly different timing — overlapping, never synchronized
+- If the person walks in any beat, describe real gait mechanics: heel-to-toe footsteps with weight shifting onto each leg, arms swinging opposite the legs, head staying level — never a gliding or floating walk
 - Target 60-100 words total for the base prompt. Never exceed 150 words — Seedance ignores details beyond that.
 
 STEP 3 — APPEND the matching realism layer (one sentence block, added after the base prompt):
 
-IF UGC: "Shot on smartphone front camera, handheld with subtle natural hand tremor, slight autofocus breathing, imperfect slightly off-center framing, visible pores and natural skin micro-imperfections, no smoothing or beauty filter, natural ambient indoor lighting with mixed warm and cool sources, slight overhead shadow under nose and chin, natural blinking rhythm and subtle breathing motion in chest and shoulders, mild compression feel, 30fps."
+IF UGC: "Shot on smartphone front camera, handheld with subtle natural hand tremor, slight autofocus breathing, imperfect slightly off-center framing, visible pores and natural skin micro-imperfections, no smoothing or beauty filter, natural ambient indoor lighting with mixed warm and cool sources, slight overhead shadow under nose and chin, slightly uneven natural blinking rhythm and subtle breathing motion in chest and shoulders, never perfectly still, mild compression feel, 30fps."
 
-IF SEMIPRO: "Shot on DSLR or mirrorless, lightly stabilized handheld or gimbal, natural skin texture with realistic pores, gentle background separation with realistic depth of field, controlled non-dramatic lighting, natural posture and motion, slight film grain, 24fps."
+IF SEMIPRO: "Shot on DSLR or mirrorless, lightly stabilized handheld or gimbal, natural skin texture with realistic pores, gentle background separation with realistic depth of field, controlled non-dramatic lighting, relaxed natural posture with subtle breathing and slightly uneven blinks, small stabilizing head movements, slight film grain, 24fps."
 
-IF CINEMATIC: "Shot on professional cinema camera, smooth deliberate single camera movement, sharp cinematic focus with intentional background bokeh, precisely controlled dramatic lighting, photorealistic skin detail with natural texture, rich but not over-processed color, intentional composed motion, 24fps."
+IF CINEMATIC: "Shot on professional cinema camera, smooth deliberate single camera movement, sharp cinematic focus with intentional background bokeh, precisely controlled dramatic lighting, photorealistic skin detail with natural texture, rich but not over-processed color, performers moving with natural weight and subtle breathing, never posed stillness, 24fps."
 
 STEP 4 — APPEND this quality suffix at the very end of every prompt regardless of style:
 "Sharp clarity, natural colors, stable picture, no blur, no ghosting, no flickering, no jitter, avoid bent limbs. No music — natural ambient background sound only."
