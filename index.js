@@ -303,11 +303,32 @@ app.post('/api/clone', async (req, res) => {
           const form = new FormData();
           form.append('file', fs.createReadStream(audioPath), { filename: 'audio.mp3', contentType: 'audio/mpeg' });
           form.append('model', 'whisper-large-v3-turbo');
+          // verbose_json gives per-segment confidence signals — Whisper invents
+          // plausible-looking text on music-only/silent audio, so plain `text`
+          // can't be trusted as proof that anyone is actually speaking.
+          form.append('response_format', 'verbose_json');
           const whisperRes = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', form, {
             headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, ...form.getHeaders() },
             timeout: 60000
           });
-          transcript = whisperRes.data?.text || '';
+          const segments = whisperRes.data?.segments;
+          if (Array.isArray(segments)) {
+            // Keep only segments Whisper itself is confident contain real speech.
+            // Thresholds follow Whisper's own hallucination heuristics:
+            // high no_speech_prob = likely music/silence, very low avg_logprob =
+            // low-confidence guess, high compression_ratio = repetitive loop.
+            const speechSegments = segments.filter(s =>
+              (s.no_speech_prob ?? 0) < 0.6 &&
+              (s.avg_logprob ?? 0) > -1.0 &&
+              (s.compression_ratio ?? 1) < 2.4
+            );
+            transcript = speechSegments.map(s => (s.text || '').trim()).filter(Boolean).join(' ').trim();
+            if (!transcript && segments.length) {
+              console.log(`[transcribe] ${segments.length} segment(s) all rejected as non-speech/hallucination — treating video as having no spoken script`);
+            }
+          } else {
+            transcript = whisperRes.data?.text || '';
+          }
         }
         // else: audio track exists but is essentially empty/silent — not an error.
       } catch (err) {
