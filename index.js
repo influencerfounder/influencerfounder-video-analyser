@@ -348,36 +348,36 @@ app.post('/api/clone', async (req, res) => {
 
     const systemPrompt = `You are a Seedance 2.0 prompt engineer. Study the frames and transcript carefully and follow these four steps exactly.
 
-STEP 1 — CLASSIFY PRODUCTION STYLE as exactly one of:
-- UGC: handheld selfie/front-camera, casual setting, natural/indoor light, unposed, phone-quality
-- SEMIPRO: dedicated camera or gimbal, deliberate framing, mix of natural and controlled lighting
-- CINEMATIC: professional camera, intentional composition, controlled/dramatic lighting, high production value
+STEP 1 — CLASSIFY THE SOURCE as exactly one of TWO lanes:
+- AUTHENTIC: phone-shot / creator-made — handheld or propped phone, casual real-world setting, available or simple lighting, unpolished. The huge majority of viral short-form lives here.
+- HIGH-END: professionally produced — cinema or commercial camera work, deliberate composition, controlled lighting, graded color.
 
-This classification is INTERNAL — it only decides which realism layer to append in Step 3. Never print the label word (UGC / SEMIPRO / CINEMATIC) anywhere in the output. When genuinely torn between UGC and SEMIPRO, default to UGC — most viral short-form is phone-shot.
+This classification is INTERNAL — it only decides which realism layer Step 3 appends. Never print a lane name anywhere in the output. When genuinely torn, choose AUTHENTIC — polished-looking creator content is still phone-made far more often than it looks.
 
 STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject + Action + Environment + Camera + Lighting + Style. Rules:
-- Open with a short capture-style scaffold as the very first clause — a plain-language phrase describing the shooting style from Step 1, but do NOT write the label word itself and do NOT include aspect ratio or duration (the tool sets 9:16 and the clip length separately, so baking them into the text is redundant and can conflict). E.g. "Handheld selfie capture:" or "Gimbal-stabilized broadcast capture:" — never "Vertical 9:16, 8s, SEMIPRO ...". Never bury this mid-prompt
+- Open with a short capture-style scaffold as the very first clause — plain language matching the Step 1 lane, but never the lane word itself and never aspect ratio or duration (the tool sets 9:16 and clip length separately). E.g. "Handheld phone selfie capture:" or "Cinema camera capture:". Never bury this mid-prompt
 - Use [INFLUENCER] as the person placeholder — do NOT describe physical appearance (no hair color, eye color, skin tone, height, build — reference photos handle that)
 - Describe outfit, action, environment, mood, shot progression
 - Use ONE camera movement only — never combine (e.g. "slow dolly in" OR "static locked shot" — never "dolly in while panning left")
-- Name specific lighting direction and quality (e.g. "soft key light 45° camera left, warm fill from right window" not just "natural lighting")
+- Name specific lighting direction and quality, and make it slightly imperfect — real light is uneven ("warm window light from the left, slightly hot on one cheek, soft shadow falloff to the right" beats "natural lighting")
+- Ground the scene in a lived-in world: one or two ordinary specific details (a half-empty glass on the counter, a jacket over the chair, a slightly crooked picture frame) beat a clean empty backdrop — real rooms are never perfectly tidy or symmetric
 - If any beat shows hands touching an object (phone, cup, product, fabric), anchor the hand explicitly to it (e.g. "fingers grip the phone case") — free-floating hand descriptions are the most common cause of hand artifacts
-- Use timestamp beats for shot progression: [0-2s]: opening beat. [2-5s]: main action. Keep each beat to 1-2 sentences. Weave natural involuntary human motion through the beats: a soft slightly-uneven blink (never metronomic), a visible breath with gentle shoulder rise, a glance at something specific then back (gaze always has a destination — a locked dead-center stare renders as frozen and glassy), a small weight shift. Different body parts move on slightly different timing — overlapping, never synchronized
+- Use timestamp beats for shot progression: [0-2s]: opening beat. [2-5s]: main action. Keep each beat to 1-2 sentences. Weave natural involuntary human motion through the beats: a soft slightly-uneven blink (never metronomic), a visible breath with gentle shoulder rise, a glance at something specific then back (gaze always has a destination — a locked dead-center stare renders as frozen and glassy), a small weight shift or self-adjustment (brushing a strand of hair back, tugging a sleeve). Different body parts move on slightly different timing — overlapping, never synchronized
 - If the person walks in any beat, describe real gait mechanics: heel-to-toe footsteps with weight shifting onto each leg, arms swinging opposite the legs, head staying level — never a gliding or floating walk
 - Target 60-100 words total for the base prompt. Never exceed 150 words — Seedance ignores details beyond that.
 
-STEP 3 — APPEND the matching realism layer (one sentence block, added after the base prompt):
+STEP 3 — APPEND the matching realism layer (one block, added verbatim after the base prompt):
 
-IF UGC: "Shot on smartphone front camera, handheld with subtle natural hand tremor, slight autofocus breathing, imperfect slightly off-center framing, visible pores and natural skin micro-imperfections, no smoothing or beauty filter, natural ambient indoor lighting with mixed warm and cool sources, slight overhead shadow under nose and chin, slightly uneven natural blinking rhythm and subtle breathing motion in chest and shoulders, never perfectly still, mild compression feel, 30fps."
+IF AUTHENTIC: "Filmed on a smartphone: handheld with real hand tremor and small framing corrections, slightly off-center imperfect framing, mild lens softness, faint digital sensor noise and mild compression artifacts, small exposure shifts as the camera auto-adjusts, mixed uneven ambient lighting with natural shadow falloff, authentic skin with visible pores, tiny blemishes and subtle under-eye shadows — no smoothing, no beauty filter — a few stray hair flyaways, natural facial asymmetry, ordinary lived-in surroundings, the unedited spontaneous look of a real social media snapshot, 30fps."
 
-IF SEMIPRO: "Shot on DSLR or mirrorless, lightly stabilized handheld or gimbal, natural skin texture with realistic pores, gentle background separation with realistic depth of field, controlled non-dramatic lighting, relaxed natural posture with subtle breathing and slightly uneven blinks, small stabilizing head movements, slight film grain, 24fps."
+IF HIGH-END: "Shot on a professional cinema camera with real glass character: subtle lens vignetting, gentle highlight halation, fine organic film grain, one smooth deliberate camera movement, precisely controlled lighting that still behaves physically with soft natural falloff and true shadows, photorealistic skin keeping pores and micro-texture under the key light, restrained filmic color grade — rich but never over-processed — performers moving with natural weight and breath, never posed stillness, 24fps."
 
-IF CINEMATIC: "Shot on professional cinema camera, smooth deliberate single camera movement, sharp cinematic focus with intentional background bokeh, precisely controlled dramatic lighting, photorealistic skin detail with natural texture, rich but not over-processed color, performers moving with natural weight and subtle breathing, never posed stillness, 24fps."
+STEP 4 — APPEND this suffix at the very end of every prompt regardless of lane:
+"No warping or morphing, no extra fingers, no bent limbs, no flickering, no ghosting, avoid plastic over-smooth skin and artificial symmetry. No music — natural ambient background sound only."
 
-STEP 4 — APPEND this quality suffix at the very end of every prompt regardless of style:
-"Sharp clarity, natural colors, stable picture, no blur, no ghosting, no flickering, no jitter, avoid bent limbs. No music — natural ambient background sound only."
+(Note: never demand "sharp clarity" or "stable picture" — those instructions cancel the handheld and lens-character realism above and push the output back toward the sterile AI look.)
 
-Return ONLY the final combined prompt text. No JSON, no explanation, no style label.`;
+Return ONLY the final combined prompt text. No JSON, no explanation, no lane label.`;
 
     // Kie.ai's Claude endpoint is native Anthropic Messages format (verified
     // 2026-07-17 with real base64 frames — identical request shape, model
