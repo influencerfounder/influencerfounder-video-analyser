@@ -358,7 +358,8 @@ STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject +
 - Open with a short capture-style scaffold as the very first clause — plain language matching the Step 1 lane, but never the lane word itself and never aspect ratio or duration (the tool sets 9:16 and clip length separately). E.g. "Handheld phone selfie capture:" or "Cinema camera capture:". Never bury this mid-prompt
 - Use [INFLUENCER] as the person placeholder — do NOT describe physical appearance (no hair color, eye color, skin tone, height, build — reference photos handle that)
 - Describe outfit, action, environment, mood, shot progression
-- Use ONE camera movement only — never combine (e.g. "slow dolly in" OR "static locked shot" — never "dolly in while panning left")
+- Use ONE primary camera movement, chosen from Seedance 2.0's own vocabulary: push-in, pull-out, pan, tracking/follow, orbit, handheld, fixed. A compound move must be sequential ("slow push-in then subtle rise") — never simultaneous ("dolly in while panning left")
+- Keep camera movement and subject movement in SEPARATE clauses — mixing them in one clause is Seedance's most common documented failure mode
 - Name specific lighting direction and quality, and make it slightly imperfect — real light is uneven ("warm window light from the left, slightly hot on one cheek, soft shadow falloff to the right" beats "natural lighting")
 - Ground the scene in a lived-in world: one or two ordinary specific details (a half-empty glass on the counter, a jacket over the chair, a slightly crooked picture frame) beat a clean empty backdrop — real rooms are never perfectly tidy or symmetric
 - If any beat shows hands touching an object (phone, cup, product, fabric), anchor the hand explicitly to it (e.g. "fingers grip the phone case") — free-floating hand descriptions are the most common cause of hand artifacts
@@ -368,16 +369,18 @@ STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject +
 
 STEP 3 — APPEND the matching realism layer (one block, added verbatim after the base prompt):
 
-IF AUTHENTIC: "Filmed on a smartphone: handheld with real hand tremor and small framing corrections, slightly off-center imperfect framing, mild lens softness, faint digital sensor noise and mild compression artifacts, small exposure shifts as the camera auto-adjusts, mixed uneven ambient lighting with natural shadow falloff, authentic skin with visible pores, tiny blemishes and subtle under-eye shadows — no smoothing, no beauty filter — a few stray hair flyaways, natural facial asymmetry, ordinary lived-in surroundings, the unedited spontaneous look of a real social media snapshot, 30fps."
+IF AUTHENTIC: "Filmed on a smartphone: natural hand tremor with small framing corrections, slightly off-center framing, mild lens softness, faint sensor noise, mild compression artifacts, small auto-exposure shifts, uneven ambient lighting with natural shadow falloff, real skin with visible pores and tiny blemishes, no beauty filter, stray hair flyaways, natural facial asymmetry, lived-in surroundings, unedited social-media snapshot look, 30fps."
 
-IF HIGH-END: "Shot on a professional cinema camera with real glass character: subtle lens vignetting, gentle highlight halation, fine organic film grain, one smooth deliberate camera movement, precisely controlled lighting that still behaves physically with soft natural falloff and true shadows, photorealistic skin keeping pores and micro-texture under the key light, restrained filmic color grade — rich but never over-processed — performers moving with natural weight and breath, never posed stillness, 24fps."
+IF HIGH-END: "Shot on a cinema camera: subtle lens vignetting, gentle highlight halation, fine organic film grain, controlled lighting with soft physical falloff and true shadows, photorealistic skin keeping pores and micro-texture under the key light, restrained filmic color grade, performers with natural body weight and visible breath, never posed stillness, 24fps."
 
-STEP 4 — APPEND this suffix at the very end of every prompt regardless of lane:
-"No warping or morphing, no extra fingers, no bent limbs, no flickering, no ghosting, avoid plastic over-smooth skin and artificial symmetry. No music — natural ambient background sound only."
+STEP 4 — APPEND this suffix at the very end of every prompt regardless of lane (Seedance's official negative-prompt pattern is a trailing avoid-list):
+"Avoid jitter and bent limbs, avoid temporal flicker, avoid warping or morphing, avoid extra fingers, avoid plastic over-smooth skin and artificial symmetry. No music — natural ambient background sound only."
 
-(Note: never demand "sharp clarity" or "stable picture" — those instructions cancel the handheld and lens-character realism above and push the output back toward the sterile AI look.)
+(Note: never demand "sharp clarity" or "stable picture" — those instructions cancel the handheld and lens-character realism above and push the output back toward the sterile AI look. "Jitter" in the avoid-list means temporal artifact shake, which Seedance distinguishes from intentional handheld movement.)
 
-Return ONLY the final combined prompt text. No JSON, no explanation, no lane label.`;
+OUTPUT FORMAT — exactly this, nothing else:
+Line 1: "LANE: AUTHENTIC" or "LANE: HIGH-END" (this line is stripped by the server and shown to the user as a badge — it is the ONLY place the lane may appear).
+Then a blank line, then the final combined prompt text. No JSON, no explanation, and never a lane word inside the prompt itself.`;
 
     // Kie.ai's Claude endpoint is native Anthropic Messages format (verified
     // 2026-07-17 with real base64 frames — identical request shape, model
@@ -412,8 +415,18 @@ Return ONLY the final combined prompt text. No JSON, no explanation, no lane lab
       }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
     }
 
-    const clonePrompt = claudeResponse.data?.content?.[0]?.text?.trim() || '';
+    let clonePrompt = claudeResponse.data?.content?.[0]?.text?.trim() || '';
     if (!clonePrompt) return res.status(500).json({ success: false, error: 'Empty response from Claude' });
+
+    // The builder outputs the lane classification on line 1 ("LANE: AUTHENTIC" /
+    // "LANE: HIGH-END") so the UI can show which lane it chose — strip it from
+    // the prompt itself (the prompt must never carry a lane label).
+    let lane = null;
+    const laneMatch = clonePrompt.match(/^LANE:\s*(AUTHENTIC|HIGH-END)\s*\n+/i);
+    if (laneMatch) {
+      lane = laneMatch[1].toUpperCase();
+      clonePrompt = clonePrompt.slice(laneMatch[0].length).trim();
+    }
 
     res.json({
       success: true,
@@ -424,6 +437,7 @@ Return ONLY the final combined prompt text. No JSON, no explanation, no lane lab
       firstFrameUrl: firstFrameUrl || frameDataUrls[0] || '',
       transcript,
       transcriptError: transcriptError || undefined,
+      lane,
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
       clonePrompt
     });
