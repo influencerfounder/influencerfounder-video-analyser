@@ -367,20 +367,20 @@ STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject +
 - If the person walks in any beat, describe real gait mechanics: heel-to-toe footsteps with weight shifting onto each leg, arms swinging opposite the legs, head staying level — never a gliding or floating walk
 - Target 60-100 words total for the base prompt. Never exceed 150 words — Seedance ignores details beyond that.
 
-STEP 3 — APPEND the matching realism layer (one block, added verbatim after the base prompt):
-
-IF AUTHENTIC: "Filmed on a smartphone: natural hand tremor with small framing corrections, slightly off-center framing, mild lens softness, faint sensor noise, mild compression artifacts, small auto-exposure shifts, uneven ambient lighting with natural shadow falloff, real skin with visible pores and tiny blemishes, no beauty filter, stray hair flyaways, natural facial asymmetry, lived-in surroundings, unedited social-media snapshot look, 30fps."
-
-IF HIGH-END: "Shot on a cinema camera: subtle lens vignetting, gentle highlight halation, fine organic film grain, controlled lighting with soft physical falloff and true shadows, photorealistic skin keeping pores and micro-texture under the key light, restrained filmic color grade, performers with natural body weight and visible breath, never posed stillness, 24fps."
-
-STEP 4 — APPEND this suffix at the very end of every prompt regardless of lane (Seedance's official negative-prompt pattern is a trailing avoid-list):
-"Avoid jitter and bent limbs, avoid temporal flicker, avoid warping or morphing, avoid extra fingers, avoid plastic over-smooth skin and artificial symmetry. No music — natural ambient background sound only."
-
-(Note: never demand "sharp clarity" or "stable picture" — those instructions cancel the handheld and lens-character realism above and push the output back toward the sterile AI look. "Jitter" in the avoid-list means temporal artifact shake, which Seedance distinguishes from intentional handheld movement.)
+STEP 3 — DO NOT append any realism layer, camera-quality block, fps mention, or avoid-list yourself. The server appends the lane's realism layer and the negative suffix in code (so the user can switch lanes afterwards). Your base prompt must not duplicate that content — never write sensor noise / film grain / "avoid ..." lines, and never demand "sharp clarity" or "stable picture".
 
 OUTPUT FORMAT — exactly this, nothing else:
-Line 1: "LANE: AUTHENTIC" or "LANE: HIGH-END" (this line is stripped by the server and shown to the user as a badge — it is the ONLY place the lane may appear).
-Then a blank line, then the final combined prompt text. No JSON, no explanation, and never a lane word inside the prompt itself.`;
+Line 1: "LANE: AUTHENTIC" or "LANE: HIGH-END" (stripped by the server and shown to the user as a switchable choice — it is the ONLY place the lane may appear).
+Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanation, and never a lane word inside the prompt itself.`;
+
+    // Lane realism layers + negative suffix are appended in CODE (not by Claude) so
+    // they are verbatim-stable — the frontend holds both layers and can swap them
+    // exactly when the user overrides the detected lane before generating.
+    const LANE_LAYERS = {
+      'AUTHENTIC': 'Filmed on a smartphone: natural hand tremor with small framing corrections, slightly off-center framing, mild lens softness, faint sensor noise, mild compression artifacts, small auto-exposure shifts, uneven ambient lighting with natural shadow falloff, real skin with visible pores and tiny blemishes, no beauty filter, stray hair flyaways, natural facial asymmetry, lived-in surroundings, unedited social-media snapshot look, 30fps.',
+      'HIGH-END': 'Shot on a cinema camera: subtle lens vignetting, gentle highlight halation, fine organic film grain, controlled lighting with soft physical falloff and true shadows, photorealistic skin keeping pores and micro-texture under the key light, restrained filmic color grade, performers with natural body weight and visible breath, never posed stillness, 24fps.',
+    };
+    const LANE_SUFFIX = 'Avoid jitter and bent limbs, avoid temporal flicker, avoid warping or morphing, avoid extra fingers, avoid plastic over-smooth skin and artificial symmetry. No music — natural ambient background sound only.';
 
     // Kie.ai's Claude endpoint is native Anthropic Messages format (verified
     // 2026-07-17 with real base64 frames — identical request shape, model
@@ -415,18 +415,20 @@ Then a blank line, then the final combined prompt text. No JSON, no explanation,
       }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
     }
 
-    let clonePrompt = claudeResponse.data?.content?.[0]?.text?.trim() || '';
-    if (!clonePrompt) return res.status(500).json({ success: false, error: 'Empty response from Claude' });
+    let basePrompt = claudeResponse.data?.content?.[0]?.text?.trim() || '';
+    if (!basePrompt) return res.status(500).json({ success: false, error: 'Empty response from Claude' });
 
     // The builder outputs the lane classification on line 1 ("LANE: AUTHENTIC" /
-    // "LANE: HIGH-END") so the UI can show which lane it chose — strip it from
-    // the prompt itself (the prompt must never carry a lane label).
-    let lane = null;
-    const laneMatch = clonePrompt.match(/^LANE:\s*(AUTHENTIC|HIGH-END)\s*\n+/i);
+    // "LANE: HIGH-END") — strip it (the prompt itself must never carry a lane
+    // label), then compose base + lane layer + negative suffix in code so the
+    // frontend can swap layers exactly when the user overrides the lane.
+    let lane = 'AUTHENTIC';
+    const laneMatch = basePrompt.match(/^LANE:\s*(AUTHENTIC|HIGH-END)\s*\n+/i);
     if (laneMatch) {
       lane = laneMatch[1].toUpperCase();
-      clonePrompt = clonePrompt.slice(laneMatch[0].length).trim();
+      basePrompt = basePrompt.slice(laneMatch[0].length).trim();
     }
+    const clonePrompt = `${basePrompt} ${LANE_LAYERS[lane]} ${LANE_SUFFIX}`;
 
     res.json({
       success: true,
@@ -438,6 +440,7 @@ Then a blank line, then the final combined prompt text. No JSON, no explanation,
       transcript,
       transcriptError: transcriptError || undefined,
       lane,
+      laneLayers: LANE_LAYERS,
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
       clonePrompt
     });
