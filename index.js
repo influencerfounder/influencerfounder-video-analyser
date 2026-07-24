@@ -371,6 +371,7 @@ STEP 3 — DO NOT append any realism layer, camera-quality block, fps mention, o
 
 OUTPUT FORMAT — exactly this, nothing else:
 Line 1: "LANE: AUTHENTIC" or "LANE: HIGH-END" (stripped by the server and shown to the user as a switchable choice — it is the ONLY place the lane may appear).
+Line 2: "TALKING: YES" or "TALKING: NO" — YES only if the video is a TALKING-HEAD: a person on camera actually SPEAKING/narrating to the viewer with lip-synced spoken words (a monologue, piece-to-camera, vlog talk, interview answer). NO for everything else — music videos / lip-syncing to a song / singing, dance, product b-roll, montage, voiceover-over-visuals with no on-camera speaker, or no speech at all. When unsure, answer NO.
 Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanation, and never a lane word inside the prompt itself.`;
 
     // Lane realism layers + negative suffix are appended in CODE (not by Claude) so
@@ -428,6 +429,15 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       lane = laneMatch[1].toUpperCase();
       basePrompt = basePrompt.slice(laneMatch[0].length).trim();
     }
+    // TALKING: YES|NO on the next line — whether this is a genuine talking-head
+    // (spoken narration to camera). Used to gate the "exact script" feature so a
+    // music/lip-sync/no-speech video never surfaces a made-up "script".
+    let talkingHead = false;
+    const talkMatch = basePrompt.match(/^TALKING:\s*(YES|NO)\s*\n+/i);
+    if (talkMatch) {
+      talkingHead = talkMatch[1].toUpperCase() === 'YES';
+      basePrompt = basePrompt.slice(talkMatch[0].length).trim();
+    }
     const clonePrompt = `${basePrompt} ${LANE_LAYERS[lane]} ${LANE_SUFFIX}`;
 
     res.json({
@@ -439,6 +449,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       firstFrameUrl: firstFrameUrl || frameDataUrls[0] || '',
       transcript,
       transcriptError: transcriptError || undefined,
+      talkingHead,
       lane,
       laneLayers: LANE_LAYERS,
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
