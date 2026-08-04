@@ -1022,7 +1022,16 @@ function variantRng(seed, index) {
   let s = 0;
   const str = `${seed}::${index}`;
   for (let i = 0; i < str.length; i++) s = (s * 31 + str.charCodeAt(i)) >>> 0;
-  return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  // Avalanche the seed, then warm up. Without this a plain LCG returns nearly
+  // identical FIRST outputs for near-identical seeds ("run::0", "run::1", ...),
+  // and the first draw is the rotation — measured live as -0.15/-0.14/-0.14
+  // across three variants, i.e. effectively constant where it should vary.
+  s ^= s >>> 16; s = Math.imul(s, 2246822507) >>> 0;
+  s ^= s >>> 13; s = Math.imul(s, 3266489909) >>> 0;
+  s ^= s >>> 16;
+  const next = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  for (let i = 0; i < 12; i++) next();
+  return next;
 }
 
 /**
