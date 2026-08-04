@@ -993,6 +993,171 @@ app.post('/api/stamp-video', async (req, res) => {
 });
 
 // ─────────────────────────────────────────
+// TRIAL LAB — MODE A: re-serve variants of your OWN winning video.
+//
+// PURPOSE (different from the creative mode): take a video that already
+// performed, and produce N mechanically-distinct copies so it can be re-served
+// to fresh non-follower audiences via Trial Reels. The viewer has never seen it,
+// so it is new content to them; the tweaks exist to stop it being matched
+// against the account's own earlier post.
+//
+// HONEST CAVEAT, kept here so it isn't lost: Meta's near-duplicate models
+// (SimSearchNet et al.) are trained with AugLy, whose augmentation list IS
+// crop/brightness/contrast/noise/rotation. These transforms are therefore
+// exactly what those models are built to see through, and a perceptual match
+// against the original is likely regardless. The strategy may still work —
+// detection is not the same as suppression, and re-serving to non-followers is
+// legitimate for your own content — but do not assume the tweaks are what makes
+// it work. See METADATA-DUPLICATE-DETECTION-RAPPORT.md.
+//
+// Unlike the device stamp this MUST re-encode (the point is to change pixels),
+// so it is not lossless. CRF 18 keeps that visually negligible.
+// ─────────────────────────────────────────
+
+const VARIANT_MAX = 10;
+
+// Deterministic per-variant RNG so a given seed reproduces the same set —
+// needed to say what a posted file actually was.
+function variantRng(seed, index) {
+  let s = 0;
+  const str = `${seed}::${index}`;
+  for (let i = 0; i < str.length; i++) s = (s * 31 + str.charCodeAt(i)) >>> 0;
+  return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+}
+
+/**
+ * Build one variant's filter chain + human-readable label.
+ *
+ * The rotation/zoom coupling is load-bearing: rotating a W*H frame by θ leaves
+ * black corners unless it is first scaled by at least
+ *   max((W·cosθ + H·sinθ)/W , (H·cosθ + W·sinθ)/H)
+ * At 1080x1920 and θ=0.8° that is 1.025 — so a naive "zoom 1–4%, rotate up to
+ * 0.8°" would produce black wedges whenever a low zoom drew alongside a high
+ * rotation. The required scale is computed from θ and the zoom is raised to
+ * meet it.
+ */
+function buildVariant(rng, W, H, intensity) {
+  const lerp = (a, b) => a + rng() * (b - a);
+  const strong = intensity === 'medium';
+
+  const rotDeg = lerp(-1, 1) * (strong ? 0.6 : 0.3);
+  const rad = Math.abs(rotDeg) * Math.PI / 180;
+  const needW = (W * Math.cos(rad) + H * Math.sin(rad)) / W;
+  const needH = (H * Math.cos(rad) + W * Math.sin(rad)) / H;
+  const needed = Math.max(needW, needH);
+  // Safety factor is 1.2%, NOT the 0.4% first tried. Measured on a solid-colour
+  // source with a full border-ring scan: the bare formula value leaves visible
+  // black wedges once the even() dimension snapping is applied (0.9deg needed
+  // 1.0278 by formula but only went clean at 1.030). 1.2% clears it with room.
+  const zoom = Math.max(lerp(1.01, strong ? 1.05 : 1.03), needed) * 1.012;
+
+  const sat = lerp(strong ? 0.92 : 0.96, strong ? 1.10 : 1.05);
+  const con = lerp(strong ? 0.94 : 0.97, strong ? 1.08 : 1.04);
+  const bri = lerp(strong ? -0.04 : -0.02, strong ? 0.04 : 0.02);
+  const gam = lerp(strong ? 0.94 : 0.97, strong ? 1.07 : 1.04);
+  const noise = Math.round(lerp(2, strong ? 9 : 5));
+  const vig = lerp(Math.PI / 9, Math.PI / 6);
+  const speed = lerp(strong ? 0.96 : 0.98, strong ? 1.04 : 1.02);
+
+  // Even dimensions are required by h264.
+  const even = (n) => { const v = Math.round(n); return v % 2 ? v + 1 : v; };
+  const sw = even(W * zoom), sh = even(H * zoom);
+
+  const vf = [
+    `scale=${sw}:${sh}`,
+    `rotate=${(rotDeg * Math.PI / 180).toFixed(6)}:ow=${sw}:oh=${sh}`,
+    `crop=${W}:${H}`,
+    `eq=saturation=${sat.toFixed(3)}:contrast=${con.toFixed(3)}:brightness=${bri.toFixed(3)}:gamma=${gam.toFixed(3)}`,
+    `noise=alls=${noise}:allf=t`,
+    `vignette=a=${vig.toFixed(4)}`,
+    `setpts=${(1 / speed).toFixed(5)}*PTS`,
+  ].join(',');
+
+  // atempo is only valid in [0.5, 2.0]; our range is well inside it.
+  const af = `atempo=${speed.toFixed(5)},volume=${lerp(0.97, 1.03).toFixed(3)}`;
+
+  return {
+    vf, af,
+    label: `zoom ${((zoom - 1) * 100).toFixed(1)}% · rot ${rotDeg.toFixed(2)}° · sat ${sat.toFixed(2)} · con ${con.toFixed(2)} · grain ${noise} · ${speed.toFixed(3)}x`,
+    params: { zoom: +zoom.toFixed(4), rotDeg: +rotDeg.toFixed(3), sat: +sat.toFixed(3), con: +con.toFixed(3), bri: +bri.toFixed(3), gam: +gam.toFixed(3), noise, speed: +speed.toFixed(4) },
+  };
+}
+
+app.post('/api/variants', async (req, res) => {
+  const { videoUrl, count, seed, intensity, metadata } = req.body || {};
+  if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+  const n = Math.max(1, Math.min(VARIANT_MAX, parseInt(count, 10) || 3));
+  const runSeed = String(seed || Date.now());
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'variants-'));
+  const inputPath = path.join(tmpDir, 'input.mp4');
+
+  // Optional device stamp per variant, reusing the stamp whitelist so a
+  // re-served file also carries fresh capture metadata.
+  const metaArgs = [];
+  if (metadata && typeof metadata === 'object') {
+    for (const key of STAMP_KEYS) {
+      const val = sanitiseMetaValue(metadata[key]);
+      if (val !== null) metaArgs.push('-metadata', `${key}=${val}`);
+    }
+    if (metaArgs.length) metaArgs.unshift('-movflags', 'use_metadata_tags');
+  }
+
+  try {
+    const dl = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 120000 });
+    fs.writeFileSync(inputPath, Buffer.from(dl.data));
+    const { width, height } = await getVideoDimensions(inputPath);
+    if (!width || !height) throw new Error('Could not read video dimensions');
+
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const v = buildVariant(variantRng(runSeed, i), width, height, intensity);
+      const token = `var_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const outPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+
+      await new Promise((resolve, reject) => {
+        ffmpeg(inputPath)
+          .outputOptions([
+            '-vf', v.vf,
+            '-af', v.af,
+            // CRF 18 = visually transparent for this purpose. A re-encode is
+            // unavoidable here (changing pixels is the whole point), so the
+            // job is to make the loss negligible rather than pretend it away.
+            '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-fflags', '+bitexact',
+            ...metaArgs,
+          ])
+          .output(outPath)
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
+
+      if (!fs.existsSync(outPath)) throw new Error(`Variant ${i + 1} produced no file`);
+      tempVideos.set(token, { filePath: outPath, createdAt: Date.now() });
+      out.push({
+        index: i + 1,
+        variantId: `${runSeed}-${i + 1}`,
+        url: `${req.protocol}://${req.get('host')}/api/temp-video/${token}`,
+        label: v.label,
+        params: v.params,
+        bytes: fs.statSync(outPath).size,
+      });
+      console.log(`[variants:${runSeed}] ${i + 1}/${n} ${v.label}`);
+    }
+
+    res.json({ success: true, seed: runSeed, count: out.length, dimensions: { width, height }, variants: out });
+  } catch (err) {
+    const message = err.response?.data?.error?.message || err.message;
+    console.error(`[variants:${runSeed}] error:`, message);
+    res.status(500).json({ success: false, error: message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
+// ─────────────────────────────────────────
 // START
 // ─────────────────────────────────────────
 
