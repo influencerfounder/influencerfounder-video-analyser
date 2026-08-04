@@ -1045,7 +1045,7 @@ function variantRng(seed, index) {
  * rotation. The required scale is computed from θ and the zoom is raised to
  * meet it.
  */
-function buildVariant(rng, W, H, intensity) {
+function buildVariant(rng, W, H, intensity, opts = {}) {
   const lerp = (a, b) => a + rng() * (b - a);
   const strong = intensity === 'medium';
 
@@ -1054,11 +1054,25 @@ function buildVariant(rng, W, H, intensity) {
   const needW = (W * Math.cos(rad) + H * Math.sin(rad)) / W;
   const needH = (H * Math.cos(rad) + W * Math.sin(rad)) / H;
   const needed = Math.max(needW, needH);
+
+  // ASYMMETRIC CROP. A centered crop only ever undoes the zoom; shifting the
+  // crop window off-centre moves the whole spatial layout, which displaces far
+  // more pixels than a centered zoom of the same magnitude.
+  //
+  // It costs clearance though: shifting toward an edge eats the margin the
+  // rotation wedge needs on that side. Margin per side is (z-1)/2, so a shift
+  // of fraction f requires z >= needed + 2f. That term is added below — do not
+  // remove it or the crop will walk into the black wedge.
+  const maxShift = strong ? 0.020 : 0.012;
+  const shiftX = lerp(-1, 1) * maxShift;
+  const shiftY = lerp(-1, 1) * maxShift;
+  const shiftCost = 2 * Math.max(Math.abs(shiftX), Math.abs(shiftY));
+
   // Safety factor is 1.2%, NOT the 0.4% first tried. Measured on a solid-colour
   // source with a full border-ring scan: the bare formula value leaves visible
   // black wedges once the even() dimension snapping is applied (0.9deg needed
   // 1.0278 by formula but only went clean at 1.030). 1.2% clears it with room.
-  const zoom = Math.max(lerp(1.01, strong ? 1.05 : 1.03), needed) * 1.012;
+  const zoom = Math.max(lerp(1.01, strong ? 1.05 : 1.03), needed + shiftCost) * 1.012;
 
   const sat = lerp(strong ? 0.92 : 0.96, strong ? 1.10 : 1.05);
   const con = lerp(strong ? 0.94 : 0.97, strong ? 1.08 : 1.04);
@@ -1072,10 +1086,19 @@ function buildVariant(rng, W, H, intensity) {
   const even = (n) => { const v = Math.round(n); return v % 2 ? v + 1 : v; };
   const sw = even(W * zoom), sh = even(H * zoom);
 
+  // Off-centre crop origin, clamped so it can never exceed the available margin.
+  const cx = Math.max(0, Math.min(sw - W, Math.round((sw - W) / 2 + shiftX * W)));
+  const cy = Math.max(0, Math.min(sh - H, Math.round((sh - H) / 2 + shiftY * H)));
+
   const vf = [
     `scale=${sw}:${sh}`,
     `rotate=${(rotDeg * Math.PI / 180).toFixed(6)}:ow=${sw}:oh=${sh}`,
-    `crop=${W}:${H}`,
+    `crop=${W}:${H}:${cx}:${cy}`,
+    // Mirror is OPT-IN only. It displaces more pixels than anything else here,
+    // but it reverses on-screen text and logos, mirrors the influencer's face,
+    // and moves every tattoo to the wrong arm — which for identity-consistent
+    // personas (Tatthex, Axel) is a visible break, not a subtle tweak.
+    ...(opts.flip ? ['hflip'] : []),
     `eq=saturation=${sat.toFixed(3)}:contrast=${con.toFixed(3)}:brightness=${bri.toFixed(3)}:gamma=${gam.toFixed(3)}`,
     `noise=alls=${noise}:allf=t`,
     `vignette=a=${vig.toFixed(4)}`,
@@ -1085,15 +1108,194 @@ function buildVariant(rng, W, H, intensity) {
   // atempo is only valid in [0.5, 2.0]; our range is well inside it.
   const af = `atempo=${speed.toFixed(5)},volume=${lerp(0.97, 1.03).toFixed(3)}`;
 
+  const shiftPx = `${Math.round(shiftX * W)},${Math.round(shiftY * H)}px`;
   return {
     vf, af,
-    label: `zoom ${((zoom - 1) * 100).toFixed(1)}% · rot ${rotDeg.toFixed(2)}° · sat ${sat.toFixed(2)} · con ${con.toFixed(2)} · grain ${noise} · ${speed.toFixed(3)}x`,
-    params: { zoom: +zoom.toFixed(4), rotDeg: +rotDeg.toFixed(3), sat: +sat.toFixed(3), con: +con.toFixed(3), bri: +bri.toFixed(3), gam: +gam.toFixed(3), noise, speed: +speed.toFixed(4) },
+    label: `zoom ${((zoom - 1) * 100).toFixed(1)}% · rot ${rotDeg.toFixed(2)}° · shift ${shiftPx}${opts.flip ? ' · mirrored' : ''} · sat ${sat.toFixed(2)} · grain ${noise} · ${speed.toFixed(3)}x`,
+    params: {
+      zoom: +zoom.toFixed(4), rotDeg: +rotDeg.toFixed(3),
+      cropX: cx, cropY: cy, shiftX: +shiftX.toFixed(4), shiftY: +shiftY.toFixed(4),
+      flip: !!opts.flip,
+      sat: +sat.toFixed(3), con: +con.toFixed(3), bri: +bri.toFixed(3), gam: +gam.toFixed(3),
+      noise, speed: +speed.toFixed(4),
+    },
   };
 }
 
+// ─────────────────────────────────────────
+// PERCEPTUAL HASH — does a variant still look like the original to a
+// fingerprinting system?
+//
+// This is deliberately NOT SSIM. SSIM measures raw pixel difference, so after a
+// crop and a colour grade it always reports a big change — a metric that can
+// only ever say "it worked". A DCT perceptual hash is what near-duplicate
+// systems actually compute, so its distance answers the question that matters:
+// is this variant still going to be matched against the original?
+//
+// HONEST SCOPE: this is standard 64-bit pHash. It is the same FAMILY as Meta's
+// PDQ (both DCT-based) but it is not PDQ, and the thresholds below are the
+// common convention, not Meta's. Read it as a strong indicator, not a verdict.
+// ─────────────────────────────────────────
+
+const PHASH_N = 32;   // DCT input size
+const PHASH_K = 8;    // low-frequency block kept
+
+// cos((2x+1) * u * pi / 2N), precomputed once.
+const DCT_COS = (() => {
+  const t = [];
+  for (let u = 0; u < PHASH_K; u++) {
+    t[u] = new Float64Array(PHASH_N);
+    for (let x = 0; x < PHASH_N; x++) {
+      t[u][x] = Math.cos(((2 * x + 1) * u * Math.PI) / (2 * PHASH_N));
+    }
+  }
+  return t;
+})();
+
+/** 32x32 grayscale bytes -> 64-bit hash as a Buffer(8). */
+function pHashFromGray(bytes) {
+  // Separable 2D DCT-II, only the KxK low-frequency corner.
+  const rows = [];
+  for (let y = 0; y < PHASH_N; y++) {
+    const r = new Float64Array(PHASH_K);
+    for (let u = 0; u < PHASH_K; u++) {
+      let s = 0;
+      for (let x = 0; x < PHASH_N; x++) s += bytes[y * PHASH_N + x] * DCT_COS[u][x];
+      r[u] = s;
+    }
+    rows.push(r);
+  }
+  const coeffs = new Float64Array(PHASH_K * PHASH_K);
+  for (let u = 0; u < PHASH_K; u++) {
+    for (let v = 0; v < PHASH_K; v++) {
+      let s = 0;
+      for (let y = 0; y < PHASH_N; y++) s += rows[y][v] * DCT_COS[u][y];
+      coeffs[u * PHASH_K + v] = s;
+    }
+  }
+  // Median over the block EXCLUDING the DC term — DC encodes overall
+  // brightness, so including it makes the hash react to a brightness tweak,
+  // which is exactly the kind of change a perceptual hash should ignore.
+  const ac = Array.from(coeffs).slice(1).sort((a, b) => a - b);
+  const median = (ac[Math.floor(ac.length / 2) - 1] + ac[Math.floor(ac.length / 2)]) / 2;
+
+  const out = Buffer.alloc(8);
+  for (let i = 0; i < 64; i++) {
+    if (coeffs[i] > median) out[i >> 3] |= (1 << (7 - (i & 7)));
+  }
+  return out;
+}
+
+const POPCOUNT = (() => { const t = new Uint8Array(256); for (let i = 0; i < 256; i++) t[i] = (i & 1) + t[i >> 1]; return t; })();
+function hamming(a, b) {
+  let d = 0;
+  for (let i = 0; i < 8; i++) d += POPCOUNT[a[i] ^ b[i]];
+  return d;
+}
+
+function probeDuration(filePath) {
+  return new Promise((resolve) => {
+    ffmpeg.ffprobe(filePath, (err, meta) => resolve(err ? 0 : (meta?.format?.duration || 0)));
+  });
+}
+
+/**
+ * Sample `count` EVENLY SPACED frames as 32x32 gray and hash each.
+ *
+ * Sampling is duration-relative (fps = count/duration) rather than "the first N
+ * frames" — otherwise every comparison would only ever look at the opening
+ * moment. Because it is proportional, a variant with a slight speed change
+ * still samples the same relative positions as the original, which is what
+ * makes the two hash sequences comparable.
+ *
+ * Frames go to a temp file rather than a pipe: piping raw video introduces
+ * flush-timing subtleties between ffmpeg's 'end' and the stream draining, and
+ * this is not performance-critical.
+ */
+async function hashVideo(filePath, count) {
+  const dur = await probeDuration(filePath);
+  const rate = dur > 0.1 ? (count / dur) : 1;
+  const rawPath = `${filePath}.gray`;
+
+  await new Promise((resolve, reject) => {
+    ffmpeg(filePath)
+      .outputOptions([
+        '-vf', `fps=${rate.toFixed(6)},scale=${PHASH_N}:${PHASH_N},format=gray`,
+        '-frames:v', String(count),
+        '-f', 'rawvideo', '-pix_fmt', 'gray',
+      ])
+      .output(rawPath)
+      .on('end', resolve)
+      .on('error', reject)
+      .run();
+  });
+
+  const buf = fs.readFileSync(rawPath);
+  try { fs.unlinkSync(rawPath); } catch (_) {}
+  const size = PHASH_N * PHASH_N;
+  const hashes = [];
+  for (let i = 0; i + size <= buf.length; i += size) {
+    hashes.push(pHashFromGray(buf.subarray(i, i + size)));
+  }
+  if (!hashes.length) throw new Error('No frames hashed');
+  return hashes;
+}
+
+function verdictFor(distance) {
+  // Conventional 64-bit pHash bands. Stated as guidance, not as Meta's rule.
+  if (distance <= 10) return { verdict: 'would still match', detail: 'A dedup system would very likely treat this as the same video.' };
+  if (distance <= 20) return { verdict: 'borderline', detail: 'Close enough that a match is plausible.' };
+  return { verdict: 'likely distinct', detail: 'Far enough apart that a perceptual match is unlikely.' };
+}
+
+app.post('/api/phash-compare', async (req, res) => {
+  const { videoUrl, compareUrls, frames } = req.body || {};
+  if (!videoUrl || !Array.isArray(compareUrls) || !compareUrls.length) {
+    return res.status(400).json({ success: false, error: 'Need videoUrl and a non-empty compareUrls array' });
+  }
+  const n = Math.max(3, Math.min(12, parseInt(frames, 10) || 6));
+  const urls = compareUrls.slice(0, 10);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'phash-'));
+
+  try {
+    const grab = async (u, name) => {
+      const p = path.join(tmpDir, name);
+      const r = await axios.get(u, { responseType: 'arraybuffer', timeout: 120000 });
+      fs.writeFileSync(p, Buffer.from(r.data));
+      return p;
+    };
+
+    const baseHashes = await hashVideo(await grab(videoUrl, 'base.mp4'), n);
+
+    const results = [];
+    for (let i = 0; i < urls.length; i++) {
+      try {
+        const h = await hashVideo(await grab(urls[i], `cmp${i}.mp4`), n);
+        const pairs = Math.min(baseHashes.length, h.length);
+        if (!pairs) throw new Error('No comparable frames');
+        let total = 0, max = 0;
+        for (let f = 0; f < pairs; f++) {
+          const d = hamming(baseHashes[f], h[f]);
+          total += d; if (d > max) max = d;
+        }
+        const avg = total / pairs;
+        results.push({ index: i + 1, url: urls[i], framesCompared: pairs,
+          avgDistance: +avg.toFixed(2), maxDistance: max, ...verdictFor(avg) });
+      } catch (e) {
+        results.push({ index: i + 1, url: urls[i], error: e.message });
+      }
+    }
+    res.json({ success: true, frames: n, bits: 64, baseFrames: baseHashes.length, results });
+  } catch (err) {
+    console.error('[phash] error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
 app.post('/api/variants', async (req, res) => {
-  const { videoUrl, count, seed, intensity, metadata } = req.body || {};
+  const { videoUrl, count, seed, intensity, metadata, flip } = req.body || {};
   if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
   const n = Math.max(1, Math.min(VARIANT_MAX, parseInt(count, 10) || 3));
   const runSeed = String(seed || Date.now());
@@ -1120,7 +1322,7 @@ app.post('/api/variants', async (req, res) => {
 
     const out = [];
     for (let i = 0; i < n; i++) {
-      const v = buildVariant(variantRng(runSeed, i), width, height, intensity);
+      const v = buildVariant(variantRng(runSeed, i), width, height, intensity, { flip: !!flip });
       const token = `var_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const outPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
 
