@@ -912,7 +912,16 @@ const STAMP_KEYS = [
 //                         `encoder: Lavc.. libx264`. Using `-metadata:s:v
 //                         encoder=` instead makes ffmpeg write `vendor_id:
 //                         FFMP`, which is a worse tell — do not "simplify" to it.
+//   -map 0 -ignore_unknown  ffmpeg's DEFAULT stream selection keeps only the
+//                         single "best" video + "best" audio and silently drops
+//                         everything else. Measured on a 4-stream test file:
+//                         788,493 -> 587,054 bytes, having thrown away a second
+//                         audio track and a data track with no error. -map 0
+//                         preserves every stream; -ignore_unknown skips the ones
+//                         mp4 genuinely cannot hold instead of failing the run.
 const STAMP_FIXED_ARGS = [
+  '-map', '0',
+  '-ignore_unknown',
   '-fflags', '+bitexact',
   '-map_metadata:s:v', '-1',
   '-map_metadata:s:a', '-1',
