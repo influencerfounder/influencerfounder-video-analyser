@@ -874,6 +874,116 @@ app.post('/api/stitch', async (req, res) => {
 });
 
 // ─────────────────────────────────────────
+// DEVICE STAMP — write Apple-shaped QuickTime metadata into a video.
+// OWNER-ONLY EXPERIMENT (gated upstream on Vercel, never exposed to students).
+//
+// Remux only: `-c copy` on both streams, so the bitstream is never re-encoded
+// and there is zero quality loss. Adding atoms shifts byte offsets, which is
+// exactly what would break `stco` if we edited in place — remuxing sidesteps
+// that because ffmpeg rebuilds the offset tables correctly.
+//
+// SECURITY: this accepts a PROFILE OBJECT, never ffmpeg arguments. Raw args
+// over HTTP would let any caller drive ffmpeg. Keys come from a fixed
+// whitelist below; only values are taken from the request, and they are
+// sanitised (control chars stripped, length capped) before use.
+// ─────────────────────────────────────────
+
+// Only these metadata keys may ever be written. Adding to this list is a
+// deliberate act; the request cannot introduce a new key.
+// NOTE: a generic `location` key is deliberately absent. ffmpeg's mov muxer
+// rewrites it into `location` + `location-eng` with a 6-decimal altitude,
+// which then sits in the file contradicting the correctly-padded ISO6709 key.
+const STAMP_KEYS = [
+  'com.apple.quicktime.make',
+  'com.apple.quicktime.model',
+  'com.apple.quicktime.software',
+  'com.apple.quicktime.creationdate',
+  'com.apple.quicktime.location.ISO6709',
+  'com.apple.quicktime.location.accuracy.horizontal',
+  'make',
+  'model',
+  'creation_time',
+];
+
+// Fixed output flags, hardcoded here rather than accepted from the request.
+// Combination established by measurement (see deviceStamp.js for the full note):
+//   -fflags +bitexact     removes ffmpeg's own `encoder: Lavf<ver>` signature
+//   -map_metadata:s:* -1  drops inherited stream tags such as the generator's
+//                         `encoder: Lavc.. libx264`. Using `-metadata:s:v
+//                         encoder=` instead makes ffmpeg write `vendor_id:
+//                         FFMP`, which is a worse tell — do not "simplify" to it.
+const STAMP_FIXED_ARGS = [
+  '-fflags', '+bitexact',
+  '-map_metadata:s:v', '-1',
+  '-map_metadata:s:a', '-1',
+];
+
+function sanitiseMetaValue(v) {
+  if (v === null || v === undefined) return null;
+  // Strip control characters and newlines (which would corrupt the atom),
+  // collapse whitespace, cap length.
+  const s = String(v).replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 256);
+  return s.length ? s : null;
+}
+
+app.post('/api/stamp-video', async (req, res) => {
+  const { videoUrl, metadata } = req.body || {};
+  if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+  if (!metadata || typeof metadata !== 'object') {
+    return res.status(400).json({ success: false, error: 'Missing metadata object' });
+  }
+
+  // Build args from the whitelist, not from whatever the caller sent.
+  const args = ['-movflags', 'use_metadata_tags', ...STAMP_FIXED_ARGS];
+  const written = {};
+  for (const key of STAMP_KEYS) {
+    const val = sanitiseMetaValue(metadata[key]);
+    if (val === null) continue;
+    args.push('-metadata', `${key}=${val}`);
+    written[key] = val;
+  }
+  if (!Object.keys(written).length) {
+    return res.status(400).json({ success: false, error: 'No recognised metadata keys supplied' });
+  }
+
+  const token = `stamp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stamp-'));
+  const inputPath = path.join(tmpDir, 'input.mp4');
+  const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+
+  try {
+    const dl = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 120000 });
+    fs.writeFileSync(inputPath, Buffer.from(dl.data));
+    const inBytes = fs.statSync(inputPath).size;
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(inputPath)
+        // -c copy on BOTH streams: container rewrite only, pixels and audio
+        // are bit-for-bit identical to the input.
+        .outputOptions(['-c', 'copy', ...args])
+        .output(outputPath)
+        .on('end', resolve)
+        .on('error', reject)
+        .run();
+    });
+
+    if (!fs.existsSync(outputPath)) throw new Error('Stamp produced no output file');
+    const outBytes = fs.statSync(outputPath).size;
+
+    tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
+    const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
+    console.log(`[stamp:${token}] ${inBytes} -> ${outBytes} bytes, ${Object.keys(written).length} keys`);
+    res.json({ success: true, videoUrl: publicUrl, token, written, inBytes, outBytes });
+  } catch (err) {
+    const message = err.response?.data?.error?.message || err.message;
+    console.error(`[stamp:${token}] error:`, message);
+    res.status(500).json({ success: false, error: message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
+// ─────────────────────────────────────────
 // START
 // ─────────────────────────────────────────
 
