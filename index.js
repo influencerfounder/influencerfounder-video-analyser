@@ -948,7 +948,6 @@ app.post('/api/stamp-video', async (req, res) => {
   for (const key of STAMP_KEYS) {
     const val = sanitiseMetaValue(metadata[key]);
     if (val === null) continue;
-    args.push('-metadata', `${key}=${val}`);
     written[key] = val;
   }
   if (!Object.keys(written).length) {
@@ -966,14 +965,22 @@ app.post('/api/stamp-video', async (req, res) => {
     const inBytes = fs.statSync(inputPath).size;
 
     await new Promise((resolve, reject) => {
-      ffmpeg(inputPath)
-        // -c copy on BOTH streams: container rewrite only, pixels and audio
-        // are bit-for-bit identical to the input.
-        .outputOptions(['-c', 'copy', ...args])
-        .output(outputPath)
-        .on('end', resolve)
-        .on('error', reject)
-        .run();
+      // -c copy on BOTH streams: container rewrite only, pixels and audio
+      // are bit-for-bit identical to the input.
+      const cmd = ffmpeg(inputPath).outputOptions(['-c', 'copy', ...args]);
+      // ⚠️ Each -metadata pair MUST go in as varargs, never as a 2-element
+      // array. fluent-ffmpeg splits an array element containing exactly two
+      // space-separated tokens into option+value, so
+      //   ['-metadata', 'com.apple.quicktime.model=iPhone 14']
+      // became  ... 'model=iPhone', '14'  and ffmpeg then treated '14' as an
+      // output filename ("Error opening output file 14"). Measured: a
+      // two-token value splits, a three-or-more-token value does not — which
+      // is why 'iPhone 13 mini' and 'iPhone 14 Pro Max' worked while
+      // 'iPhone 13/14/15' failed. Varargs are never split.
+      for (const [key, val] of Object.entries(written)) {
+        cmd.outputOptions('-metadata', `${key}=${val}`);
+      }
+      cmd.output(outputPath).on('end', resolve).on('error', reject).run();
     });
 
     if (!fs.existsSync(outputPath)) throw new Error('Stamp produced no output file');
@@ -1305,14 +1312,17 @@ app.post('/api/variants', async (req, res) => {
 
   // Optional device stamp per variant, reusing the stamp whitelist so a
   // re-served file also carries fresh capture metadata.
-  const metaArgs = [];
+  // Collected as PAIRS, applied via varargs below — never as array elements.
+  // See the note in /api/stamp-video: fluent-ffmpeg splits a two-token array
+  // element into option+value, which corrupts values like "iPhone 14".
+  const metaPairs = [];
   if (metadata && typeof metadata === 'object') {
     for (const key of STAMP_KEYS) {
       const val = sanitiseMetaValue(metadata[key]);
-      if (val !== null) metaArgs.push('-metadata', `${key}=${val}`);
+      if (val !== null) metaPairs.push([key, val]);
     }
-    if (metaArgs.length) metaArgs.unshift('-movflags', 'use_metadata_tags');
   }
+  const metaArgs = metaPairs.length ? ['-movflags', 'use_metadata_tags'] : [];
 
   try {
     const dl = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 120000 });
@@ -1327,7 +1337,7 @@ app.post('/api/variants', async (req, res) => {
       const outPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
 
       await new Promise((resolve, reject) => {
-        ffmpeg(inputPath)
+        const cmd = ffmpeg(inputPath)
           .outputOptions([
             '-vf', v.vf,
             '-af', v.af,
@@ -1338,11 +1348,9 @@ app.post('/api/variants', async (req, res) => {
             '-c:a', 'aac', '-b:a', '128k',
             '-fflags', '+bitexact',
             ...metaArgs,
-          ])
-          .output(outPath)
-          .on('end', resolve)
-          .on('error', reject)
-          .run();
+          ]);
+        for (const [k, val] of metaPairs) cmd.outputOptions('-metadata', `${k}=${val}`);
+        cmd.output(outPath).on('end', resolve).on('error', reject).run();
       });
 
       if (!fs.existsSync(outPath)) throw new Error(`Variant ${i + 1} produced no file`);
