@@ -39,7 +39,28 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
   const item = Array.isArray(items) ? items[0] : null;
   const remoteVideoUrl = item?.downloadedVideo || item?.videoUrl;
   if (!remoteVideoUrl) {
-    throw new Error('Could not find this Instagram post — it may be private, deleted, or the link is invalid.');
+    // Apify distinguishes a DELETED post from one that merely is not publicly
+    // readable, and that difference is invisible everywhere else: Instagram's
+    // oEmbed answers the identical 404 "No Media Match" for both (measured
+    // 2026-08-07). This is the only authoritative signal in the whole pipeline,
+    // so it is passed upstream rather than collapsed into one message.
+    // NOT ASSUMED for this actor: apify/instagram-scraper emits not_found /
+    // restricted_page; whether instagram-reel-scraper uses the same vocabulary is
+    // unverified, so anything unrecognised stays 'unknown' and marks nothing.
+    const raw = String(item?.error || item?.errorDescription || '').toLowerCase();
+    const reason = /not_?found|no results|does not exist/.test(raw) ? 'not_found'
+      : /restrict|private|login|unavailable/.test(raw) ? 'restricted_page'
+      : 'unknown';
+    const err = new Error(
+      reason === 'not_found'
+        ? 'This Instagram post no longer exists — it was deleted or the link is wrong.'
+        : reason === 'restricted_page'
+          ? 'This account is private or restricted, so the post cannot be fetched.'
+          : 'Could not find this Instagram post — it may be private, deleted, or the link is invalid.'
+    );
+    err.reason = reason;
+    err.apifyError = raw || null;
+    throw err;
   }
 
   const videoRes = await axios.get(remoteVideoUrl, {
@@ -119,7 +140,7 @@ app.post('/api/clone', async (req, res) => {
       try {
         await downloadInstagramViaApify(videoUrl, videoPath);
       } catch (e) {
-        return res.status(400).json({ success: false, error: e.message });
+        return res.status(400).json({ success: false, error: e.message, reason: e.reason || null, apifyError: e.apifyError || null });
       }
       if (!fs.existsSync(videoPath) || fs.statSync(videoPath).size < 1000) {
         return res.status(400).json({ success: false, error: 'Could not download video from this URL. The post may be private or the link may have expired.' });
