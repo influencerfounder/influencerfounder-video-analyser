@@ -827,12 +827,27 @@ app.post('/api/burn-captions', async (req, res) => {
 // with differing codec/fps/SAR, which generated clips often have. (2026-07-11)
 // ─────────────────────────────────────────
 app.post('/api/stitch', async (req, res) => {
-  const { videoUrls } = req.body;
+  const { videoUrls, width, height } = req.body;
   if (!Array.isArray(videoUrls) || videoUrls.length < 2) {
     return res.status(400).json({ success: false, error: 'Need at least 2 video URLs to stitch' });
   }
   const urls = videoUrls.filter(u => typeof u === 'string' && u.trim()).slice(0, 6); // cap at 6 (~90s)
   if (urls.length < 2) return res.status(400).json({ success: false, error: 'Need at least 2 valid video URLs' });
+
+  // Output canvas. Defaults to 1080x1920 — Sequence Clips' original hardcoded
+  // behaviour, kept so that flow does not regress.
+  // Hook swap passes the SOURCE clip's real dimensions instead: normalising a
+  // 480p body up to 1080p would undo the deliberately low-fi look the AUTHENTIC
+  // lane depends on, and re-encoding an upscale adds nothing but file size.
+  // h264 requires even dimensions, hence the rounding.
+  const even = n => Math.max(2, Math.round(n / 2) * 2);
+  let outW = 1080, outH = 1920;
+  const rw = Number(width), rh = Number(height);
+  if (Number.isFinite(rw) && Number.isFinite(rh) && rw > 0 && rh > 0) {
+    const w = even(rw), h = even(rh);
+    // Bounds keep a bad request from asking ffmpeg for an absurd canvas.
+    if (w >= 128 && w <= 2160 && h >= 128 && h <= 3840) { outW = w; outH = h; }
+  }
 
   const token = `seq_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stitch-'));
@@ -847,7 +862,7 @@ app.post('/api/stitch', async (req, res) => {
       fs.writeFileSync(raw, Buffer.from(dl.data));
       await new Promise((resolve, reject) => {
         ffmpeg(raw)
-          .videoFilters('scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1')
+          .videoFilters(`scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2,setsar=1`)
           .outputOptions(['-r 24', '-c:v libx264', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
           .output(norm).on('end', resolve).on('error', reject).run();
       });
@@ -863,8 +878,8 @@ app.post('/api/stitch', async (req, res) => {
     });
     tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
     const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
-    console.log(`[stitch:${token}] stitched ${normPaths.length} clips`);
-    res.json({ success: true, videoUrl: publicUrl, token, clipCount: normPaths.length });
+    console.log(`[stitch:${token}] stitched ${normPaths.length} clips at ${outW}x${outH}`);
+    res.json({ success: true, videoUrl: publicUrl, token, clipCount: normPaths.length, width: outW, height: outH });
   } catch (err) {
     console.error(`[stitch:${token}] error:`, err.message);
     res.status(500).json({ success: false, error: err.message });
