@@ -102,7 +102,7 @@ app.get('/', (req, res) => {
 
 // ─────────────────────────────────────────
 // VIRAL LAB — ANALYSE VIDEO
-// Full deconstruction: virality scorecard, hook, blueprint, Wan 2.6 prompt
+// Full deconstruction: virality scorecard, hook, blueprint, Seedance prompt
 // ─────────────────────────────────────────
 
 // (Legacy handleViralAnalyse removed 2026-07-10 — it passed only the video URL as TEXT
@@ -364,10 +364,10 @@ app.post('/api/clone', async (req, res) => {
     }));
 
     const userText = transcript
-      ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the Wan 2.6 prompt.`
-      : `These ${frameBase64s.length} frames were extracted from the viral video (no audio). Create the Wan 2.6 prompt.`;
+      ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the Seedance prompt.`
+      : `These ${frameBase64s.length} frames were extracted from the viral video (no audio). Create the Seedance prompt.`;
 
-    const systemPrompt = `You are a Seedance 2.0 prompt engineer. Study the frames and transcript carefully and follow these four steps exactly.
+    const systemPrompt = `You are a Seedance 2.5 prompt engineer. Study the frames and transcript carefully and follow these four steps exactly.
 
 STEP 1 — CLASSIFY THE SOURCE as exactly one of TWO lanes:
 - AUTHENTIC: phone-shot / creator-made — handheld or propped phone, casual real-world setting, available or simple lighting, unpolished. The huge majority of viral short-form lives here.
@@ -379,7 +379,7 @@ STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject +
 - Open with a short capture-style scaffold as the very first clause — plain language matching the Step 1 lane, but never the lane word itself and never aspect ratio or duration (the tool sets 9:16 and clip length separately). E.g. "Handheld phone selfie capture:" or "Cinema camera capture:". Never bury this mid-prompt
 - Use [INFLUENCER] as the person placeholder — do NOT describe physical appearance (no hair color, eye color, skin tone, height, build — reference photos handle that)
 - Describe outfit, action, environment, mood, shot progression
-- Use ONE primary camera movement, chosen from Seedance 2.0's own vocabulary: push-in, pull-out, pan, tracking/follow, orbit, handheld, fixed. A compound move must be sequential ("slow push-in then subtle rise") — never simultaneous ("dolly in while panning left")
+- Use ONE primary camera movement, chosen from Seedance's own vocabulary: push-in, pull-out, pan, tracking/follow, orbit, handheld, fixed. A compound move must be sequential ("slow push-in then subtle rise") — never simultaneous ("dolly in while panning left")
 - Keep camera movement and subject movement in SEPARATE clauses — mixing them in one clause is Seedance's most common documented failure mode
 - Name specific lighting direction and quality, and make it slightly imperfect — real light is uneven ("warm window light from the left, slightly hot on one cheek, soft shadow falloff to the right" beats "natural lighting")
 - Ground the scene in a lived-in world: one or two ordinary specific details (a half-empty glass on the counter, a jacket over the chair, a slightly crooked picture frame) beat a clean empty backdrop — real rooms are never perfectly tidy or symmetric
