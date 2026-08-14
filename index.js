@@ -755,8 +755,19 @@ app.post('/api/burn-captions', async (req, res) => {
   const { videoUrl, scriptText } = req.body;
   if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
+  // Groq first: it is already configured on this service (it powers /api/clone's
+  // transcription since 2026-07-01) and is OpenAI-compatible, so captions need no
+  // extra key. OPENAI_API_KEY was never set here, which is why this endpoint has
+  // returned "not configured" for its whole life while the Studio silently swallowed
+  // the failure — the auto-captions checkbox has therefore never once worked.
+  const GROQ_API_KEY = process.env.GROQ_API_KEY;
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  if (!OPENAI_API_KEY) return res.status(500).json({ success: false, error: 'OPENAI_API_KEY not configured' });
+  const sttKey = GROQ_API_KEY || OPENAI_API_KEY;
+  if (!sttKey) return res.status(500).json({ success: false, error: 'No transcription key configured (set GROQ_API_KEY on the analyser service)' });
+  const sttUrl = GROQ_API_KEY
+    ? 'https://api.groq.com/openai/v1/audio/transcriptions'
+    : 'https://api.openai.com/v1/audio/transcriptions';
+  const sttModel = GROQ_API_KEY ? 'whisper-large-v3' : 'whisper-1';
 
   const token = `cap_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'captions-'));
@@ -788,13 +799,13 @@ app.post('/api/burn-captions', async (req, res) => {
     // head engines (InfiniteTalk / Kling Avatar / OmniHuman).
     const form = new FormData();
     form.append('file', fs.createReadStream(audioPath), { filename: 'audio.mp3', contentType: 'audio/mpeg' });
-    form.append('model', 'whisper-1');
+    form.append('model', sttModel);
     form.append('response_format', 'verbose_json');
     form.append('timestamp_granularities[]', 'word');
     if (scriptText) form.append('prompt', String(scriptText).slice(0, 500));
 
-    const whisperRes = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
-      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...form.getHeaders() },
+    const whisperRes = await axios.post(sttUrl, form, {
+      headers: { 'Authorization': `Bearer ${sttKey}`, ...form.getHeaders() },
       timeout: 60000
     });
 
