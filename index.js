@@ -830,9 +830,14 @@ app.post('/api/burn-captions', async (req, res) => {
     const longestChunk = Math.max(...chunks.map(c => (c.text || '').length), 1);
     const safeW = Number.isFinite(width) && width > 0 ? Math.round(width) : 1080;
     const safeH = Number.isFinite(height) && height > 0 ? Math.round(height) : 1920;
+    // Caption size. The height ratio is the PRIMARY control — the width cap below only
+    // shrinks it further when a chunk is unusually long. Was 0.07 (134px on a 1920-tall
+    // clip), which read as enormous on short chunks; Mike asked for ~4x smaller, so
+    // 0.0175 -> ~34px at 1920. Tune CAPTION_HEIGHT_RATIO alone to resize everything.
+    const CAPTION_HEIGHT_RATIO = 0.0175;
     const widthLimited = Math.floor((safeW * 0.92) / (longestChunk * 0.62));
-    let fontSize = Math.max(28, Math.min(Math.round(safeH * 0.07), widthLimited));
-    if (!Number.isFinite(fontSize) || fontSize < 12) fontSize = 48;
+    let fontSize = Math.max(16, Math.min(Math.round(safeH * CAPTION_HEIGHT_RATIO), widthLimited));
+    if (!Number.isFinite(fontSize) || fontSize < 12) fontSize = Math.round(safeH * CAPTION_HEIGHT_RATIO) || 34;
 
     // Only chunks with real text AND real timings. A word missing start/end would
     // render enable='between(t,undefined,undefined)', which ffmpeg rejects as an
