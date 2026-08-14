@@ -755,6 +755,86 @@ function groupWordsIntoChunks(words, groupSize = 3) {
   return chunks;
 }
 
+// ── Room sound: make a studio-clean TTS voice fit its scene ──────────────────
+// The voice we generate is podcast-clean, which reads as WRONG in a car or on a
+// street. Two separate things are modelled: the MIC (a phone is band-limited and
+// compressed, not merely "worse") and the ROOM (a low ambience bed).
+//
+// Runs AFTER lip-sync on purpose. The lip-sync engines do phoneme detection on the
+// audio track, so mixing noise in BEFORE would degrade sync — the opposite of the
+// 44.1kHz/256kbps TTS upgrade. Video is remuxed with -c:v copy, so this costs a few
+// seconds and zero visual quality.
+//
+// Beds are SYNTHESISED with ffmpeg rather than fetched from a vendor: no key, no
+// per-student cost, nothing to expire. At ~20dB under the voice a bed's job is to
+// remove the "recorded in a vacuum" quality, not to be individually identifiable.
+const ROOM_PROFILES = {
+  studio: { bed: null,                                          bedDb: null, phone: false },
+  room:   { bed: 'anoisesrc=color=brown:amplitude=0.9,lowpass=f=250', bedDb: -34, phone: true },
+  car:    { bed: 'anoisesrc=color=brown:amplitude=0.9,lowpass=f=320', bedDb: -26, phone: true },
+  street: { bed: 'anoisesrc=color=pink:amplitude=0.9,lowpass=f=1500,highpass=f=120', bedDb: -25, phone: true },
+  cafe:   { bed: 'anoisesrc=color=pink:amplitude=0.9,highpass=f=300,lowpass=f=2500', bedDb: -28, phone: true },
+  gym:    { bed: 'anoisesrc=color=brown:amplitude=0.9,lowpass=f=500', bedDb: -27, phone: true },
+  office: { bed: 'anoisesrc=color=brown:amplitude=0.9,lowpass=f=400', bedDb: -32, phone: true },
+};
+
+app.post('/api/room-sound', async (req, res) => {
+  const { videoUrl, profile, bedDb } = req.body || {};
+  if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+  const prof = ROOM_PROFILES[profile] || ROOM_PROFILES.room;
+  const token = `room_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'room-'));
+  const inPath = path.join(tmpDir, 'in.mp4');
+  const outPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+  try {
+    const r = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 90000 });
+    fs.writeFileSync(inPath, Buffer.from(r.data));
+
+    // A phone recording is fairly full-range — most of the effect comes from the
+    // room and the compression, not from making the voice thin. Overdoing the EQ
+    // makes it sound like a phone CALL instead of a phone RECORDING.
+    const voice = prof.phone
+      ? '[0:a]highpass=f=150,lowpass=f=6800,acompressor=threshold=-18dB:ratio=3:attack=5:release=120,volume=3dB[v]'
+      : '[0:a]anull[v]';
+
+    let filter, amap;
+    if (prof.bed) {
+      const db = Number.isFinite(Number(bedDb)) ? Number(bedDb) : prof.bedDb;
+      // normalize=0 is NOT optional: amix divides each input by the number of
+      // inputs by default, which measured as a 19dB drop on the finished mix.
+      filter = `${voice};${prof.bed},volume=${db}dB[bed];[v][bed]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]`;
+      amap = '[a]';
+    } else {
+      filter = `${voice}`;
+      amap = '[v]';
+    }
+
+    await new Promise((resolve, reject) => {
+      const cmd = ffmpeg(inPath)
+        .outputOptions(['-filter_complex', filter, '-map', '0:v', '-map', amap,
+                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k'])
+        .output(outPath)
+        .on('end', resolve)
+        .on('error', (e) => {
+          console.error('[room-sound] ffmpeg failed. profile=%s filter=%s', profile, filter.slice(0, 400));
+          reject(e);
+        });
+      if (SYSTEM_FFMPEG) cmd.setFfmpegPath(SYSTEM_FFMPEG);
+      cmd.run();
+    });
+    if (!fs.existsSync(outPath)) throw new Error('Room sound produced no output file');
+
+    tempVideos.set(token, { filePath: outPath, createdAt: Date.now() });
+    res.json({ success: true, videoUrl: `${req.protocol}://${req.get('host')}/api/temp-video/${token}`, token, profile: ROOM_PROFILES[profile] ? profile : 'room' });
+  } catch (err) {
+    const message = err.response?.data?.error?.message || err.message;
+    console.error('[room-sound] error:', message);
+    res.status(500).json({ success: false, error: message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
 app.post('/api/burn-captions', async (req, res) => {
   const { videoUrl, scriptText } = req.body;
   if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
