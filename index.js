@@ -9,6 +9,10 @@ const ffmpegStatic = require('ffmpeg-static');
 const ffprobeStatic = require('ffprobe-static');
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
+// drawtext (used by caption burn-in) needs libfreetype, which the ffmpeg-static
+// build does not ship. The container apt-installs a full ffmpeg, so resolve it once
+// here and use it for that one command only.
+const SYSTEM_FFMPEG = ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg'].find(p => { try { return fs.existsSync(p); } catch (_) { return false; } }) || null;
 ffmpeg.setFfprobePath(ffprobeStatic.path);
 
 // ─────────────────────────────────────────
@@ -826,12 +830,13 @@ app.post('/api/burn-captions', async (req, res) => {
 
     // 5. Burn the captions onto the video
     await new Promise((resolve, reject) => {
-      ffmpeg(videoPath)
+      const cmd = ffmpeg(videoPath)
         .outputOptions(['-vf', filters.join(','), '-c:a', 'copy'])
         .output(outputPath)
         .on('end', resolve)
-        .on('error', reject)
-        .run();
+        .on('error', reject);
+      if (SYSTEM_FFMPEG) cmd.setFfmpegPath(SYSTEM_FFMPEG);
+      cmd.run();
     });
 
     if (!fs.existsSync(outputPath)) throw new Error('Caption burn-in produced no output file');
