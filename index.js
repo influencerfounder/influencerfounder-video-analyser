@@ -821,7 +821,15 @@ app.post('/api/burn-captions', async (req, res) => {
     // 4. Build one drawtext filter per chunk, each only visible during its
     // own time window — centered, bold white, dark outline (Instagram's
     // basic auto-caption look). Static per-chunk display, no karaoke animation.
-    const fontSize = Math.round(height * 0.07);
+    // Height alone is not enough: at height*0.07 (134px on a 1088x1920 clip) a
+    // 3-word chunk in Archivo Black measures ~1200px on a 1088px-wide frame, so the
+    // text ran off BOTH edges — measured 2026-08-14 on a real burn. drawtext cannot
+    // auto-fit, so cap the size by the widest chunk. ~0.62em average advance for this
+    // face; 92% of the frame leaves a safe margin. One size for the whole video so it
+    // does not jitter between chunks.
+    const longestChunk = Math.max(...chunks.map(c => (c.text || '').length), 1);
+    const widthLimited = Math.floor((width * 0.92) / (longestChunk * 0.62));
+    const fontSize = Math.max(28, Math.min(Math.round(height * 0.07), widthLimited));
     const filters = chunks.map(c =>
       `drawtext=fontfile='${CAPTION_FONT_PATH}':text='${escapeDrawtext(c.text)}':fontsize=${fontSize}:fontcolor=white:borderw=${Math.round(fontSize * 0.12)}:bordercolor=black:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${c.start},${c.end})'`
     );
