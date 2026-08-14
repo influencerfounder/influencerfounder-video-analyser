@@ -828,13 +828,37 @@ app.post('/api/burn-captions', async (req, res) => {
     // face; 92% of the frame leaves a safe margin. One size for the whole video so it
     // does not jitter between chunks.
     const longestChunk = Math.max(...chunks.map(c => (c.text || '').length), 1);
-    const widthLimited = Math.floor((width * 0.92) / (longestChunk * 0.62));
-    const fontSize = Math.max(28, Math.min(Math.round(height * 0.07), widthLimited));
-    const filters = chunks.map(c =>
-      `drawtext=fontfile='${CAPTION_FONT_PATH}':text='${escapeDrawtext(c.text)}':fontsize=${fontSize}:fontcolor=white:borderw=${Math.round(fontSize * 0.12)}:bordercolor=black:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${c.start},${c.end})'`
-    );
+    const safeW = Number.isFinite(width) && width > 0 ? Math.round(width) : 1080;
+    const safeH = Number.isFinite(height) && height > 0 ? Math.round(height) : 1920;
+    const widthLimited = Math.floor((safeW * 0.92) / (longestChunk * 0.62));
+    let fontSize = Math.max(28, Math.min(Math.round(safeH * 0.07), widthLimited));
+    if (!Number.isFinite(fontSize) || fontSize < 12) fontSize = 48;
 
-    if (!filters.length) throw new Error('No caption chunks generated');
+    // Only chunks with real text AND real timings. A word missing start/end would
+    // render enable='between(t,undefined,undefined)', which ffmpeg rejects as an
+    // "Invalid argument" — and that surfaces as the confusing "Error reinitializing
+    // filters / Failed to inject frame into filter network" rather than as a clear
+    // parse error, so it is worth excluding rather than trusting Whisper's output.
+    const usable = chunks.filter(c =>
+      (c.text || '').trim().length > 0 && Number.isFinite(c.start) && Number.isFinite(c.end) && c.end > c.start
+    );
+    if (!usable.length) throw new Error('No usable caption chunks (missing text or word timings)');
+
+    // text is passed via textfile= rather than inline text=, which removes filter-string
+    // escaping as a failure mode entirely — apostrophes, colons, percent signs and
+    // backslashes in a transcript can no longer break the graph.
+    const drawFilters = usable.map((c, i) => {
+      const f = path.join(tmpDir, `cap_${i}.txt`);
+      fs.writeFileSync(f, c.text, 'utf8');
+      return `drawtext=fontfile='${CAPTION_FONT_PATH}':textfile='${f}':expansion=none:fontsize=${fontSize}:fontcolor=white:borderw=${Math.round(fontSize * 0.12)}:bordercolor=black:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${c.start.toFixed(3)},${c.end.toFixed(3)})'`;
+    });
+
+    // Pin frame size and pixel format BEFORE the drawtext chain. "Error reinitializing
+    // filters!" is ffmpeg rebuilding the graph because incoming frame properties changed
+    // mid-stream; pinning them means it never has to.
+    const filters = [`scale=${safeW}:${safeH}`, 'format=yuv420p', ...drawFilters];
+
+    if (!drawFilters.length) throw new Error('No caption chunks generated');
 
     // 5. Burn the captions onto the video
     await new Promise((resolve, reject) => {
@@ -842,7 +866,11 @@ app.post('/api/burn-captions', async (req, res) => {
         .outputOptions(['-vf', filters.join(','), '-c:a', 'copy'])
         .output(outputPath)
         .on('end', resolve)
-        .on('error', reject);
+        .on('error', (e) => {
+          console.error('[burn-captions] ffmpeg failed. chunks=%d fontSize=%d dims=%dx%d', usable.length, fontSize, safeW, safeH);
+          console.error('[burn-captions] filter chain:', filters.join(',').slice(0, 1500));
+          reject(e);
+        });
       if (SYSTEM_FFMPEG) cmd.setFfmpegPath(SYSTEM_FFMPEG);
       cmd.run();
     });
