@@ -406,7 +406,13 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       'AUTHENTIC': 'Filmed on a smartphone: natural hand tremor with small framing corrections, slightly off-center framing, mild lens softness, faint sensor noise, mild compression artifacts, small auto-exposure shifts, uneven ambient lighting with natural shadow falloff, real skin with visible pores and tiny blemishes, no beauty filter, stray hair flyaways, natural facial asymmetry, lived-in surroundings, unedited social-media snapshot look, 30fps.',
       'HIGH-END': 'Shot on a cinema camera: subtle lens vignetting, gentle highlight halation, fine organic film grain, controlled lighting with soft physical falloff and true shadows, photorealistic skin keeping pores and micro-texture under the key light, restrained filmic color grade, performers with natural body weight and visible breath, never posed stillness, 24fps.',
     };
-    const LANE_SUFFIX = 'Avoid jitter, bent limbs, temporal flicker, warping or morphing, and extra fingers. No music — natural ambient background sound only.';
+    // Footwear is stated explicitly because the influencer's own full-body
+    // reference photo is a plain studio shot and is very often BAREFOOT (it is
+    // generated for ink/proportion capture, not wardrobe). Seedance faithfully
+    // reproduces that reference, so without this line the persona walks out of a
+    // car or down a street with no shoes on. Phrased as a setting rule rather
+    // than "always wear shoes" so beach/pool/at-home scenes stay correct.
+    const LANE_SUFFIX = 'Footwear fits the setting: the person wears shoes anywhere a real person would — street, car, shop, gym, office, any public indoor space — and is barefoot only where that is genuinely natural, such as a beach, pool or inside their own home. Avoid jitter, bent limbs, temporal flicker, warping or morphing, and extra fingers. No music — natural ambient background sound only.';
 
     // Kie.ai's Claude endpoint is native Anthropic Messages format (verified
     // 2026-07-17 with real base64 frames — identical request shape, model
