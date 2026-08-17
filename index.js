@@ -52,8 +52,20 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
     // restricted_page; whether instagram-reel-scraper uses the same vocabulary is
     // unverified, so anything unrecognised stays 'unknown' and marks nothing.
     const raw = String(item?.error || item?.errorDescription || '').toLowerCase();
-    const reason = /not_?found|no results|does not exist/.test(raw) ? 'not_found'
-      : /restrict|private|login|unavailable/.test(raw) ? 'restricted_page'
+    // Vocabulary is VERIFIED for apify/instagram-scraper (not_found /
+    // restricted_page) and MEASURED for instagram-reel-scraper, which returned
+    // restricted_page for a post the other actor called not_found — the two
+    // disagree, so neither string set can be treated as canonical. Widened to
+    // cover the wordings any of these actors plausibly emit, and anything
+    // unrecognised stays 'unknown' and marks nothing rather than guessing.
+    //
+    // Order matters: check GONE first. A body can contain both ("post not found
+    // or private"), and calling a deleted post merely private is the wrong error
+    // to leave a student staring at — it sends them looking for a login fix that
+    // does not exist.
+    const reason =
+      /not_?found|no results|does not exist|deleted|removed|no longer available|404/.test(raw) ? 'not_found'
+      : /restrict|private|login|unavailable|age|gated|geoblock|forbidden|403|sign in/.test(raw) ? 'restricted_page'
       : 'unknown';
     const err = new Error(
       reason === 'not_found'
