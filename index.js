@@ -1247,6 +1247,10 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
   const lerp = (a, b) => a + rng() * (b - a);
   const strong = intensity === 'medium';
 
+  // Rotation deliberately NOT raised. [MEASURED] it adds only ~+0.50 on top of
+  // the framing shift, while 3deg demands zoom >= 1.09 on 480x854 BEFORE the
+  // shift budget (~1.17 total) — spending 5% more crop to buy ~0.5 distance.
+  // The zoom budget is better spent on shift, which is the real lever.
   const rotDeg = lerp(-1, 1) * (strong ? 0.6 : 0.3);
   const rad = Math.abs(rotDeg) * Math.PI / 180;
   const needW = (W * Math.cos(rad) + H * Math.sin(rad)) / W;
@@ -1261,22 +1265,62 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
   // rotation wedge needs on that side. Margin per side is (z-1)/2, so a shift
   // of fraction f requires z >= needed + 2f. That term is added below — do not
   // remove it or the crop will walk into the black wedge.
-  const maxShift = strong ? 0.020 : 0.012;
-  const shiftX = lerp(-1, 1) * maxShift;
-  const shiftY = lerp(-1, 1) * maxShift;
+  // [MEASURED 2026-08-18, real 480x854 Kryfex clip, 64-bit DCT pHash, 8 frames]
+  // Lever isolation — controls: self=0.00, unrelated clip=30.25:
+  //     noise grain ........  0.00   (and 28x the file size)
+  //     colour grade .......  3.00
+  //     rotation (3deg) .... 10.75
+  //     zoom + off-centre crop ... 19.75   <-- the ONLY lever that matters
+  //     L3 framing + MAX grade + MAX rotation ... 20.25  (i.e. +0.50 over framing alone)
+  //     minimal framing + MAX grade + MAX rotation ... 12.00
+  // So appearance cannot buy distance: the framing displacement is the mechanism.
+  // WHY: pHash is a 32x32 GRAYSCALE DCT. Downsampling averages grain away and
+  // grayscale discards colour, so noise/saturation are invisible to it — but an
+  // off-centre crop changes which pixels land in which cell, which survives.
+  //
+  // The old values (0.012/0.020) scored only 4.75 / 10.75 against the 30.25
+  // unrelated-clip baseline — i.e. "would still match". These reach ~22.
+  // Do NOT raise further without re-running the border-ring scan on a BRIGHT
+  // clip: on dark footage that check is dominated by content, not wedges.
+  const maxShift = strong ? 0.048 : 0.030;
+  // Random SIGN but a substantial MAGNITUDE. `lerp(-1,1)*maxShift` could draw
+  // near zero, which produced weak variants by luck — [MEASURED 2026-08-18] the
+  // per-seed spread was 10.25-17.75 pHash distance purely from that. For a
+  // variation tool every output must clear the bar, not just the average.
+  const mag = () => (0.60 + rng() * 0.40) * (rng() < 0.5 ? -1 : 1);
+  const shiftX = mag() * maxShift;
+  const shiftY = mag() * maxShift;
   const shiftCost = 2 * Math.max(Math.abs(shiftX), Math.abs(shiftY));
 
-  // Safety factor is 1.2%, NOT the 0.4% first tried. Measured on a solid-colour
-  // source with a full border-ring scan: the bare formula value leaves visible
-  // black wedges once the even() dimension snapping is applied (0.9deg needed
-  // 1.0278 by formula but only went clean at 1.030). 1.2% clears it with room.
-  const zoom = Math.max(lerp(1.01, strong ? 1.05 : 1.03), needed + shiftCost) * 1.012;
+  // Safety factor 1.2% -> 3.0% on 2026-08-18: DEFENCE-IN-DEPTH, not a bug fix.
+  // The 1.2% was derived empirically at the old maxShift (0.020); maxShift is now
+  // 0.048, so the constant it was tuned against no longer applies and a wider
+  // margin is cheap insurance (~1.8% extra crop).
+  //
+  // ⚠️ READ THIS BEFORE "FIXING" WEDGES — I chased a phantom three times.
+  // A bright-clip border scan reports 5 black pixels (value 0) on ~2 of 30
+  // variants. Those are NOT rotation wedges. They are the `vignette` filter
+  // below, which darkens the extreme corners by design (added 2026-08-04 as part
+  // of the camera-realism layer). PROVEN by control: the identical 30 variants
+  // with the vignette stripped score 0/30, with it 2/30. The dark pixels sit at
+  // output (0,0),(1,0),(479,0) — output corners — even when the crop origin is
+  // 53px inside the margin, which no rotation wedge could reach.
+  // On real footage a vignette is a look, not a defect. Do not "fix" it.
+  // Floor raised to match the new shift budget. The `needed + shiftCost` term
+  // still governs and still guarantees wedge clearance — this only stops a low
+  // random draw from wasting the displacement the shift is there to create.
+  const zoom = Math.max(lerp(1.06, strong ? 1.13 : 1.10), needed + shiftCost) * 1.030;
 
   const sat = lerp(strong ? 0.92 : 0.96, strong ? 1.10 : 1.05);
   const con = lerp(strong ? 0.94 : 0.97, strong ? 1.08 : 1.04);
   const bri = lerp(strong ? -0.04 : -0.02, strong ? 0.04 : 0.02);
   const gam = lerp(strong ? 0.94 : 0.97, strong ? 1.07 : 1.04);
-  const noise = Math.round(lerp(2, strong ? 9 : 5));
+  // [MEASURED 2026-08-18] grain contributes EXACTLY 0.00 pHash distance while
+  // inflating the file 28x (identical L3 variant: 45.5MB with, 1.6MB without —
+  // smaller than the 7.4MB source). It is invisible to a 32x32 grayscale DCT.
+  // Kept as a parameter so it can be re-enabled for a non-pHash reason, but the
+  // filter is no longer emitted. Do not re-add it for "uniqueness" — it does nothing.
+  const noise = 0;
   const vig = lerp(Math.PI / 9, Math.PI / 6);
   const speed = lerp(strong ? 0.96 : 0.98, strong ? 1.04 : 1.02);
 
@@ -1284,9 +1328,24 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
   const even = (n) => { const v = Math.round(n); return v % 2 ? v + 1 : v; };
   const sw = even(W * zoom), sh = even(H * zoom);
 
-  // Off-centre crop origin, clamped so it can never exceed the available margin.
-  const cx = Math.max(0, Math.min(sw - W, Math.round((sw - W) / 2 + shiftX * W)));
-  const cy = Math.max(0, Math.min(sh - H, Math.round((sh - H) / 2 + shiftY * H)));
+  // Off-centre crop origin. The old clamp was [0, sw-W], which allowed the crop to
+  // sit flush against the scaled frame's edge — where a rotation wedge would live.
+  // No wedge was ever actually observed there (see the vignette note above), so
+  // this is DEFENCE-IN-DEPTH rather than a fix: rotating an sw*sh frame by θ insets
+  // its content from each edge by at most max(sw,sh)*sin|θ|, and clamping into that
+  // region is a principled bound that self-adjusts with θ instead of relying on a
+  // global multiplier tuned for one parameter set. +1px covers rounding.
+  // Kept because maxShift is now 2.4x larger and the crop runs much closer to the
+  // edge than when the original margins were validated.
+  const wedge = Math.ceil(Math.max(sw, sh) * Math.sin(rad)) + 1;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  // If the margin is too tight to honour the inset on both sides, fall back to a
+  // centred crop: losing shift costs some pHash distance, a wedge is a visible defect.
+  const okX = (sw - W) >= 2 * wedge, okY = (sh - H) >= 2 * wedge;
+  const cx = okX ? clamp(Math.round((sw - W) / 2 + shiftX * W), wedge, sw - W - wedge)
+                 : Math.round((sw - W) / 2);
+  const cy = okY ? clamp(Math.round((sh - H) / 2 + shiftY * H), wedge, sh - H - wedge)
+                 : Math.round((sh - H) / 2);
 
   const vf = [
     `scale=${sw}:${sh}`,
@@ -1298,7 +1357,6 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
     // personas (Tatthex, Axel) is a visible break, not a subtle tweak.
     ...(opts.flip ? ['hflip'] : []),
     `eq=saturation=${sat.toFixed(3)}:contrast=${con.toFixed(3)}:brightness=${bri.toFixed(3)}:gamma=${gam.toFixed(3)}`,
-    `noise=alls=${noise}:allf=t`,
     `vignette=a=${vig.toFixed(4)}`,
     `setpts=${(1 / speed).toFixed(5)}*PTS`,
   ].join(',');
@@ -1309,7 +1367,7 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
   const shiftPx = `${Math.round(shiftX * W)},${Math.round(shiftY * H)}px`;
   return {
     vf, af,
-    label: `zoom ${((zoom - 1) * 100).toFixed(1)}% · rot ${rotDeg.toFixed(2)}° · shift ${shiftPx}${opts.flip ? ' · mirrored' : ''} · sat ${sat.toFixed(2)} · grain ${noise} · ${speed.toFixed(3)}x`,
+    label: `zoom ${((zoom - 1) * 100).toFixed(1)}% · rot ${rotDeg.toFixed(2)}° · shift ${shiftPx}${opts.flip ? ' · mirrored' : ''} · sat ${sat.toFixed(2)} · ${speed.toFixed(3)}x`,
     params: {
       zoom: +zoom.toFixed(4), rotDeg: +rotDeg.toFixed(3),
       cropX: cx, cropY: cy, shiftX: +shiftX.toFixed(4), shiftY: +shiftY.toFixed(4),
