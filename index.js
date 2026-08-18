@@ -1624,14 +1624,19 @@ app.post('/api/assemble-reel', async (req, res) => {
       const aPath = path.join(tmpDir, 'vo.mp3');
       const dl = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 90000 });
       fs.writeFileSync(aPath, Buffer.from(dl.data));
+      // The picture's own length is the target both ways. MEASURED 2026-08-18 with real
+      // ffmpeg: a bare `-shortest` cuts the reel down to a SHORT voiceover (a 2s VO on a 6s
+      // picture produced a 2.02s file, silently dropping the closing shots), while a bare
+      // `-af apad` HANGS forever on a stream-copied video because nothing ever ends the
+      // infinite pad. `apad=whole_dur=<picture length>` is the form that works: it pads a
+      // short VO with silence to exactly the picture's length, and -shortest still trims a
+      // long VO at the last frame so it cannot end on a freeze. Do not drop whole_dur.
+      const picSecs = await probeDuration(silentPath);
       await new Promise((resolve, reject) => {
-        // -c:v copy: the picture is already correct, so muxing the voiceover must not
-        // re-encode it. apad + shortest handles BOTH mismatch directions: a SHORT voiceover
-        // is padded with silence so the picture still plays in full (without apad, -shortest
-        // would truncate the reel to the voiceover and silently drop the closing shots), and
-        // a LONG voiceover is cut at the last frame so it cannot pad the end with a freeze.
+        // -c:v copy: the picture is already correct, so muxing must never re-encode it.
+        const pad = Number(picSecs) > 0 ? `apad=whole_dur=${Number(picSecs).toFixed(3)}` : 'apad=whole_dur=600';
         ffmpeg().input(silentPath).input(aPath)
-          .outputOptions(['-c:v copy', '-c:a aac', '-b:a 192k', '-map 0:v:0', '-map 1:a:0', '-af', 'apad', '-shortest'])
+          .outputOptions(['-c:v copy', '-c:a aac', '-b:a 192k', '-map 0:v:0', '-map 1:a:0', '-af', pad, '-shortest'])
           .output(outputPath).on('end', resolve).on('error', reject).run();
       });
     } else {
