@@ -1552,6 +1552,103 @@ function verdictFor(distance) {
 // /api/voice/clone will accept.
 // Capped at 60s by default: voice cloning needs roughly 10-60s of clean speech, and an
 // uncapped extract on a long video would balloon the response for no gain.
+// POST /api/assemble-reel
+//   { shots: [{url, type:'still'|'video', seconds}], audioUrl?, width?, height? }
+// Cuts a finished reel out of the First Week shot list. A deliberate SIBLING of /api/stitch
+// rather than an extension of it: stitch is a working feature (Sequence Clips) that caps at
+// 6 clips, takes video only, keeps whole clips and strips audio with -an. Every one of those
+// is wrong here, and making it polymorphic would risk the feature that already works.
+// Stills become clips with a slow Ken Burns push, every shot is cut to its exact timecode,
+// and the voiceover is muxed over the finished cut.
+app.post('/api/assemble-reel', async (req, res) => {
+  const shots = Array.isArray(req.body?.shots) ? req.body.shots.filter(x => x && x.url).slice(0, 40) : [];
+  const audioUrl = req.body?.audioUrl || '';
+  const outW = Math.max(2, Math.round((Number(req.body?.width) || 1080) / 2) * 2);
+  const outH = Math.max(2, Math.round((Number(req.body?.height) || 1920) / 2) * 2);
+  if (shots.length < 2) return res.status(400).json({ success: false, error: 'Need at least 2 shots to assemble.' });
+
+  const token = `reel_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-'));
+  const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+  try {
+    const normPaths = [];
+    for (let i = 0; i < shots.length; i++) {
+      const sh = shots[i];
+      const secs = Math.min(10, Math.max(0.3, Number(sh.seconds) || 1));
+      const srcPath = path.join(tmpDir, `src${i}`);
+      const outPath = path.join(tmpDir, `n${i}.mp4`);
+      try {
+        const dl = await axios.get(sh.url, { responseType: 'arraybuffer', timeout: 90000 });
+        fs.writeFileSync(srcPath, Buffer.from(dl.data));
+      } catch (e) {
+        console.warn(`[reel:${token}] shot ${i + 1} download failed: ${e.message}`);
+        continue;
+      }
+      const pad = `scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+      try {
+        await new Promise((resolve, reject) => {
+          const cmd = ffmpeg();
+          if (sh.type === 'video') {
+            // Take the FIRST `secs` of the generated clip — shots are cut to a timecode,
+            // and a generated clip is 5s regardless of how long the cut needs to be.
+            cmd.input(srcPath).outputOptions([`-t ${secs}`]).videoFilters(pad);
+          } else {
+            // Ken Burns: a still with a slow push reads as filmed at a 1s cut. Zoom is
+            // computed per shot so the push speed is constant regardless of duration.
+            const frames = Math.max(2, Math.round(secs * 24));
+            const zoom = `zoompan=z='min(zoom+0.0015,1.10)':d=${frames}:s=${outW}x${outH}:fps=24`;
+            cmd.input(srcPath).inputOptions(['-loop 1']).outputOptions([`-t ${secs}`]).videoFilters(`${pad},${zoom}`);
+          }
+          cmd.outputOptions(['-r 24', '-c:v libx264', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
+             .output(outPath).on('end', resolve).on('error', reject).run();
+        });
+        if (fs.existsSync(outPath)) normPaths.push(outPath);
+      } catch (e) {
+        console.warn(`[reel:${token}] shot ${i + 1} normalise failed: ${e.message}`);
+      }
+    }
+    if (normPaths.length < 2) {
+      return res.status(400).json({ success: false, error: 'Could not prepare enough shots — check the generated files.' });
+    }
+
+    const silentPath = path.join(tmpDir, 'silent.mp4');
+    const listPath = path.join(tmpDir, 'list.txt');
+    fs.writeFileSync(listPath, normPaths.map(f => `file '${f}'`).join('\n'));
+    await new Promise((resolve, reject) => {
+      ffmpeg().input(listPath).inputOptions(['-f concat', '-safe 0'])
+        .outputOptions(['-c copy']).output(silentPath)
+        .on('end', resolve).on('error', reject).run();
+    });
+
+    if (audioUrl) {
+      const aPath = path.join(tmpDir, 'vo.mp3');
+      const dl = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 90000 });
+      fs.writeFileSync(aPath, Buffer.from(dl.data));
+      await new Promise((resolve, reject) => {
+        // -c:v copy: the picture is already correct, so muxing the voiceover must not
+        // re-encode it. -shortest so a long voiceover cannot pad the reel with a freeze.
+        ffmpeg().input(silentPath).input(aPath)
+          .outputOptions(['-c:v copy', '-c:a aac', '-b:a 192k', '-map 0:v:0', '-map 1:a:0', '-shortest'])
+          .output(outputPath).on('end', resolve).on('error', reject).run();
+      });
+    } else {
+      fs.copyFileSync(silentPath, outputPath);
+    }
+
+    const seconds = await probeDuration(outputPath);
+    tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
+    const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
+    console.log(`[reel:${token}] assembled ${normPaths.length}/${shots.length} shots, ${seconds}s at ${outW}x${outH}`);
+    res.json({ success: true, videoUrl: publicUrl, token, shotCount: normPaths.length,
+               requested: shots.length, seconds, width: outW, height: outH, hasAudio: !!audioUrl });
+  } catch (err) {
+    console.error(`[reel:${token}] error:`, err.message);
+    res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
 app.post('/api/extract-audio', async (req, res) => {
   const { videoUrl } = req.body || {};
   const maxSeconds = Math.min(120, Math.max(5, parseInt(req.body?.maxSeconds) || 60));
