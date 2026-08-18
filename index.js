@@ -1545,6 +1545,59 @@ function verdictFor(distance) {
 // finished video. Vercel has no ffmpeg, and all ffmpeg work lives here by convention.
 // Deliberately returns base64 rather than hosting: the frames are consumed once, immediately,
 // by a Claude vision call — hosting them would mean a second lifecycle to manage and clean up.
+// POST /api/extract-audio  { videoUrl, maxSeconds }
+// Pulls a clean mono MP3 out of a video so it can be used to CLONE a voice. Accepts an
+// Instagram or TikTok link (reusing the same download paths as /api/clone) or a direct
+// video URL. Returns base64 — the Vercel side re-hosts it to Blob, which is the only host
+// /api/voice/clone will accept.
+// Capped at 60s by default: voice cloning needs roughly 10-60s of clean speech, and an
+// uncapped extract on a long video would balloon the response for no gain.
+app.post('/api/extract-audio', async (req, res) => {
+  const { videoUrl } = req.body || {};
+  const maxSeconds = Math.min(120, Math.max(5, parseInt(req.body?.maxSeconds) || 60));
+  if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audio-'));
+  const inputPath = path.join(tmpDir, 'in.mp4');
+  const outPath = path.join(tmpDir, 'out.mp3');
+  try {
+    const isInstagram = /instagram\.com\/(p|reel|reels)\//.test(videoUrl);
+    const isTikTok = /tiktok\.com\/@[^/]+\/video\/|tiktok\.com\/t\//.test(videoUrl);
+
+    if (isInstagram) {
+      await downloadInstagramViaApify(videoUrl, inputPath);
+    } else if (isTikTok) {
+      execSync(`yt-dlp -f "best[ext=mp4]/best" -o "${inputPath}" "${videoUrl}"`, { stdio: 'pipe', timeout: 180000 });
+    } else {
+      const dl = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 180000, maxContentLength: 300 * 1024 * 1024 });
+      fs.writeFileSync(inputPath, Buffer.from(dl.data));
+    }
+    if (!fs.existsSync(inputPath) || fs.statSync(inputPath).size < 1000) {
+      return res.status(400).json({ success: false, error: 'Could not download that video — the post may be private, or the link may have expired.' });
+    }
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(inputPath)
+        .outputOptions(['-vn', '-ac', '1', '-ar', '44100', '-b:a', '128k', '-t', String(maxSeconds)])
+        .audioCodec('libmp3lame')
+        .output(outPath)
+        .on('end', resolve)
+        .on('error', reject)
+        .run();
+    });
+    if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 2000) {
+      return res.status(400).json({ success: false, error: 'That video has no usable audio track.' });
+    }
+    const seconds = await probeDuration(outPath);
+    res.json({ success: true, seconds, b64: fs.readFileSync(outPath).toString('base64') });
+  } catch (err) {
+    console.error('[extract-audio] error', err.message);
+    res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
 app.post('/api/extract-frames', async (req, res) => {
   const { videoUrl } = req.body || {};
   const count = Math.min(5, Math.max(1, parseInt(req.body?.count) || 3));
