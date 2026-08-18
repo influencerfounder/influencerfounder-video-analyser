@@ -1243,15 +1243,45 @@ function variantRng(seed, index) {
  * rotation. The required scale is computed from θ and the zoom is raised to
  * meet it.
  */
+// ── Variation tiers ──────────────────────────────────────────────────────────
+// [MEASURED 2026-08-18] on a real 480x854 clip, 64-bit DCT pHash, 8 frames.
+// Controls: identical=0.00, unrelated clip=30.25.
+//
+//   tier      pHash dist   crop loss   use
+//   quality      ~17.3        5.7%     MAIN accounts — re-serving a proven
+//                                      winner; framing must survive
+//   balanced     ~19          ~8%      middle ground
+//   max          ~21         ~11%      BURNER accounts — displacement first,
+//                                      "not visibly broken" is the only bar
+//
+// Rotation is 0 on quality/balanced. Measured three separate ways it adds
+// ~0.00-0.50 pHash distance while forcing a larger zoom (it needs wedge
+// clearance), i.e. it spends crop budget for nothing. A small rotation is kept
+// on `max` ONLY as transform diversity against detectors we cannot measure —
+// not because it helps the metric.
+const VARIANT_TIERS = {
+  quality:  { rotMax: 0.0, maxShift: 0.029, zoomFloor: 1.060, satR: 0.030, conR: 0.020, briR: 0.015, gamR: 0.020, speedR: 0.015 },
+  balanced: { rotMax: 0.0, maxShift: 0.040, zoomFloor: 1.090, satR: 0.050, conR: 0.035, briR: 0.025, gamR: 0.035, speedR: 0.025 },
+  max:      { rotMax: 0.6, maxShift: 0.048, zoomFloor: 1.130, satR: 0.090, conR: 0.070, briR: 0.040, gamR: 0.060, speedR: 0.040 },
+};
+// Back-compat with the old two-value API.
+const TIER_ALIASES = { subtle: 'quality', medium: 'max' };
+function resolveTier(intensity) {
+  const key = TIER_ALIASES[intensity] || intensity;
+  return VARIANT_TIERS[key] ? key : 'quality';
+}
+
 function buildVariant(rng, W, H, intensity, opts = {}) {
   const lerp = (a, b) => a + rng() * (b - a);
-  const strong = intensity === 'medium';
+  const tierName = resolveTier(intensity);
+  const T = VARIANT_TIERS[tierName];
+  const strong = tierName === 'max';   // retained for the few remaining uses
 
   // Rotation deliberately NOT raised. [MEASURED] it adds only ~+0.50 on top of
   // the framing shift, while 3deg demands zoom >= 1.09 on 480x854 BEFORE the
   // shift budget (~1.17 total) — spending 5% more crop to buy ~0.5 distance.
   // The zoom budget is better spent on shift, which is the real lever.
-  const rotDeg = lerp(-1, 1) * (strong ? 0.6 : 0.3);
+  const rotDeg = T.rotMax ? lerp(-1, 1) * T.rotMax : 0;
   const rad = Math.abs(rotDeg) * Math.PI / 180;
   const needW = (W * Math.cos(rad) + H * Math.sin(rad)) / W;
   const needH = (H * Math.cos(rad) + W * Math.sin(rad)) / H;
@@ -1282,7 +1312,7 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
   // unrelated-clip baseline — i.e. "would still match". These reach ~22.
   // Do NOT raise further without re-running the border-ring scan on a BRIGHT
   // clip: on dark footage that check is dominated by content, not wedges.
-  const maxShift = strong ? 0.048 : 0.030;
+  const maxShift = T.maxShift;
   // Random SIGN but a substantial MAGNITUDE. `lerp(-1,1)*maxShift` could draw
   // near zero, which produced weak variants by luck — [MEASURED 2026-08-18] the
   // per-seed spread was 10.25-17.75 pHash distance purely from that. For a
@@ -1309,12 +1339,16 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
   // Floor raised to match the new shift budget. The `needed + shiftCost` term
   // still governs and still guarantees wedge clearance — this only stops a low
   // random draw from wasting the displacement the shift is there to create.
-  const zoom = Math.max(lerp(1.06, strong ? 1.13 : 1.10), needed + shiftCost) * 1.030;
+  // Safety factor only matters when there IS a rotation wedge to clear. With
+  // rotDeg == 0 the rotate filter is a no-op, so 0.5% (rounding) is plenty and
+  // the quality tier keeps its framing instead of paying for a phantom margin.
+  const safety = rotDeg === 0 ? 1.005 : 1.030;
+  const zoom = Math.max(T.zoomFloor, needed + shiftCost) * safety;
 
-  const sat = lerp(strong ? 0.92 : 0.96, strong ? 1.10 : 1.05);
-  const con = lerp(strong ? 0.94 : 0.97, strong ? 1.08 : 1.04);
-  const bri = lerp(strong ? -0.04 : -0.02, strong ? 0.04 : 0.02);
-  const gam = lerp(strong ? 0.94 : 0.97, strong ? 1.07 : 1.04);
+  const sat = lerp(1 - T.satR, 1 + T.satR);
+  const con = lerp(1 - T.conR, 1 + T.conR);
+  const bri = lerp(-T.briR, T.briR);
+  const gam = lerp(1 - T.gamR, 1 + T.gamR);
   // [MEASURED 2026-08-18] grain contributes EXACTLY 0.00 pHash distance while
   // inflating the file 28x (identical L3 variant: 45.5MB with, 1.6MB without —
   // smaller than the 7.4MB source). It is invisible to a 32x32 grayscale DCT.
@@ -1322,7 +1356,7 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
   // filter is no longer emitted. Do not re-add it for "uniqueness" — it does nothing.
   const noise = 0;
   const vig = lerp(Math.PI / 9, Math.PI / 6);
-  const speed = lerp(strong ? 0.96 : 0.98, strong ? 1.04 : 1.02);
+  const speed = lerp(1 - T.speedR, 1 + T.speedR);
 
   // Even dimensions are required by h264.
   const even = (n) => { const v = Math.round(n); return v % 2 ? v + 1 : v; };
@@ -1368,7 +1402,9 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
   return {
     vf, af,
     label: `zoom ${((zoom - 1) * 100).toFixed(1)}% · rot ${rotDeg.toFixed(2)}° · shift ${shiftPx}${opts.flip ? ' · mirrored' : ''} · sat ${sat.toFixed(2)} · ${speed.toFixed(3)}x`,
+    tier: tierName,
     params: {
+      tier: tierName,
       zoom: +zoom.toFixed(4), rotDeg: +rotDeg.toFixed(3),
       cropX: cx, cropY: cy, shiftX: +shiftX.toFixed(4), shiftY: +shiftY.toFixed(4),
       flip: !!opts.flip,
