@@ -1626,9 +1626,12 @@ app.post('/api/assemble-reel', async (req, res) => {
       fs.writeFileSync(aPath, Buffer.from(dl.data));
       await new Promise((resolve, reject) => {
         // -c:v copy: the picture is already correct, so muxing the voiceover must not
-        // re-encode it. -shortest so a long voiceover cannot pad the reel with a freeze.
+        // re-encode it. apad + shortest handles BOTH mismatch directions: a SHORT voiceover
+        // is padded with silence so the picture still plays in full (without apad, -shortest
+        // would truncate the reel to the voiceover and silently drop the closing shots), and
+        // a LONG voiceover is cut at the last frame so it cannot pad the end with a freeze.
         ffmpeg().input(silentPath).input(aPath)
-          .outputOptions(['-c:v copy', '-c:a aac', '-b:a 192k', '-map 0:v:0', '-map 1:a:0', '-shortest'])
+          .outputOptions(['-c:v copy', '-c:a aac', '-b:a 192k', '-map 0:v:0', '-map 1:a:0', '-af', 'apad', '-shortest'])
           .output(outputPath).on('end', resolve).on('error', reject).run();
       });
     } else {
