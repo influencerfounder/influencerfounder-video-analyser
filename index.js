@@ -1540,6 +1540,61 @@ function verdictFor(distance) {
   return { verdict: 'likely distinct', detail: 'Far enough apart that a perceptual match is unlikely.' };
 }
 
+// POST /api/extract-frames  { videoUrl, count }
+// Returns N evenly-spaced frames as base64 JPEGs so the Vercel side can run output QC on a
+// finished video. Vercel has no ffmpeg, and all ffmpeg work lives here by convention.
+// Deliberately returns base64 rather than hosting: the frames are consumed once, immediately,
+// by a Claude vision call — hosting them would mean a second lifecycle to manage and clean up.
+app.post('/api/extract-frames', async (req, res) => {
+  const { videoUrl } = req.body || {};
+  const count = Math.min(5, Math.max(1, parseInt(req.body?.count) || 3));
+  if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'frames-'));
+  const inputPath = path.join(tmpDir, 'in.mp4');
+  try {
+    const dl = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 120000, maxContentLength: 200 * 1024 * 1024 });
+    fs.writeFileSync(inputPath, Buffer.from(dl.data));
+
+    const dur = await probeDuration(inputPath);
+    // Sample strictly INSIDE the clip: the first and last frames of a first-frame-anchored
+    // video are the least informative (frame 1 is the anchor we already checked).
+    const stamps = [];
+    for (let i = 0; i < count; i++) {
+      const frac = (i + 1) / (count + 1);
+      stamps.push(Math.max(0.05, (dur > 0.2 ? dur : 1) * frac));
+    }
+
+    const frames = [];
+    for (let i = 0; i < stamps.length; i++) {
+      const outPath = path.join(tmpDir, `f${i}.jpg`);
+      try {
+        await new Promise((resolve, reject) => {
+          ffmpeg(inputPath)
+            .seekInput(stamps[i].toFixed(3))
+            .outputOptions(['-frames:v', '1', '-vf', 'scale=512:-2', '-q:v', '4'])
+            .output(outPath)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
+        });
+        if (fs.existsSync(outPath)) {
+          frames.push({ ts: Number(stamps[i].toFixed(2)), b64: fs.readFileSync(outPath).toString('base64') });
+        }
+      } catch (e) {
+        console.warn('[extract-frames] frame ' + i + ' failed: ' + e.message);
+      }
+    }
+    if (!frames.length) return res.status(500).json({ success: false, error: 'Could not extract any frames' });
+    res.json({ success: true, duration: dur, frames });
+  } catch (err) {
+    console.error('[extract-frames] error', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
 app.post('/api/phash-compare', async (req, res) => {
   const { videoUrl, compareUrls, frames } = req.body || {};
   if (!videoUrl || !Array.isArray(compareUrls) || !compareUrls.length) {
