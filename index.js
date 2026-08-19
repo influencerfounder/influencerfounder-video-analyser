@@ -1656,6 +1656,10 @@ function verdictFor(distance) {
 app.post('/api/assemble-reel', async (req, res) => {
   const shots = Array.isArray(req.body?.shots) ? req.body.shots.filter(x => x && x.url).slice(0, 40) : [];
   const audioUrl = req.body?.audioUrl || '';
+  // The reel can open with silent shots (the cold open), so the voiceover must not start at 0:00
+  // or every spoken noun lands on the wrong picture — "eleven followers" would play over the
+  // bed shot instead of the profile screenshot, and the whole reel runs offset from there.
+  const audioDelaySec = Math.max(0, Math.min(15, Number(req.body?.audioDelaySec) || 0));
   const outW = Math.max(2, Math.round((Number(req.body?.width) || 1080) / 2) * 2);
   const outH = Math.max(2, Math.round((Number(req.body?.height) || 1920) / 2) * 2);
   if (shots.length < 2) return res.status(400).json({ success: false, error: 'Need at least 2 shots to assemble.' });
@@ -1727,7 +1731,8 @@ app.post('/api/assemble-reel', async (req, res) => {
       const picSecs = await probeDuration(silentPath);
       await new Promise((resolve, reject) => {
         // -c:v copy: the picture is already correct, so muxing must never re-encode it.
-        const pad = Number(picSecs) > 0 ? `apad=whole_dur=${Number(picSecs).toFixed(3)}` : 'apad=whole_dur=600';
+        const delay = audioDelaySec > 0 ? `adelay=${Math.round(audioDelaySec * 1000)}:all=1,` : '';
+        const pad = delay + (Number(picSecs) > 0 ? `apad=whole_dur=${Number(picSecs).toFixed(3)}` : 'apad=whole_dur=600');
         ffmpeg().input(silentPath).input(aPath)
           .outputOptions(['-c:v copy', '-c:a aac', '-b:a 192k', '-map 0:v:0', '-map 1:a:0', '-af', pad, '-shortest'])
           .output(outputPath).on('end', resolve).on('error', reject).run();
@@ -1741,7 +1746,8 @@ app.post('/api/assemble-reel', async (req, res) => {
     const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
     console.log(`[reel:${token}] assembled ${normPaths.length}/${shots.length} shots, ${seconds}s at ${outW}x${outH}`);
     res.json({ success: true, videoUrl: publicUrl, token, shotCount: normPaths.length,
-               requested: shots.length, seconds, width: outW, height: outH, hasAudio: !!audioUrl });
+               requested: shots.length, seconds, width: outW, height: outH, hasAudio: !!audioUrl,
+               audioDelaySec });
   } catch (err) {
     console.error(`[reel:${token}] error:`, err.message);
     res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
