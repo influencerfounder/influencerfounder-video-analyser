@@ -1672,6 +1672,10 @@ app.post('/api/assemble-reel', async (req, res) => {
     for (let i = 0; i < shots.length; i++) {
       const sh = shots[i];
       const secs = Math.min(10, Math.max(0.3, Number(sh.seconds) || 1));
+      // Which second of the source clip to use. Without this the reel always took the FIRST
+      // `secs` of a 5s generation — usually the weakest part, because the model eases into the
+      // motion. startAt lets the operator pick the good moment instead.
+      const startAt = Math.max(0, Math.min(60, Number(sh.startAt) || 0));
       const srcPath = path.join(tmpDir, `src${i}`);
       const outPath = path.join(tmpDir, `n${i}.mp4`);
       try {
@@ -1688,7 +1692,9 @@ app.post('/api/assemble-reel', async (req, res) => {
           if (sh.type === 'video') {
             // Take the FIRST `secs` of the generated clip — shots are cut to a timecode,
             // and a generated clip is 5s regardless of how long the cut needs to be.
-            cmd.input(srcPath).outputOptions([`-t ${secs}`]).videoFilters(pad);
+            // -ss BEFORE the input is the fast, keyframe-accurate seek; -t after it bounds the
+            // duration from that point.
+            cmd.input(srcPath).inputOptions(startAt > 0 ? ['-ss', String(startAt)] : []).outputOptions([`-t ${secs}`]).videoFilters(pad);
           } else {
             // Ken Burns: a still with a slow push reads as filmed at a 1s cut. Zoom is
             // computed per shot so the push speed is constant regardless of duration.
