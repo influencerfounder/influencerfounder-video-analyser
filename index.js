@@ -946,6 +946,59 @@ app.post('/api/room-sound', async (req, res) => {
   }
 });
 
+// POST /api/audio-timings { audioUrl } -> { durationSec, words:[{word,start,end}] }
+//
+// The first-reel format is built on noun-sync: every concrete noun must be on screen at the
+// second it is SPOKEN. Until now the shot timeline was derived from `words / 3.6` — an estimate.
+// A real TTS render is never exactly that, and the error compounds down the script, so the last
+// nouns drifted furthest. This measures the actual audio instead: Groq Whisper with word-level
+// timestamps, the same machinery the caption burner already uses, pointed at an audio file.
+app.post('/api/audio-timings', async (req, res) => {
+  const { audioUrl } = req.body || {};
+  if (!audioUrl) return res.status(400).json({ success: false, error: 'Missing audioUrl' });
+  const sttKey = process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY;
+  if (!sttKey) return res.status(500).json({ success: false, error: 'No transcription key configured' });
+  const sttUrl = process.env.GROQ_API_KEY
+    ? 'https://api.groq.com/openai/v1/audio/transcriptions'
+    : 'https://api.openai.com/v1/audio/transcriptions';
+  const sttModel = process.env.GROQ_API_KEY ? 'whisper-large-v3' : 'whisper-1';
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'votimings-'));
+  const audioPath = path.join(tmpDir, 'vo.mp3');
+  try {
+    const dl = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 120000, maxContentLength: 60 * 1024 * 1024 });
+    fs.writeFileSync(audioPath, Buffer.from(dl.data));
+
+    // ffprobe is the authority on duration — Whisper's last word end is where SPEECH stops, which
+    // is earlier than where the FILE stops whenever the render carries trailing silence. Cutting
+    // picture to the speech end would leave the tail of the audio hanging past the video.
+    const durationSec = await new Promise((resolve) => {
+      ffmpeg.ffprobe(audioPath, (err, meta) => resolve(err ? 0 : Number(meta?.format?.duration) || 0));
+    });
+
+    const form = new FormData();
+    form.append('file', fs.createReadStream(audioPath));
+    form.append('model', sttModel);
+    form.append('response_format', 'verbose_json');
+    form.append('timestamp_granularities[]', 'word');
+    const r = await axios.post(sttUrl, form, {
+      headers: { ...form.getHeaders(), Authorization: `Bearer ${sttKey}` },
+      timeout: 180000, maxBodyLength: Infinity,
+    });
+    const words = (r.data?.words || []).map(w => ({
+      word: String(w.word || '').trim(),
+      start: Number(w.start) || 0,
+      end: Number(w.end) || 0,
+    })).filter(w => w.word);
+
+    res.json({ success: true, durationSec: Math.round(durationSec * 100) / 100, words, text: r.data?.text || '' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.response?.data?.error?.message || e.message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
 app.post('/api/burn-captions', async (req, res) => {
   const { videoUrl, scriptText } = req.body;
   if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
