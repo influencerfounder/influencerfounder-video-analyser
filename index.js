@@ -802,7 +802,7 @@ app.post('/api/temp-video', async (req, res) => {
 
     tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
     const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
-    res.json({ success: true, videoUrl: publicUrl, token });
+    res.json({ captionsBurned, captionError, captionCues: cues.length, success: true, videoUrl: publicUrl, token });
   } catch (err) {
     try { fs.unlinkSync(outputPath); } catch (_) {}
     console.error(`[tempvid:${token}] error:`, err.message);
@@ -1871,13 +1871,18 @@ app.post('/api/assemble-reel', async (req, res) => {
     // Burn onto the silent picture, before the audio mux — drawtext needs a re-encode, and doing
     // it here keeps the mux on `-c:v copy` so the video is encoded exactly once either way.
     let pictPath = silentPath;
+    let captionsBurned = false, captionError = '';
     if (cues.length) {
       try {
         const capPath = path.join(tmpDir, 'captioned.mp4');
-        if (await burnCueList(silentPath, capPath, cues, capStyle)) pictPath = capPath;
+        if (await burnCueList(silentPath, capPath, cues, capStyle)) { pictPath = capPath; captionsBurned = true; }
+        else captionError = 'no usable cues';
       } catch (e) {
-        // Fail OPEN: a caption problem must never cost the reel itself.
-        console.warn(`[reel:${token}] captions failed, continuing without: ${e.message}`);
+        // Fail OPEN: a caption problem must never cost the reel itself. But REPORT it — a silent
+        // fail-open is indistinguishable from "captions are off", which is how a broken burn goes
+        // unnoticed for weeks.
+        captionError = String(e.message || e).slice(0, 200);
+        console.warn(`[reel:${token}] captions failed, continuing without: ${captionError}`);
       }
     }
 
