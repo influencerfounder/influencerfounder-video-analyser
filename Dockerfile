@@ -3,7 +3,6 @@ FROM node:22-slim
 # System deps: ffmpeg, curl, python3, opencv runtime libs
 RUN apt-get update && apt-get install -y \
     ffmpeg curl \
-    fonts-liberation fonts-dejavu-core \
     python3 python3-pip python3-venv python3-dev \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -27,6 +26,14 @@ from insightface.app import FaceAnalysis; \
 app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']); \
 app.prepare(ctx_id=0); \
 insightface.model_zoo.get_model('inswapper_128.onnx', download=True, download_zip=True)" || true
+
+# Caption fonts — a SEPARATE layer, deliberately after the heavy python layers. Editing the
+# first apt layer busts the Docker cache for everything below it, forcing the pinned insightface/
+# onnxruntime install to re-run against a freshly pulled base image — which is exactly how the
+# 2026-08-21 caption deploy broke the build. Append capability in new layers, never edit old ones.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fonts-liberation fonts-dejavu-core \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY package*.json ./
