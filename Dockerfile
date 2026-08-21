@@ -3,6 +3,7 @@ FROM node:22-slim
 # System deps: ffmpeg, curl, python3, opencv runtime libs
 RUN apt-get update && apt-get install -y \
     ffmpeg curl \
+    fonts-liberation fonts-dejavu-core \
     python3 python3-pip python3-venv python3-dev \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*

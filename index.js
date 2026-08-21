@@ -829,6 +829,26 @@ app.get('/api/temp-video/:token', (req, res) => {
 
 const CAPTION_FONT_PATH = path.join(__dirname, 'assets', 'fonts', 'Caption-Bold.ttf');
 
+// ⚠️ Instagram's own typeface (Instagram Sans) is proprietary and cannot be bundled or shipped in
+// a rendered video, so these are the closest open equivalents to the styles their editor offers.
+// Liberation faces are metric-compatible with Arial/Courier, which is what the "clean" and
+// "typewriter" styles read as on a phone.
+const CAPTION_FONTS = {
+  strong:     CAPTION_FONT_PATH,                                              // Archivo Black — the classic burned-in Reels caption
+  clean:      '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf', // Arial-metric, Instagram's "Modern"
+  typewriter: '/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf', // Courier-metric
+  serif:      '/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf',
+};
+// Height ratios measured against a 1920-tall frame: 0.0175 -> ~34px, which is the size Mike
+// settled on after "way too big" (the first burn used 0.07 -> 134px and ran off both edges).
+const CAPTION_SIZES = { small: 0.014, medium: 0.0175, large: 0.022, xlarge: 0.028 };
+
+function captionFontPath(name) {
+  const f = CAPTION_FONTS[String(name || '').toLowerCase()];
+  if (f && fs.existsSync(f)) return f;
+  return CAPTION_FONT_PATH;   // always exists — bundled in the repo
+}
+
 // ffmpeg drawtext text= values need specific characters escaped or the
 // filter string parser breaks (colons separate filter options, backslashes
 // and quotes have their own meaning). Order matters — escape backslashes first.
@@ -1705,6 +1725,74 @@ function verdictFor(distance) {
 // 6 clips, takes video only, keeps whole clips and strips audio with -an. Every one of those
 // is wrong here, and making it polymorphic would risk the feature that already works.
 // Stills become clips with a slow Ken Burns push, every shot is cut to its exact timecode,
+
+// Burn a list of {text,start,end} cues onto a video. Shared by the reel assembler and the
+// Whisper-driven caption endpoint, so the look and the escaping rules cannot drift apart.
+// One drawtext per cue, each visible only in its own window. Text goes through a FILE
+// (textfile=) not inline, which removes filter-string escaping — apostrophes, colons, %
+// and backslashes — as a failure mode entirely.
+async function burnCueList(inPath, outPath, cues, opts = {}) {
+  const fontPath = captionFontPath(opts.font);
+  const ratio = CAPTION_SIZES[String(opts.size || 'medium').toLowerCase()] || CAPTION_SIZES.medium;
+  const dims = await probeDims(inPath);
+  const safeW = dims.width || 1080, safeH = dims.height || 1920;
+
+  const usable = cues
+    .map(c => ({ text: String(c.text || '').trim(), start: Number(c.start), end: Number(c.end) }))
+    .filter(c => c.text && Number.isFinite(c.start) && Number.isFinite(c.end) && c.end > c.start);
+  if (!usable.length) return false;
+
+  // drawtext cannot wrap, so the size is capped by the WIDEST cue. ~0.62em average advance is
+  // close enough for these faces; without this the text ran off both edges (measured 2026-08-14).
+  const widest = Math.max(...usable.map(c => c.text.length));
+  const widthLimited = Math.floor((safeW * 0.92) / (widest * 0.62));
+  let fontSize = Math.max(16, Math.min(Math.round(safeH * ratio), widthLimited));
+  if (!Number.isFinite(fontSize) || fontSize < 12) fontSize = Math.round(safeH * ratio) || 34;
+
+  // Reels captions sit low-centre by default so they clear the face and the UI chrome.
+  const pos = String(opts.position || 'lower').toLowerCase();
+  const y = pos === 'middle' ? '(h-text_h)/2'
+          : pos === 'bottom' ? 'h-text_h-(h*0.14)'
+          : 'h-text_h-(h*0.26)';
+
+  const filters = [`scale=${safeW}:${safeH}`, 'format=yuv420p'];
+  usable.forEach((c, i) => {
+    const f = path.join(path.dirname(outPath), `cue_${i}.txt`);
+    fs.writeFileSync(f, c.text, 'utf8');
+    filters.push(
+      `drawtext=fontfile='${fontPath}':textfile='${f}':expansion=none:fontsize=${fontSize}` +
+      `:fontcolor=${opts.color || 'white'}:borderw=${Math.round(fontSize * 0.14)}:bordercolor=black@0.85` +
+      `:x=(w-text_w)/2:y=${y}:enable='between(t,${c.start.toFixed(3)},${c.end.toFixed(3)})'`
+    );
+  });
+
+  await new Promise((resolve, reject) => {
+    ffmpeg(inPath)
+      .videoFilters(filters)
+      .outputOptions(['-c:v libx264', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
+      .output(outPath)
+      .on('error', err => {
+        console.error('[captions] ffmpeg failed. cues=%d size=%d dims=%dx%d font=%s',
+          usable.length, fontSize, safeW, safeH, fontPath);
+        console.error('[captions] chain:', filters.join(',').slice(0, 1200));
+        reject(err);
+      })
+      .on('end', resolve).run();
+  });
+  return fs.existsSync(outPath);
+}
+
+async function probeDims(file) {
+  return new Promise(resolve => {
+    ffmpeg.ffprobe(file, (err, data) => {
+      if (err) return resolve({ width: 0, height: 0 });
+      const v = (data.streams || []).find(x => x.codec_type === 'video') || {};
+      resolve({ width: Number(v.width) || 0, height: Number(v.height) || 0 });
+    });
+  });
+}
+
+
 // and the voiceover is muxed over the finished cut.
 app.post('/api/assemble-reel', async (req, res) => {
   const shots = Array.isArray(req.body?.shots) ? req.body.shots.filter(x => x && x.url).slice(0, 40) : [];
@@ -1713,6 +1801,10 @@ app.post('/api/assemble-reel', async (req, res) => {
   // or every spoken noun lands on the wrong picture — "eleven followers" would play over the
   // bed shot instead of the profile screenshot, and the whole reel runs offset from there.
   const audioDelaySec = Math.max(0, Math.min(15, Number(req.body?.audioDelaySec) || 0));
+  // Captions come from the plan's OWN text and timecodes — already written, already timed, and
+  // already chunked to <=3 words by the caller. No transcription step, so nothing to mis-hear.
+  const cues = Array.isArray(req.body?.captions) ? req.body.captions.slice(0, 200) : [];
+  const capStyle = req.body?.captionStyle || {};
   const outW = Math.max(2, Math.round((Number(req.body?.width) || 1080) / 2) * 2);
   const outH = Math.max(2, Math.round((Number(req.body?.height) || 1920) / 2) * 2);
   if (shots.length < 2) return res.status(400).json({ success: false, error: 'Need at least 2 shots to assemble.' });
@@ -1776,6 +1868,19 @@ app.post('/api/assemble-reel', async (req, res) => {
         .on('end', resolve).on('error', reject).run();
     });
 
+    // Burn onto the silent picture, before the audio mux — drawtext needs a re-encode, and doing
+    // it here keeps the mux on `-c:v copy` so the video is encoded exactly once either way.
+    let pictPath = silentPath;
+    if (cues.length) {
+      try {
+        const capPath = path.join(tmpDir, 'captioned.mp4');
+        if (await burnCueList(silentPath, capPath, cues, capStyle)) pictPath = capPath;
+      } catch (e) {
+        // Fail OPEN: a caption problem must never cost the reel itself.
+        console.warn(`[reel:${token}] captions failed, continuing without: ${e.message}`);
+      }
+    }
+
     if (audioUrl) {
       const aPath = path.join(tmpDir, 'vo.mp3');
       const dl = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 90000 });
@@ -1787,17 +1892,18 @@ app.post('/api/assemble-reel', async (req, res) => {
       // infinite pad. `apad=whole_dur=<picture length>` is the form that works: it pads a
       // short VO with silence to exactly the picture's length, and -shortest still trims a
       // long VO at the last frame so it cannot end on a freeze. Do not drop whole_dur.
-      const picSecs = await probeDuration(silentPath);
+      const picSecs = await probeDuration(pictPath);
       await new Promise((resolve, reject) => {
         // -c:v copy: the picture is already correct, so muxing must never re-encode it.
         const delay = audioDelaySec > 0 ? `adelay=${Math.round(audioDelaySec * 1000)}:all=1,` : '';
         const pad = delay + (Number(picSecs) > 0 ? `apad=whole_dur=${Number(picSecs).toFixed(3)}` : 'apad=whole_dur=600');
-        ffmpeg().input(silentPath).input(aPath)
+        ffmpeg().input(pictPath).input(aPath)
           .outputOptions(['-c:v copy', '-c:a aac', '-b:a 192k', '-map 0:v:0', '-map 1:a:0', '-af', pad, '-shortest'])
           .output(outputPath).on('end', resolve).on('error', reject).run();
       });
     } else {
-      fs.copyFileSync(silentPath, outputPath);
+      // pictPath, not silentPath — a reel with no voiceover must still keep its captions.
+      fs.copyFileSync(pictPath, outputPath);
     }
 
     const seconds = await probeDuration(outputPath);
