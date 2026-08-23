@@ -461,7 +461,10 @@ STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject +
 - If the person walks in any beat, describe real gait mechanics: heel-to-toe footsteps with weight shifting onto each leg, arms swinging opposite the legs, head staying level — never a gliding or floating walk
 - Target 60-100 words total for the base prompt. Never exceed 150 words — Seedance ignores details beyond that.
 
-STEP 3 — DO NOT append any realism layer, camera-quality block, fps mention, or avoid-list yourself. The server appends the lane's realism layer and the negative suffix in code (so the user can switch lanes afterwards). Your base prompt must not duplicate that content — never write sensor noise / film grain / "avoid ..." lines, and never demand "sharp clarity" or "stable picture".
+STEP 3 — DO NOT append any realism layer, camera-quality block, fps mention, or avoid-list yourself.
+ALSO BANNED ANYWHERE IN THE PROMPT, not just the opening clause:
+  (a) aspect ratio, resolution or duration in ANY form — no "9:16", no "vertical", no "1080p", no "8 seconds total", no "[0-2s]"-style totals at the end. The tool sets the format and the clip length separately, so any figure you write is either ignored or actively contradicts the real setting. Timestamped BEATS inside the action are fine and wanted; a stated total duration or frame format is not.
+  (b) the person's physical appearance — no hair colour or length, eye colour, skin tone, age, height, build, ethnicity or tattoos. The user swaps in their own AI Influencer whose look is set by reference photos, and references beat prompt text on anything they depict, so a description of the SOURCE person can only fight those references. Write [INFLUENCER] and describe what they DO and WEAR, never what they look like. The server appends the lane's realism layer and the negative suffix in code (so the user can switch lanes afterwards). Your base prompt must not duplicate that content — never write sensor noise / film grain / "avoid ..." lines, and never demand "sharp clarity" or "stable picture".
 
 OUTPUT FORMAT — exactly this, nothing else:
 Line 1: "LANE: AUTHENTIC" or "LANE: HIGH-END" (stripped by the server and shown to the user as a switchable choice — it is the ONLY place the lane may appear).
