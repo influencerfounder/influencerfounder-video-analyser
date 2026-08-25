@@ -1234,130 +1234,13 @@ app.post('/api/stitch', async (req, res) => {
 });
 
 // ─────────────────────────────────────────
-// DEVICE STAMP — write Apple-shaped QuickTime metadata into a video.
-// OWNER-ONLY EXPERIMENT (gated upstream on Vercel, never exposed to students).
-//
-// Remux only: `-c copy` on both streams, so the bitstream is never re-encoded
-// and there is zero quality loss. Adding atoms shifts byte offsets, which is
-// exactly what would break `stco` if we edited in place — remuxing sidesteps
-// that because ffmpeg rebuilds the offset tables correctly.
-//
-// SECURITY: this accepts a PROFILE OBJECT, never ffmpeg arguments. Raw args
-// over HTTP would let any caller drive ffmpeg. Keys come from a fixed
-// whitelist below; only values are taken from the request, and they are
-// sanitised (control chars stripped, length capped) before use.
+// DEVICE STAMP — REMOVED 2026-08-25 (Mike's call, see KRYFEX-VIRAL-DECLINE-
+// RAPPORT.md §3 in the Website folder). Fabricated iPhone capture metadata was
+// pure added risk: platforms read pixels and know the real posting device, so
+// every fabricated field is a checkable contradiction. /api/stamp-video,
+// STAMP_KEYS, sanitiseMetaValue and the variants route's metadata injection
+// are all gone. Do NOT reintroduce.
 // ─────────────────────────────────────────
-
-// Only these metadata keys may ever be written. Adding to this list is a
-// deliberate act; the request cannot introduce a new key.
-// NOTE: a generic `location` key is deliberately absent. ffmpeg's mov muxer
-// rewrites it into `location` + `location-eng` with a 6-decimal altitude,
-// which then sits in the file contradicting the correctly-padded ISO6709 key.
-const STAMP_KEYS = [
-  'com.apple.quicktime.make',
-  'com.apple.quicktime.model',
-  'com.apple.quicktime.software',
-  'com.apple.quicktime.creationdate',
-  'com.apple.quicktime.location.ISO6709',
-  'com.apple.quicktime.location.accuracy.horizontal',
-  'make',
-  'model',
-  'creation_time',
-];
-
-// Fixed output flags, hardcoded here rather than accepted from the request.
-// Combination established by measurement (see deviceStamp.js for the full note):
-//   -fflags +bitexact     removes ffmpeg's own `encoder: Lavf<ver>` signature
-//   -map_metadata:s:* -1  drops inherited stream tags such as the generator's
-//                         `encoder: Lavc.. libx264`. Using `-metadata:s:v
-//                         encoder=` instead makes ffmpeg write `vendor_id:
-//                         FFMP`, which is a worse tell — do not "simplify" to it.
-//   -map 0 -ignore_unknown  ffmpeg's DEFAULT stream selection keeps only the
-//                         single "best" video + "best" audio and silently drops
-//                         everything else. Measured on a 4-stream test file:
-//                         788,493 -> 587,054 bytes, having thrown away a second
-//                         audio track and a data track with no error. -map 0
-//                         preserves every stream; -ignore_unknown skips the ones
-//                         mp4 genuinely cannot hold instead of failing the run.
-const STAMP_FIXED_ARGS = [
-  '-map', '0',
-  '-ignore_unknown',
-  '-fflags', '+bitexact',
-  '-map_metadata:s:v', '-1',
-  '-map_metadata:s:a', '-1',
-];
-
-function sanitiseMetaValue(v) {
-  if (v === null || v === undefined) return null;
-  // Strip control characters and newlines (which would corrupt the atom),
-  // collapse whitespace, cap length.
-  const s = String(v).replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 256);
-  return s.length ? s : null;
-}
-
-app.post('/api/stamp-video', async (req, res) => {
-  const { videoUrl, metadata } = req.body || {};
-  if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
-  if (!metadata || typeof metadata !== 'object') {
-    return res.status(400).json({ success: false, error: 'Missing metadata object' });
-  }
-
-  // Build args from the whitelist, not from whatever the caller sent.
-  const args = ['-movflags', 'use_metadata_tags', ...STAMP_FIXED_ARGS];
-  const written = {};
-  for (const key of STAMP_KEYS) {
-    const val = sanitiseMetaValue(metadata[key]);
-    if (val === null) continue;
-    written[key] = val;
-  }
-  if (!Object.keys(written).length) {
-    return res.status(400).json({ success: false, error: 'No recognised metadata keys supplied' });
-  }
-
-  const token = `stamp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stamp-'));
-  const inputPath = path.join(tmpDir, 'input.mp4');
-  const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
-
-  try {
-    const dl = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 120000 });
-    fs.writeFileSync(inputPath, Buffer.from(dl.data));
-    const inBytes = fs.statSync(inputPath).size;
-
-    await new Promise((resolve, reject) => {
-      // -c copy on BOTH streams: container rewrite only, pixels and audio
-      // are bit-for-bit identical to the input.
-      const cmd = ffmpeg(inputPath).outputOptions(['-c', 'copy', ...args]);
-      // ⚠️ Each -metadata pair MUST go in as varargs, never as a 2-element
-      // array. fluent-ffmpeg splits an array element containing exactly two
-      // space-separated tokens into option+value, so
-      //   ['-metadata', 'com.apple.quicktime.model=iPhone 14']
-      // became  ... 'model=iPhone', '14'  and ffmpeg then treated '14' as an
-      // output filename ("Error opening output file 14"). Measured: a
-      // two-token value splits, a three-or-more-token value does not — which
-      // is why 'iPhone 13 mini' and 'iPhone 14 Pro Max' worked while
-      // 'iPhone 13/14/15' failed. Varargs are never split.
-      for (const [key, val] of Object.entries(written)) {
-        cmd.outputOptions('-metadata', `${key}=${val}`);
-      }
-      cmd.output(outputPath).on('end', resolve).on('error', reject).run();
-    });
-
-    if (!fs.existsSync(outputPath)) throw new Error('Stamp produced no output file');
-    const outBytes = fs.statSync(outputPath).size;
-
-    tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
-    const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
-    console.log(`[stamp:${token}] ${inBytes} -> ${outBytes} bytes, ${Object.keys(written).length} keys`);
-    res.json({ success: true, videoUrl: publicUrl, token, written, inBytes, outBytes });
-  } catch (err) {
-    const message = err.response?.data?.error?.message || err.message;
-    console.error(`[stamp:${token}] error:`, message);
-    res.status(500).json({ success: false, error: message });
-  } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
-  }
-});
 
 // ─────────────────────────────────────────
 // TRIAL LAB — MODE A: re-serve variants of your OWN winning video.
@@ -2072,27 +1955,13 @@ app.post('/api/phash-compare', async (req, res) => {
 });
 
 app.post('/api/variants', async (req, res) => {
-  const { videoUrl, count, seed, intensity, metadata, flip } = req.body || {};
+  const { videoUrl, count, seed, intensity, flip } = req.body || {};
   if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
   const n = Math.max(1, Math.min(VARIANT_MAX, parseInt(count, 10) || 3));
   const runSeed = String(seed || Date.now());
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'variants-'));
   const inputPath = path.join(tmpDir, 'input.mp4');
-
-  // Optional device stamp per variant, reusing the stamp whitelist so a
-  // re-served file also carries fresh capture metadata.
-  // Collected as PAIRS, applied via varargs below — never as array elements.
-  // See the note in /api/stamp-video: fluent-ffmpeg splits a two-token array
-  // element into option+value, which corrupts values like "iPhone 14".
-  const metaPairs = [];
-  if (metadata && typeof metadata === 'object') {
-    for (const key of STAMP_KEYS) {
-      const val = sanitiseMetaValue(metadata[key]);
-      if (val !== null) metaPairs.push([key, val]);
-    }
-  }
-  const metaArgs = metaPairs.length ? ['-movflags', 'use_metadata_tags'] : [];
 
   try {
     const dl = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 120000 });
@@ -2117,9 +1986,7 @@ app.post('/api/variants', async (req, res) => {
             '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', '-b:a', '128k',
             '-fflags', '+bitexact',
-            ...metaArgs,
           ]);
-        for (const [k, val] of metaPairs) cmd.outputOptions('-metadata', `${k}=${val}`);
         cmd.output(outPath).on('end', resolve).on('error', reject).run();
       });
 
