@@ -832,7 +832,11 @@ app.post('/api/temp-video', async (req, res) => {
 
     tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
     const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
-    res.json({ captionsBurned, captionError, captionCues: cues.length, success: true, videoUrl: publicUrl, token });
+    // NOTE: this response used to also spread `captionsBurned, captionError,
+    // captionCues` — variables that only exist inside the assemble-reel route's
+    // scope. That was a copy-paste slip which made EVERY temp-video call throw
+    // ReferenceError → 500 (found 2026-08-25). Plain response only.
+    res.json({ success: true, videoUrl: publicUrl, token });
   } catch (err) {
     try { fs.unlinkSync(outputPath); } catch (_) {}
     console.error(`[tempvid:${token}] error:`, err.message);
@@ -847,6 +851,58 @@ app.get('/api/temp-video/:token', (req, res) => {
   res.setHeader('Content-Type', 'video/mp4');
   res.setHeader('Access-Control-Allow-Origin', '*');
   fs.createReadStream(v.filePath).pipe(res);
+});
+
+// POST /api/faststart — LOSSLESS remux of an mp4 so the moov index sits at the
+// FRONT of the file. Kie/Seedance output puts moov at the very END (measured
+// 2026-08-25: byte 26,439,127 of a 26.4MB file), so a phone <video> must
+// range-fetch the head, then the tail, then seek back — which is why app
+// videos load slowly. `-c copy` copies the streams byte-for-byte: zero
+// re-encode, zero quality change (proven: identical stream MD5s), so the
+// never-degrade-a-deliverable rule holds. Side effect worth knowing: the
+// remux drops ByteDance's C2PA `uuid` atom, so the output is also free of
+// the AI-generated metadata declaration. Result is registered in the
+// tempVideos map (30-min TTL) for the caller to fetch and re-host permanently.
+app.post('/api/faststart', async (req, res) => {
+  cleanOldTempVideos();
+  const { videoUrl } = req.body || {};
+  if (!videoUrl || !/^https?:\/\//i.test(String(videoUrl))) {
+    return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+  }
+  const token = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const inputPath = path.join(os.tmpdir(), `fastin_${token}.mp4`);
+  const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+  try {
+    const dl = await axios.get(videoUrl, {
+      responseType: 'arraybuffer', timeout: 180000,
+      maxContentLength: 300 * 1024 * 1024,
+    });
+    fs.writeFileSync(inputPath, Buffer.from(dl.data));
+    if (!fs.existsSync(inputPath) || fs.statSync(inputPath).size < 1000) {
+      return res.status(400).json({ success: false, error: 'Could not download that video — the link may have expired.' });
+    }
+    await new Promise((resolve, reject) => {
+      ffmpeg(inputPath)
+        .outputOptions(['-c', 'copy', '-movflags', '+faststart'])
+        .output(outputPath)
+        .on('end', resolve)
+        .on('error', reject)
+        .run();
+    });
+    if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 1000) {
+      return res.status(500).json({ success: false, error: 'Remux produced no output' });
+    }
+    const bytes = fs.statSync(outputPath).size;
+    tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
+    console.log(`[faststart:${token}] remuxed ${Math.round(bytes / 1024)}KB`);
+    res.json({ success: true, videoUrl: `${req.protocol}://${req.get('host')}/api/temp-video/${token}`, token, bytes });
+  } catch (err) {
+    console.error(`[faststart:${token}] error:`, err.message);
+    try { fs.unlinkSync(outputPath); } catch (_) {}
+    res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
+  } finally {
+    try { fs.unlinkSync(inputPath); } catch (_) {}
+  }
 });
 
 // ─────────────────────────────────────────
