@@ -230,13 +230,18 @@ app.post('/api/clone', async (req, res) => {
     const ANALYSIS_FRAME_COUNT = 80;
     const fps = Math.min(8.0, ANALYSIS_FRAME_COUNT / Math.max(duration, 0.1));
 
-    const extractFrame = (ts, outPath) => new Promise((resolve, reject) => {
+    // opts.width/opts.qv: analysis frames stay 640/q5 (Claude vision needs no more and
+    // 80 of them go into the prompt) — but frames RETURNED to the client double as
+    // GENERATION inputs (the filmstrip anchor, the recreate worker's scene frame, the
+    // custom-first-frame scene reference), and a 640px q5 JPEG as the source of truth
+    // for an anchored generation was a real quality ceiling (found 2026-08-25).
+    const extractFrame = (ts, outPath, opts = {}) => new Promise((resolve, reject) => {
       ffmpeg(videoPath)
         .seekInput(ts)
         .outputOptions([
           '-vframes 1',
-          '-q:v 5',           // slightly lower quality = smaller file, less memory
-          '-vf scale=640:-1', // cap width at 640px — Claude vision doesn't need full res
+          `-q:v ${opts.qv || 5}`,
+          `-vf scale=${opts.width || 640}:-1`,
           '-threads 1'        // single-threaded = predictable low RAM per ffmpeg call
         ])
         .output(outPath)
@@ -277,14 +282,36 @@ app.post('/api/clone', async (req, res) => {
       }
       pickerFiles = frameFiles.filter(f => picked.has(f));
     }
-    const frameDataUrls = pickerFiles.map(f => {
-      const b64 = fs.readFileSync(path.join(framesDir, f)).toString('base64');
-      return `data:image/jpeg;base64,${b64}`;
-    });
-
-    // ── Scorecard v2 (2026-07-10) ──
     // Timestamps for the picker frames (fps-based extraction: frame n ≈ n/fps seconds)
     const frameTimestamps = pickerFiles.map(pf => Math.round((frameFiles.indexOf(pf) / fps) * 10) / 10);
+
+    // Re-extract the PICKER frames at 1024px/q4 — these are the frames the client can
+    // turn into a first-frame anchor or a scene reference, so they deserve real pixels
+    // (the 80 analysis frames stay 640/q5, Claude-vision-appropriate). SIZE GUARD: the
+    // whole response must clear Vercel's ~4.5MB serverless response cap through
+    // /api/clone-proxy, so if the hi-res set runs heavy (grain-dense sources) we fall
+    // back to the 640px analysis files rather than break the response.
+    let pickerB64s = [];
+    try {
+      let total = 0;
+      const hi = [];
+      for (let i = 0; i < pickerFiles.length; i++) {
+        const hp = path.join(framesDir, `picker-hi-${String(i).padStart(2, '0')}.jpg`);
+        await extractFrame(Math.max(frameTimestamps[i] || 0, 0.05), hp, { width: 1024, qv: 4 });
+        const buf = fs.readFileSync(hp);
+        total += buf.length;
+        hi.push(buf.toString('base64'));
+      }
+      if (total <= 2_600_000) pickerB64s = hi;
+      else console.warn(`[clone] hi-res picker set ${Math.round(total / 1024)}KB — falling back to 640px frames to stay under the proxy response cap`);
+    } catch (e) {
+      console.warn('[clone] hi-res picker extraction failed, using 640px frames:', e.message);
+    }
+    const frameDataUrls = pickerB64s.length === pickerFiles.length
+      ? pickerB64s.map(b64 => `data:image/jpeg;base64,${b64}`)
+      : pickerFiles.map(f => `data:image/jpeg;base64,${fs.readFileSync(path.join(framesDir, f)).toString('base64')}`);
+
+    // ── Scorecard v2 (2026-07-10) ──
     // Densely sample the HOOK WINDOW (first 3s): the virality scorecard weights the
     // hook heaviest, but evenly-sampled frames on a longer clip may contain only a
     // single frame from 0-3s — the model literally couldn't see the window it was
@@ -303,7 +330,7 @@ app.post('/api/clone', async (req, res) => {
     let firstFrameUrl = '';
     try {
       const firstFramePath = path.join(framesDir, 'frame-opening.jpg');
-      await extractFrame(0.1, firstFramePath);
+      await extractFrame(0.1, firstFramePath, { width: 1024, qv: 4 });
       const openingB64 = fs.readFileSync(firstFramePath).toString('base64');
       firstFrameUrl = `data:image/jpeg;base64,${openingB64}`;
     } catch (_) { /* fall back to frames[0] on the client if this fails */ }
@@ -1135,7 +1162,7 @@ app.post('/api/burn-captions', async (req, res) => {
     // 5. Burn the captions onto the video
     await new Promise((resolve, reject) => {
       const cmd = ffmpeg(videoPath)
-        .outputOptions(['-vf', filters.join(','), '-c:a', 'copy'])
+        .outputOptions(['-vf', filters.join(','), '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast', '-c:a', 'copy'])
         .output(outputPath)
         .on('end', resolve)
         .on('error', (e) => {
@@ -1208,7 +1235,7 @@ app.post('/api/stitch', async (req, res) => {
       await new Promise((resolve, reject) => {
         ffmpeg(raw)
           .videoFilters(`scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2,setsar=1`)
-          .outputOptions(['-r 24', '-c:v libx264', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
+          .outputOptions(['-r 24', '-c:v libx264', '-crf', '18', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
           .output(norm).on('end', resolve).on('error', reject).run();
       });
       normPaths.push(norm);
@@ -1655,7 +1682,7 @@ async function burnCueList(inPath, outPath, cues, opts = {}) {
   await new Promise((resolve, reject) => {
     ffmpeg(inPath)
       .videoFilters(filters)
-      .outputOptions(['-c:v libx264', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
+      .outputOptions(['-c:v libx264', '-crf', '18', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
       .output(outPath)
       .on('error', err => {
         console.error('[captions] ffmpeg failed. cues=%d size=%d dims=%dx%d font=%s',
@@ -1733,7 +1760,7 @@ app.post('/api/assemble-reel', async (req, res) => {
             const zoom = `zoompan=z='min(zoom+0.0015,1.10)':d=${frames}:s=${outW}x${outH}:fps=24`;
             cmd.input(srcPath).inputOptions(['-loop 1']).outputOptions([`-t ${secs}`]).videoFilters(`${pad},${zoom}`);
           }
-          cmd.outputOptions(['-r 24', '-c:v libx264', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
+          cmd.outputOptions(['-r 24', '-c:v libx264', '-crf', '18', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
              .output(outPath).on('end', resolve).on('error', reject).run();
         });
         if (fs.existsSync(outPath)) normPaths.push(outPath);
@@ -1838,7 +1865,7 @@ app.post('/api/extract-audio', async (req, res) => {
 
     await new Promise((resolve, reject) => {
       ffmpeg(inputPath)
-        .outputOptions(['-vn', '-ac', '1', '-ar', '44100', '-b:a', '128k', '-t', String(maxSeconds)])
+        .outputOptions(['-vn', '-ac', '1', '-ar', '44100', '-b:a', '192k', '-t', String(maxSeconds)])
         .audioCodec('libmp3lame')
         .output(outPath)
         .on('end', resolve)
