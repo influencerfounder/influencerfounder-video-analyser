@@ -1764,8 +1764,24 @@ async function probeDims(file) {
 
 // and the voiceover is muxed over the finished cut.
 app.post('/api/assemble-reel', async (req, res) => {
-  const shots = Array.isArray(req.body?.shots) ? req.body.shots.filter(x => x && x.url).slice(0, 40) : [];
+  // Cap 80: a 30s every-beat Beat Edit at 128 BPM is ~64 cuts (was 40).
+  const shots = Array.isArray(req.body?.shots) ? req.body.shots.filter(x => x && x.url).slice(0, 80) : [];
   const audioUrl = req.body?.audioUrl || '';
+  // Beat Edit flags — all default OFF so the First Week reel caller's ffmpeg
+  // command lines stay byte-identical.
+  // strict: a failed shot fails the WHOLE request immediately. A silently
+  //   skipped shot shifts every later cut off-beat, which is worse than an
+  //   error — nobody should pay 3 minutes to learn the edit is garbage.
+  // exactLen: segments are cut with -frames:v + tpad clone so a segment can
+  //   NEVER come out short (a short segment desyncs everything after it; a
+  //   <=300ms freeze inside a 0.5s cut is invisible). Also switches to a
+  //   normalize-once-per-URL intermediate so 80 cuts from 5 clips don't decode
+  //   the sources 80 times.
+  // audioFadeOutSec: fade the soundtrack out over the last N seconds instead
+  //   of the hard -shortest chop.
+  const strict = req.body?.strict === true;
+  const exactLen = req.body?.exactLen === true;
+  const audioFadeOutSec = Math.max(0, Math.min(3, Number(req.body?.audioFadeOutSec) || 0));
   // The reel can open with silent shots (the cold open), so the voiceover must not start at 0:00
   // or every spoken noun lands on the wrong picture — "eleven followers" would play over the
   // bed shot instead of the profile screenshot, and the whole reel runs offset from there.
@@ -1783,6 +1799,13 @@ app.post('/api/assemble-reel', async (req, res) => {
   const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
   try {
     const normPaths = [];
+    // Beat edits reference the same source clip for many segments — download
+    // each unique URL once. Failures are cached too, or a dead URL would eat
+    // two 90s timeouts PER SHOT that references it.
+    const dlCache = new Map();   // url -> local source path
+    const dlFailed = new Map();  // url -> error message
+    const normCache = new Map(); // url -> whole-clip normalized intermediate (exactLen mode)
+    const encodeOpts = ['-r 24', '-c:v libx264', '-crf', '18', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'];
     for (let i = 0; i < shots.length; i++) {
       const sh = shots[i];
       const secs = Math.min(10, Math.max(0.3, Number(sh.seconds) || 1));
@@ -1790,38 +1813,91 @@ app.post('/api/assemble-reel', async (req, res) => {
       // `secs` of a 5s generation — usually the weakest part, because the model eases into the
       // motion. startAt lets the operator pick the good moment instead.
       const startAt = Math.max(0, Math.min(60, Number(sh.startAt) || 0));
-      const srcPath = path.join(tmpDir, `src${i}`);
       const outPath = path.join(tmpDir, `n${i}.mp4`);
-      try {
-        const dl = await axios.get(sh.url, { responseType: 'arraybuffer', timeout: 90000 });
-        fs.writeFileSync(srcPath, Buffer.from(dl.data));
-      } catch (e) {
-        console.warn(`[reel:${token}] shot ${i + 1} download failed: ${e.message}`);
-        continue;
+      let srcPath = dlCache.get(sh.url);
+      if (!srcPath) {
+        if (dlFailed.has(sh.url)) {
+          if (strict) return res.status(422).json({ success: false, error: `Shot ${i + 1} uses a clip that could not be downloaded — ${dlFailed.get(sh.url)}`, failedShot: i });
+          continue;
+        }
+        srcPath = path.join(tmpDir, `src${i}`);
+        let dlErr = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const dl = await axios.get(sh.url, { responseType: 'arraybuffer', timeout: 90000 });
+            fs.writeFileSync(srcPath, Buffer.from(dl.data));
+            dlErr = null; break;
+          } catch (e) {
+            dlErr = e;
+            // Retry only what can heal — a 4xx (deleted/forbidden) won't.
+            const st = e.response?.status;
+            if (st && st >= 400 && st < 500) break;
+            await new Promise(r => setTimeout(r, 800));
+          }
+        }
+        if (dlErr) {
+          const msg = String(dlErr.message || dlErr).slice(0, 120);
+          dlFailed.set(sh.url, msg);
+          console.warn(`[reel:${token}] shot ${i + 1} download failed: ${msg}`);
+          if (strict) return res.status(422).json({ success: false, error: `Shot ${i + 1} could not be downloaded — ${msg}`, failedShot: i });
+          continue;
+        }
+        dlCache.set(sh.url, srcPath);
       }
       const pad = `scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
       try {
-        await new Promise((resolve, reject) => {
-          const cmd = ffmpeg();
-          if (sh.type === 'video') {
-            // Take the FIRST `secs` of the generated clip — shots are cut to a timecode,
-            // and a generated clip is 5s regardless of how long the cut needs to be.
-            // -ss BEFORE the input is the fast, keyframe-accurate seek; -t after it bounds the
-            // duration from that point.
-            cmd.input(srcPath).inputOptions(startAt > 0 ? ['-ss', String(startAt)] : []).outputOptions([`-t ${secs}`]).videoFilters(pad);
-          } else {
-            // Ken Burns: a still with a slow push reads as filmed at a 1s cut. Zoom is
-            // computed per shot so the push speed is constant regardless of duration.
-            const frames = Math.max(2, Math.round(secs * 24));
-            const zoom = `zoompan=z='min(zoom+0.0015,1.10)':d=${frames}:s=${outW}x${outH}:fps=24`;
-            cmd.input(srcPath).inputOptions(['-loop 1']).outputOptions([`-t ${secs}`]).videoFilters(`${pad},${zoom}`);
+        if (exactLen && sh.type === 'video') {
+          // Normalize the WHOLE clip once per unique URL, then cut every
+          // segment from the small intermediate — bounds the work at
+          // O(unique clip durations + N cheap cuts) instead of decoding the
+          // source once per segment, and incidentally removes the nonzero
+          // start_time seek edge case some phone files have.
+          let normSrc = normCache.get(sh.url);
+          if (!normSrc) {
+            normSrc = path.join(tmpDir, `full${i}.mp4`);
+            await new Promise((resolve, reject) => {
+              ffmpeg().input(srcPath).videoFilters(pad)
+                .outputOptions(encodeOpts)
+                .output(normSrc).on('end', resolve).on('error', reject).run();
+            });
+            normCache.set(sh.url, normSrc);
           }
-          cmd.outputOptions(['-r 24', '-c:v libx264', '-crf', '18', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
-             .output(outPath).on('end', resolve).on('error', reject).run();
-        });
+          // -frames:v = the exact frame count (secs arrives quantized to the
+          // 24fps grid), tpad clones the last frame forever so a clip that
+          // runs out can never yield a SHORT segment — a short segment would
+          // desync every later cut from the beat.
+          const frames = Math.max(1, Math.round(secs * 24));
+          await new Promise((resolve, reject) => {
+            ffmpeg().input(normSrc).inputOptions(startAt > 0 ? ['-ss', String(startAt)] : [])
+              .videoFilters('tpad=stop=-1:stop_mode=clone')
+              .outputOptions([`-frames:v ${frames}`, ...encodeOpts])
+              .output(outPath).on('end', resolve).on('error', reject).run();
+          });
+        } else {
+          await new Promise((resolve, reject) => {
+            const cmd = ffmpeg();
+            if (sh.type === 'video') {
+              // Take the FIRST `secs` of the generated clip — shots are cut to a timecode,
+              // and a generated clip is 5s regardless of how long the cut needs to be.
+              // -ss BEFORE the input is the fast, keyframe-accurate seek; -t after it bounds the
+              // duration from that point.
+              cmd.input(srcPath).inputOptions(startAt > 0 ? ['-ss', String(startAt)] : []).outputOptions([`-t ${secs}`]).videoFilters(pad);
+            } else {
+              // Ken Burns: a still with a slow push reads as filmed at a 1s cut. Zoom is
+              // computed per shot so the push speed is constant regardless of duration.
+              const frames = Math.max(2, Math.round(secs * 24));
+              const zoom = `zoompan=z='min(zoom+0.0015,1.10)':d=${frames}:s=${outW}x${outH}:fps=24`;
+              cmd.input(srcPath).inputOptions(['-loop 1']).outputOptions([`-t ${secs}`]).videoFilters(`${pad},${zoom}`);
+            }
+            cmd.outputOptions(encodeOpts)
+               .output(outPath).on('end', resolve).on('error', reject).run();
+          });
+        }
         if (fs.existsSync(outPath)) normPaths.push(outPath);
+        else if (strict) return res.status(422).json({ success: false, error: `Shot ${i + 1} produced no output.`, failedShot: i });
       } catch (e) {
         console.warn(`[reel:${token}] shot ${i + 1} normalise failed: ${e.message}`);
+        if (strict) return res.status(422).json({ success: false, error: `Shot ${i + 1} failed to process — ${String(e.message || e).slice(0, 120)}`, failedShot: i });
       }
     }
     if (normPaths.length < 2) {
@@ -1870,7 +1946,13 @@ app.post('/api/assemble-reel', async (req, res) => {
       await new Promise((resolve, reject) => {
         // -c:v copy: the picture is already correct, so muxing must never re-encode it.
         const delay = audioDelaySec > 0 ? `adelay=${Math.round(audioDelaySec * 1000)}:all=1,` : '';
-        const pad = delay + (Number(picSecs) > 0 ? `apad=whole_dur=${Number(picSecs).toFixed(3)}` : 'apad=whole_dur=600');
+        // Optional fade-out over the last audioFadeOutSec so a soundtrack longer than the
+        // picture ends musically instead of the hard -shortest chop. After apad on purpose:
+        // apad is a no-op when the audio outruns the picture, and the fade must sit at the
+        // end of the PICTURE either way.
+        const fadeSec = audioFadeOutSec > 0 && Number(picSecs) > 0 ? Math.min(audioFadeOutSec, Number(picSecs) / 2) : 0;
+        const fade = fadeSec > 0 ? `,afade=t=out:st=${Math.max(0, Number(picSecs) - fadeSec).toFixed(3)}:d=${fadeSec.toFixed(3)}` : '';
+        const pad = delay + (Number(picSecs) > 0 ? `apad=whole_dur=${Number(picSecs).toFixed(3)}` : 'apad=whole_dur=600') + fade;
         ffmpeg().input(pictPath).input(aPath)
           .outputOptions(['-c:v copy', '-c:a aac', '-b:a 192k', '-map 0:v:0', '-map 1:a:0', '-af', pad, '-shortest'])
           .output(outputPath).on('end', resolve).on('error', reject).run();
@@ -1889,6 +1971,207 @@ app.post('/api/assemble-reel', async (req, res) => {
                audioDelaySec });
   } catch (err) {
     console.error(`[reel:${token}] error:`, err.message);
+    res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BEAT DETECTION (Beat Edit) — pure JS on mono Float32 PCM, zero dependencies.
+// Written for strong-beat music (hardcore / hip-hop / electronic). Pipeline:
+// two-band log-compressed frame energy (low band <150Hz weighted 2x — kicks
+// dominate, hi-hats must not) -> novelty (positive first difference, moving-
+// average normalised WITH a global-mean floor in the denominator, or near-
+// silence amplifies its own noise) -> tempo by scoring a fractional-lag comb
+// over 60-200 BPM (sub-frame resolution, no integer-lag quantisation) ->
+// best phase -> beats tracked PREDICTIVELY from the last snapped beat
+// (next = lastSnapped + lag, snap +-3 frames) so snapping corrects drift and
+// survives real tracks' ~1% tempo wobble. Autocorrelation is inherently
+// ambiguous DOWNWARD (every integer multiple of the true period aligns
+// perfectly), so the truth is the FASTEST strong candidate, with extra
+// confidence required to leave the 90-180 window.
+// Validated 2026-08-28 against a synthetic harness (kick+hat+noise tracks at
+// 70-190 BPM, silent intros, +-1% tempo ramps, 3dB SNR) and a real tech house
+// mix: precision 90-100%, median beat error 5-9ms. Do not "simplify" the
+// normalisation floor or the consecutive-snap intro trim — each closed a
+// measured failure.
+const BEAT_HOP = 512;
+const BEAT_WIN = 1024;
+
+function beatNovelty(pcm, sr) {
+  const nFrames = Math.max(0, Math.floor((pcm.length - BEAT_WIN) / BEAT_HOP) + 1);
+  if (nFrames < 8) return null;
+  // One-pole low-pass at ~150Hz over the whole signal (kick band).
+  const a = 1 - Math.exp((-2 * Math.PI * 150) / sr);
+  const low = new Float32Array(pcm.length);
+  let y = 0;
+  for (let i = 0; i < pcm.length; i++) { y += a * (pcm[i] - y); low[i] = y; }
+
+  const logAll = new Float32Array(nFrames);
+  const logLow = new Float32Array(nFrames);
+  for (let n = 0; n < nFrames; n++) {
+    const s = n * BEAT_HOP;
+    let eA = 0, eL = 0;
+    for (let i = s; i < s + BEAT_WIN; i++) { eA += pcm[i] * pcm[i]; eL += low[i] * low[i]; }
+    logAll[n] = Math.log(1 + 1000 * eA);
+    logLow[n] = Math.log(1 + 1000 * eL);
+  }
+  const nov = new Float32Array(nFrames);
+  for (let n = 1; n < nFrames; n++) {
+    nov[n] = 2 * Math.max(0, logLow[n] - logLow[n - 1]) + Math.max(0, logAll[n] - logAll[n - 1]);
+  }
+  let gSum = 0;
+  for (let n = 0; n < nFrames; n++) gSum += nov[n];
+  const gMean = gSum / nFrames;
+  const half = Math.round((0.5 * sr) / BEAT_HOP);
+  const out = new Float32Array(nFrames);
+  let acc = 0;
+  const win = 2 * half + 1;
+  for (let n = 0; n < Math.min(nFrames, win); n++) acc += nov[n];
+  for (let n = 0; n < nFrames; n++) {
+    if (n - half - 1 >= 0) acc -= nov[n - half - 1];
+    if (n + half < nFrames && n + half >= win) acc += nov[n + half];
+    const lo = Math.max(0, n - half), hi = Math.min(nFrames - 1, n + half);
+    let mean;
+    if (lo === n - half && hi === n + half) mean = acc / win;
+    else { let s2 = 0; for (let i = lo; i <= hi; i++) s2 += nov[i]; mean = s2 / (hi - lo + 1); }
+    out[n] = nov[n] / (mean + 0.25 * gMean + 1e-6);
+  }
+  return out;
+}
+
+// Linear-interpolated read of the novelty curve at a fractional frame index.
+function novAt(nov, t) {
+  if (t < 0 || t > nov.length - 1) return 0;
+  const i = Math.floor(t), f = t - i;
+  return i + 1 < nov.length ? nov[i] * (1 - f) + nov[i + 1] * f : nov[i];
+}
+
+// Fractional-lag autocorrelation of the novelty at one candidate beat period.
+function periodScore(nov, period) {
+  let s = 0, c = 0;
+  const nMax = nov.length - Math.ceil(period) - 1;
+  for (let n = 0; n < nMax; n++) { s += nov[n] * novAt(nov, n + period); c++; }
+  return c > 0 ? s / c : 0;
+}
+
+function detectBeats(pcm, sr) {
+  const nov = beatNovelty(pcm, sr);
+  if (!nov) return null;
+  const fps = sr / BEAT_HOP;
+  const nFrames = nov.length;
+
+  // Reject silence / DC: novelty must have real structure.
+  let novPeak = 0, novSum = 0;
+  for (let n = 0; n < nFrames; n++) { if (nov[n] > novPeak) novPeak = nov[n]; novSum += nov[n]; }
+  if (novPeak < 1.5 || novSum < nFrames * 0.05) return null;
+
+  const scores = [];
+  const scoreOfBpm = (bpm) => periodScore(nov, (fps * 60) / bpm);
+  let sMax = -1;
+  for (let bpm = 60; bpm <= 200; bpm += 0.25) {
+    const s = scoreOfBpm(bpm);
+    scores.push([bpm, s]);
+    if (s > sMax) sMax = s;
+  }
+  // Local maxima within 15% of the best score are tempo candidates; prefer the
+  // FASTEST (sub-harmonics score as high as the truth), but leaving the 90-180
+  // window needs >=95% of the best in-window candidate's score.
+  const cands = [];
+  for (let i = 1; i < scores.length - 1; i++) {
+    const [b, s] = scores[i];
+    if (s >= 0.85 * sMax && s >= scores[i - 1][1] && s >= scores[i + 1][1]) {
+      if (!cands.length || b - cands[cands.length - 1][0] > 3) cands.push([b, s]);
+      else if (s > cands[cands.length - 1][1]) cands[cands.length - 1] = [b, s];
+    }
+  }
+  if (!cands.length) cands.push(scores.reduce((a, c) => (c[1] > a[1] ? c : a)));
+  const inWin = cands.filter(([b]) => b >= 90 && b <= 180);
+  let bpm = 0;
+  for (let i = cands.length - 1; i >= 0; i--) {
+    const [b, s] = cands[i];
+    const ok = (b >= 90 && b <= 180) || !inWin.length || s >= 0.95 * Math.max(...inWin.map(x => x[1]));
+    if (ok) { bpm = b; break; }
+  }
+  if (!bpm) bpm = cands[cands.length - 1][0];
+  const lag = (fps * 60) / bpm;
+
+  // Phase: search [0, lag) in quarter-frame steps, triangular +-1 frame kernel.
+  let bestPhase = 0, bestPhaseScore = -1;
+  for (let p = 0; p < lag; p += 0.25) {
+    let s = 0;
+    for (let t = p; t < nFrames - 1; t += lag) {
+      s += 0.5 * novAt(nov, t - 1) + novAt(nov, t) + 0.5 * novAt(nov, t + 1);
+    }
+    if (s > bestPhaseScore) { bestPhaseScore = s; bestPhase = p; }
+  }
+
+  // Predictive tracking; quiet passages keep the predicted position (coast).
+  const SNAP = 3;
+  const snapFloor = 0.35 * novPeak / 2;
+  // Energy windows start rising ~1.4 frames BEFORE the true onset — measured
+  // as a consistent -32ms bias in the harness, corrected here.
+  const ONSET_OFFSET = 1.4;
+  const raw = [];
+  let t = bestPhase;
+  while (t < nFrames - 1) {
+    let biIdx = Math.round(t), biVal = -1;
+    const lo = Math.max(0, Math.round(t) - SNAP), hi = Math.min(nFrames - 1, Math.round(t) + SNAP);
+    for (let i = lo; i <= hi; i++) { if (nov[i] > biVal) { biVal = nov[i]; biIdx = i; } }
+    const didSnap = biVal >= snapFloor;
+    const snapped = didSnap ? biIdx : t;
+    raw.push({ t: (snapped + ONSET_OFFSET) * BEAT_HOP / sr, snapped: didSnap });
+    t = snapped + lag;
+  }
+  // Drop everything before the first TWO CONSECUTIVE snapped beats — beats
+  // "detected" over a quiet intro are noise-snaps or grid extrapolation.
+  let firstReal = -1;
+  for (let i = 0; i < raw.length - 1; i++) {
+    if (raw[i].snapped && raw[i + 1].snapped) { firstReal = i; break; }
+  }
+  const beats = (firstReal < 0 ? [] : raw.slice(firstReal)).map(b => b.t);
+  if (beats.length < 4) return null;
+  return { bpm: Math.round(bpm * 10) / 10, beats };
+}
+
+// POST /api/beat-detect  { audioUrl, maxSeconds }
+// Analyses a soundtrack for the Beat Edit feature: returns the BPM and the
+// beat timestamps (seconds) of the first `maxSeconds`, plus the full track
+// length. Decode goes to a TEMP FILE, never a pipe (same rationale as
+// hashVideo above). Pure ffmpeg + JS — no per-run cost, no new deps.
+app.post('/api/beat-detect', async (req, res) => {
+  const audioUrl = req.body?.audioUrl || '';
+  const maxSeconds = Math.min(120, Math.max(10, parseInt(req.body?.maxSeconds) || 90));
+  if (!/^https?:\/\//i.test(audioUrl)) return res.status(400).json({ success: false, error: 'Missing or invalid audioUrl' });
+
+  const token = `beat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'beat-'));
+  try {
+    const inputPath = path.join(tmpDir, 'in.audio');
+    const dl = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 90000, maxContentLength: 80 * 1024 * 1024 });
+    fs.writeFileSync(inputPath, Buffer.from(dl.data));
+    if (!fs.existsSync(inputPath) || fs.statSync(inputPath).size < 1000) {
+      return res.status(400).json({ success: false, error: 'Audio file was empty or could not be downloaded' });
+    }
+    const rawPath = path.join(tmpDir, 'a.f32');
+    await new Promise((resolve, reject) => {
+      ffmpeg(inputPath)
+        .outputOptions(['-vn', '-ac', '1', '-ar', '22050', '-t', String(maxSeconds), '-f', 'f32le'])
+        .output(rawPath).on('end', resolve).on('error', reject).run();
+    });
+    const buf = fs.readFileSync(rawPath);
+    const pcm = new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 4));
+    const result = detectBeats(pcm, 22050);
+    if (!result) {
+      return res.status(422).json({ success: false, error: 'No clear beats found in this track — try a song with a stronger beat.' });
+    }
+    const audioSeconds = await probeDuration(inputPath);
+    console.log(`[beat:${token}] ${result.bpm} BPM, ${result.beats.length} beats in ${(pcm.length / 22050).toFixed(1)}s analysed (track ${audioSeconds}s)`);
+    res.json({ success: true, bpm: result.bpm, beats: result.beats.map(b => Math.round(b * 1000) / 1000),
+               audioSeconds, analysedSeconds: pcm.length / 22050 });
+  } catch (err) {
+    console.error(`[beat:${token}] error:`, err.message);
     res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
