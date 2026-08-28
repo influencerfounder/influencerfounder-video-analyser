@@ -2038,7 +2038,22 @@ function beatNovelty(pcm, sr) {
     else { let s2 = 0; for (let i = lo; i <= hi; i++) s2 += nov[i]; mean = s2 / (hi - lo + 1); }
     out[n] = nov[n] / (mean + 0.25 * gMean + 1e-6);
   }
-  return out;
+  // Loudness envelope (for section-aware cut pacing): the same log energy,
+  // smoothed over ~1s and normalised to 0..1 by its 95th percentile so one
+  // transient cannot flatten the whole curve. This is what tells the planner
+  // "this is the quiet intro" vs "this is the drop".
+  const eHalf = Math.round((0.5 * sr) / BEAT_HOP);
+  const energy = new Float32Array(nFrames);
+  for (let n = 0; n < nFrames; n++) {
+    const lo = Math.max(0, n - eHalf), hi = Math.min(nFrames - 1, n + eHalf);
+    let s = 0;
+    for (let i = lo; i <= hi; i++) s += logAll[i];
+    energy[n] = s / (hi - lo + 1);
+  }
+  const sorted = Array.from(energy).sort((a, b) => a - b);
+  const p95 = sorted[Math.floor(sorted.length * 0.95)] || 1;
+  for (let n = 0; n < nFrames; n++) energy[n] = Math.max(0, Math.min(1, energy[n] / (p95 || 1)));
+  return { nov: out, energy };
 }
 
 // Linear-interpolated read of the novelty curve at a fractional frame index.
@@ -2048,17 +2063,48 @@ function novAt(nov, t) {
   return i + 1 < nov.length ? nov[i] * (1 - f) + nov[i + 1] * f : nov[i];
 }
 
-// Fractional-lag autocorrelation of the novelty at one candidate beat period.
-function periodScore(nov, period) {
+// Fractional-lag autocorrelation of the novelty at one candidate beat period,
+// measured only from `from` onward (so a quiet intro cannot pollute it).
+function periodScore(nov, period, from) {
   let s = 0, c = 0;
   const nMax = nov.length - Math.ceil(period) - 1;
-  for (let n = 0; n < nMax; n++) { s += nov[n] * novAt(nov, n + period); c++; }
+  for (let n = Math.max(0, from | 0); n < nMax; n++) { s += nov[n] * novAt(nov, n + period); c++; }
   return c > 0 ? s / c : 0;
 }
 
+// First frame where the track is actually PLAYING — defined by TRANSIENTS, not
+// loudness. MEASURED 2026-08-28: a track with an ambient/noise intro has the
+// same loudness in the intro as it does BETWEEN kicks once the beat starts
+// (RMS median 0.293 vs 0.307) — only the peaks differ (0.33 vs 1.16). So a
+// loudness threshold cannot find the downbeat entry, and an energy-based
+// version of this function measurably did nothing. A novelty bar can: the
+// first real hit is the first frame clearing 60% of the track's peak novelty.
+// Why it matters: estimating tempo and phase across an intro mis-phased a
+// 5s-intro track in 6 of 12 seeded runs (precision as low as 56%), and a
+// 10s intro failed 12/12. Do not swap this back to energy.
+// ⚠️ The bar is a PERCENTILE, not the max, and the anchor is capped to the
+// first quarter of the track. Both are load-bearing: keying off the max let a
+// single loud noise transient raise the bar so high that the anchor landed deep
+// into the track, leaving the phase search too few samples — that regressed a
+// 3dB-SNR case from 96% to 0% precision (a clean half-beat offbeat lock).
+function musicStartFrame(nov, novPeak) {
+  // Bar is 60% of the track's PEAK novelty — a percentile bar was measured too
+  // low (noise clears it, and both intro cases regressed straight back to
+  // 40-56% precision). The positional cap is the separate guard: without it a
+  // single loud transient late in a noisy track anchored the analysis deep into
+  // the file, starving the phase search and flipping a 3dB case to a half-beat
+  // offbeat lock (96% -> 0%). Music that has not started in the first quarter
+  // is treated as starting at 0.
+  const bar = 0.6 * novPeak;
+  const cap = Math.floor(nov.length * 0.25);
+  for (let n = 0; n < cap; n++) if (nov[n] >= bar) return n;
+  return 0;
+}
+
 function detectBeats(pcm, sr) {
-  const nov = beatNovelty(pcm, sr);
-  if (!nov) return null;
+  const nv = beatNovelty(pcm, sr);
+  if (!nv) return null;
+  const nov = nv.nov, energyCurve = nv.energy;
   const fps = sr / BEAT_HOP;
   const nFrames = nov.length;
 
@@ -2067,8 +2113,10 @@ function detectBeats(pcm, sr) {
   for (let n = 0; n < nFrames; n++) { if (nov[n] > novPeak) novPeak = nov[n]; novSum += nov[n]; }
   if (novPeak < 1.5 || novSum < nFrames * 0.05) return null;
 
+  // Anchor tempo + phase to where the music actually starts.
+  const startFrame = musicStartFrame(nov, novPeak);
   const scores = [];
-  const scoreOfBpm = (bpm) => periodScore(nov, (fps * 60) / bpm);
+  const scoreOfBpm = (bpm) => periodScore(nov, (fps * 60) / bpm, startFrame);
   let sMax = -1;
   for (let bpm = 60; bpm <= 200; bpm += 0.25) {
     const s = scoreOfBpm(bpm);
@@ -2098,13 +2146,13 @@ function detectBeats(pcm, sr) {
   const lag = (fps * 60) / bpm;
 
   // Phase: search [0, lag) in quarter-frame steps, triangular +-1 frame kernel.
-  let bestPhase = 0, bestPhaseScore = -1;
+  let bestPhase = startFrame, bestPhaseScore = -1;
   for (let p = 0; p < lag; p += 0.25) {
     let s = 0;
-    for (let t = p; t < nFrames - 1; t += lag) {
+    for (let t = startFrame + p; t < nFrames - 1; t += lag) {
       s += 0.5 * novAt(nov, t - 1) + novAt(nov, t) + 0.5 * novAt(nov, t + 1);
     }
-    if (s > bestPhaseScore) { bestPhaseScore = s; bestPhase = p; }
+    if (s > bestPhaseScore) { bestPhaseScore = s; bestPhase = startFrame + p; }
   }
 
   // Predictive tracking; quiet passages keep the predicted position (coast).
@@ -2121,7 +2169,16 @@ function detectBeats(pcm, sr) {
     for (let i = lo; i <= hi; i++) { if (nov[i] > biVal) { biVal = nov[i]; biIdx = i; } }
     const didSnap = biVal >= snapFloor;
     const snapped = didSnap ? biIdx : t;
-    raw.push({ t: (snapped + ONSET_OFFSET) * BEAT_HOP / sr, snapped: didSnap });
+    const fi = Math.max(0, Math.min(nFrames - 1, Math.round(snapped)));
+    raw.push({
+      t: (snapped + ONSET_OFFSET) * BEAT_HOP / sr,
+      snapped: didSnap,
+      // How hard THIS beat hits (0..1) — used to find the downbeat when cutting
+      // every 2nd/4th beat, and to drive "strong beats only" pacing.
+      s: Math.max(0, Math.min(1, nov[fi] / (novPeak || 1))),
+      // How loud this part of the TRACK is (0..1) — drives section-aware pacing.
+      e: energyCurve[fi],
+    });
     t = snapped + lag;
   }
   // Drop everything before the first TWO CONSECUTIVE snapped beats — beats
@@ -2130,10 +2187,83 @@ function detectBeats(pcm, sr) {
   for (let i = 0; i < raw.length - 1; i++) {
     if (raw[i].snapped && raw[i + 1].snapped) { firstReal = i; break; }
   }
-  const beats = (firstReal < 0 ? [] : raw.slice(firstReal)).map(b => b.t);
-  if (beats.length < 4) return null;
-  return { bpm: Math.round(bpm * 10) / 10, beats };
+  const keep = firstReal < 0 ? [] : raw.slice(firstReal);
+  if (keep.length < 4) return null;
+  return {
+    bpm: Math.round(bpm * 10) / 10,
+    beats: keep.map(b => b.t),
+    strengths: keep.map(b => Math.round(b.s * 1000) / 1000),
+    energy: keep.map(b => Math.round(b.e * 1000) / 1000),
+  };
 }
+
+// Motion curve for ONE clip — the "which moment of this clip" signal.
+// 16x16 gray at 8fps -> mean absolute frame-to-frame difference, normalised by
+// the clip's own 95th percentile. Deliberately the same shape as hashVideo
+// (temp file, never a pipe — see the rationale above it). No AI, ~1s per clip.
+async function clipMotionCurve(filePath, maxSeconds) {
+  const dur = await probeDuration(filePath);
+  const rawPath = `${filePath}.mgray`;
+  const FPS = 8, N = 16;
+  await new Promise((resolve, reject) => {
+    ffmpeg(filePath)
+      .outputOptions(['-vf', `fps=${FPS},scale=${N}:${N},format=gray`, '-t', String(maxSeconds),
+                      '-f', 'rawvideo', '-pix_fmt', 'gray'])
+      .output(rawPath).on('end', resolve).on('error', reject).run();
+  });
+  const buf = fs.readFileSync(rawPath);
+  try { fs.unlinkSync(rawPath); } catch (_) {}
+  const size = N * N;
+  const nF = Math.floor(buf.length / size);
+  if (nF < 3) return null;
+  const motion = new Array(nF).fill(0);
+  for (let i = 1; i < nF; i++) {
+    let s = 0;
+    for (let p = 0; p < size; p++) s += Math.abs(buf[i * size + p] - buf[(i - 1) * size + p]);
+    motion[i] = s / size;
+  }
+  motion[0] = motion[1];
+  const sorted = [...motion].sort((a, b) => a - b);
+  const p95 = sorted[Math.floor(sorted.length * 0.95)] || 1;
+  return { dur, fps: FPS, motion: motion.map(m => Math.round(Math.min(1, m / (p95 || 1)) * 1000) / 1000) };
+}
+
+// POST /api/clip-motion  { clipUrls: [...], maxSeconds }
+// Returns a per-clip motion curve so the cut planner can pick WHICH MOMENT of a
+// clip to use instead of walking a blind cursor — the thing every comparable
+// tool does (GoPro Quik, Beatleap, BeatSync-Engine) and v1 did not.
+// Per-clip failures are non-fatal: a null curve makes the planner fall back to
+// the cursor for that clip, so one dead URL can never block an edit.
+app.post('/api/clip-motion', async (req, res) => {
+  const urls = Array.isArray(req.body?.clipUrls) ? req.body.clipUrls.filter(u => /^https?:\/\//i.test(u)).slice(0, 12) : [];
+  const maxSeconds = Math.min(120, Math.max(2, parseInt(req.body?.maxSeconds) || 60));
+  if (!urls.length) return res.status(400).json({ success: false, error: 'Missing clipUrls' });
+  const token = `motion_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'motion-'));
+  try {
+    const clips = [];
+    for (let i = 0; i < urls.length; i++) {
+      try {
+        const p = path.join(tmpDir, `c${i}`);
+        const dl = await axios.get(urls[i], { responseType: 'arraybuffer', timeout: 90000, maxContentLength: 320 * 1024 * 1024 });
+        fs.writeFileSync(p, Buffer.from(dl.data));
+        const curve = await clipMotionCurve(p, maxSeconds);
+        clips.push(curve ? { url: urls[i], ...curve } : { url: urls[i], error: 'too short to analyse' });
+        try { fs.unlinkSync(p); } catch (_) {}
+      } catch (e) {
+        console.warn(`[motion:${token}] clip ${i + 1} failed: ${e.message}`);
+        clips.push({ url: urls[i], error: String(e.message || e).slice(0, 120) });
+      }
+    }
+    console.log(`[motion:${token}] analysed ${clips.filter(c => c.motion).length}/${urls.length} clips`);
+    res.json({ success: true, clips });
+  } catch (err) {
+    console.error(`[motion:${token}] error:`, err.message);
+    res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
 
 // POST /api/beat-detect  { audioUrl, maxSeconds }
 // Analyses a soundtrack for the Beat Edit feature: returns the BPM and the
@@ -2169,6 +2299,7 @@ app.post('/api/beat-detect', async (req, res) => {
     const audioSeconds = await probeDuration(inputPath);
     console.log(`[beat:${token}] ${result.bpm} BPM, ${result.beats.length} beats in ${(pcm.length / 22050).toFixed(1)}s analysed (track ${audioSeconds}s)`);
     res.json({ success: true, bpm: result.bpm, beats: result.beats.map(b => Math.round(b * 1000) / 1000),
+               strengths: result.strengths, energy: result.energy,
                audioSeconds, analysedSeconds: pcm.length / 22050 });
   } catch (err) {
     console.error(`[beat:${token}] error:`, err.message);
