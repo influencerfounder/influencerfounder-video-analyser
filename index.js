@@ -2101,9 +2101,16 @@ function musicStartFrame(nov, novPeak) {
   return 0;
 }
 
+// Returns { beats, bpm, strengths, energy } on success, or { reason, stats } on
+// failure. ⚠️ It must ALWAYS say WHY: this returned a bare null for three very
+// different causes (unreadable audio, flat/silent novelty, no stable pulse) and
+// the route reported all three as "no clear beats", which sent a real
+// investigation chasing the tempo logic when the track was fine. Never collapse
+// these back into one message.
 function detectBeats(pcm, sr) {
+  const secs = pcm.length / sr;
   const nv = beatNovelty(pcm, sr);
-  if (!nv) return null;
+  if (!nv) return { reason: 'audio_too_short', stats: { seconds: +secs.toFixed(2) } };
   const nov = nv.nov, energyCurve = nv.energy;
   const fps = sr / BEAT_HOP;
   const nFrames = nov.length;
@@ -2111,7 +2118,12 @@ function detectBeats(pcm, sr) {
   // Reject silence / DC: novelty must have real structure.
   let novPeak = 0, novSum = 0;
   for (let n = 0; n < nFrames; n++) { if (nov[n] > novPeak) novPeak = nov[n]; novSum += nov[n]; }
-  if (novPeak < 1.5 || novSum < nFrames * 0.05) return null;
+  let peakAbs = 0;
+  for (let i = 0; i < pcm.length; i++) { const a = pcm[i] < 0 ? -pcm[i] : pcm[i]; if (a > peakAbs) peakAbs = a; }
+  const stats = { seconds: +secs.toFixed(2), novPeak: +novPeak.toFixed(2),
+                  novMean: +(novSum / nFrames).toFixed(3), peakAmplitude: +peakAbs.toFixed(4) };
+  if (peakAbs < 0.001) return { reason: 'silent_audio', stats };
+  if (novPeak < 1.5 || novSum < nFrames * 0.05) return { reason: 'no_structure', stats };
 
   // Anchor tempo + phase to where the music actually starts.
   const startFrame = musicStartFrame(nov, novPeak);
@@ -2188,7 +2200,12 @@ function detectBeats(pcm, sr) {
     if (raw[i].snapped && raw[i + 1].snapped) { firstReal = i; break; }
   }
   const keep = firstReal < 0 ? [] : raw.slice(firstReal);
-  if (keep.length < 4) return null;
+  if (keep.length < 4) {
+    const snapped = raw.filter(b => b.snapped).length;
+    return { reason: 'no_stable_pulse',
+             stats: { ...stats, bpmGuess: Math.round(bpm * 10) / 10, gridBeats: raw.length,
+                      snappedBeats: snapped, snapFloor: +snapFloor.toFixed(2), kept: keep.length } };
+  }
   return {
     bpm: Math.round(bpm * 10) / 10,
     beats: keep.map(b => b.t),
@@ -2292,9 +2309,23 @@ app.post('/api/beat-detect', async (req, res) => {
     });
     const buf = fs.readFileSync(rawPath);
     const pcm = new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 4));
+    // ffmpeg can exit 0 having written nothing usable (wrong/partial container,
+    // a file with no real audio stream). That is NOT "no beats" — reporting it
+    // as such is what made a decode problem look like a detection problem.
+    if (pcm.length < 22050) {
+      console.error(`[beat:${token}] decode produced ${pcm.length} samples from ${fs.statSync(inputPath).size}B`);
+      return res.status(422).json({ success: false, error: 'Could not read any audio from that file — try exporting it as a normal MP3.' });
+    }
     const result = detectBeats(pcm, 22050);
-    if (!result) {
-      return res.status(422).json({ success: false, error: 'No clear beats found in this track — try a song with a stronger beat.' });
+    if (result.reason) {
+      console.error(`[beat:${token}] ${result.reason} ${JSON.stringify(result.stats)}`);
+      const msg = {
+        audio_too_short: 'That clip is too short to find a beat in — use at least a few seconds of audio.',
+        silent_audio: 'That file decoded to silence — check it plays, and try exporting it as a normal MP3.',
+        no_structure: 'No clear beats found in this track — try a song with a stronger beat.',
+        no_stable_pulse: 'Found the audio but could not lock onto a steady pulse — try a track with a steadier beat, or a different section of it.',
+      }[result.reason] || 'No clear beats found in this track.';
+      return res.status(422).json({ success: false, error: msg, reason: result.reason, stats: result.stats });
     }
     const audioSeconds = await probeDuration(inputPath);
     console.log(`[beat:${token}] ${result.bpm} BPM, ${result.beats.length} beats in ${(pcm.length / 22050).toFixed(1)}s analysed (track ${audioSeconds}s)`);
