@@ -2169,29 +2169,54 @@ function detectBeats(pcm, sr) {
 
   // Predictive tracking; quiet passages keep the predicted position (coast).
   const SNAP = 3;
-  const snapFloor = 0.35 * novPeak / 2;
   // Energy windows start rising ~1.4 frames BEFORE the true onset — measured
   // as a consistent -32ms bias in the harness, corrected here.
   const ONSET_OFFSET = 1.4;
-  const raw = [];
-  let t = bestPhase;
-  while (t < nFrames - 1) {
-    let biIdx = Math.round(t), biVal = -1;
-    const lo = Math.max(0, Math.round(t) - SNAP), hi = Math.min(nFrames - 1, Math.round(t) + SNAP);
-    for (let i = lo; i <= hi; i++) { if (nov[i] > biVal) { biVal = nov[i]; biIdx = i; } }
-    const didSnap = biVal >= snapFloor;
-    const snapped = didSnap ? biIdx : t;
-    const fi = Math.max(0, Math.min(nFrames - 1, Math.round(snapped)));
-    raw.push({
-      t: (snapped + ONSET_OFFSET) * BEAT_HOP / sr,
-      snapped: didSnap,
-      // How hard THIS beat hits (0..1) — used to find the downbeat when cutting
-      // every 2nd/4th beat, and to drive "strong beats only" pacing.
-      s: Math.max(0, Math.min(1, nov[fi] / (novPeak || 1))),
-      // How loud this part of the TRACK is (0..1) — drives section-aware pacing.
-      e: energyCurve[fi],
-    });
-    t = snapped + lag;
+  const trackGrid = (snapFloor) => {
+    const out = [];
+    let t = bestPhase;
+    while (t < nFrames - 1) {
+      let biIdx = Math.round(t), biVal = -1;
+      const lo = Math.max(0, Math.round(t) - SNAP), hi = Math.min(nFrames - 1, Math.round(t) + SNAP);
+      for (let i = lo; i <= hi; i++) { if (nov[i] > biVal) { biVal = nov[i]; biIdx = i; } }
+      const didSnap = biVal >= snapFloor;
+      const snapped = didSnap ? biIdx : t;
+      const fi = Math.max(0, Math.min(nFrames - 1, Math.round(snapped)));
+      out.push({
+        t: (snapped + ONSET_OFFSET) * BEAT_HOP / sr,
+        snapped: didSnap,
+        // How hard THIS beat hits (0..1) — used to find the downbeat when cutting
+        // every 2nd/4th beat, and to drive "strong beats only" pacing.
+        s: Math.max(0, Math.min(1, nov[fi] / (novPeak || 1))),
+        // How loud this part of the TRACK is (0..1) — drives section-aware pacing.
+        e: energyCurve[fi],
+      });
+      t = snapped + lag;
+    }
+    return out;
+  };
+
+  // ⚠️ ADAPTIVE snap bar — strict first, relaxed ONLY if the strict pass fails.
+  // A fraction of the single loudest frame is right for clean tracks and wrong
+  // for dense ones: MEASURED 2026-08-28 on a real 30s Reel track, dense
+  // percussion (median onset gap 0.186s) put novPeak at 21.2 while the 85th
+  // percentile of novelty was ~2.3, so 0.175*peak = 3.71 sat ABOVE nearly every
+  // real hit and only 11 of 78 beats snapped — the track was rejected outright.
+  // But applying the percentile bar unconditionally measurably DEGRADED a clean
+  // tech-house track (interval SD 23.3ms -> 28.4ms) by letting weak frames pull
+  // beats off the grid. So: keep the strict bar wherever it works, and drop to
+  // the percentile only when too little snapped to trust the result. Never make
+  // the common case worse to rescue the rare one.
+  const strictFloor = 0.35 * novPeak / 2;
+  let raw = trackGrid(strictFloor);
+  const snappedIn = (arr) => arr.reduce((n, b) => n + (b.snapped ? 1 : 0), 0);
+  if (snappedIn(raw) < Math.max(4, raw.length * 0.25)) {
+    const nz = Array.from(nov).filter(v => v > 0).sort((a, b) => a - b);
+    const p85 = nz.length ? nz[Math.floor(nz.length * 0.85)] : 0;
+    if (p85 > 0 && p85 < strictFloor) {
+      const relaxed = trackGrid(p85);
+      if (snappedIn(relaxed) > snappedIn(raw)) raw = relaxed;
+    }
   }
   // Drop everything before the first TWO CONSECUTIVE snapped beats — beats
   // "detected" over a quiet intro are noise-snaps or grid extrapolation.
@@ -2199,7 +2224,14 @@ function detectBeats(pcm, sr) {
   for (let i = 0; i < raw.length - 1; i++) {
     if (raw[i].snapped && raw[i + 1].snapped) { firstReal = i; break; }
   }
-  const keep = firstReal < 0 ? [] : raw.slice(firstReal);
+  let keep = firstReal < 0 ? [] : raw.slice(firstReal);
+  // ⚠️ Degrade, do not fail. The intro-trim above is a REFINEMENT, and turning
+  // it into a hard gate is what made a perfectly good 30s track return "no
+  // beats": dense/irregular onsets never produced two consecutive confident
+  // snaps, so a usable tempo grid was thrown away entirely. The phase search
+  // already starts at the music, so the untrimmed grid is a reasonable edit —
+  // far better than nothing. Only give up when there is no real grid at all.
+  if (keep.length < 4 && raw.length >= 8) keep = raw;
   if (keep.length < 4) {
     const snapped = raw.filter(b => b.snapped).length;
     return { reason: 'no_stable_pulse',
