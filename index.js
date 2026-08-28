@@ -2196,28 +2196,14 @@ function detectBeats(pcm, sr) {
     return out;
   };
 
-  // ⚠️ ADAPTIVE snap bar — strict first, relaxed ONLY if the strict pass fails.
-  // A fraction of the single loudest frame is right for clean tracks and wrong
-  // for dense ones: MEASURED 2026-08-28 on a real 30s Reel track, dense
-  // percussion (median onset gap 0.186s) put novPeak at 21.2 while the 85th
-  // percentile of novelty was ~2.3, so 0.175*peak = 3.71 sat ABOVE nearly every
-  // real hit and only 11 of 78 beats snapped — the track was rejected outright.
-  // But applying the percentile bar unconditionally measurably DEGRADED a clean
-  // tech-house track (interval SD 23.3ms -> 28.4ms) by letting weak frames pull
-  // beats off the grid. So: keep the strict bar wherever it works, and drop to
-  // the percentile only when too little snapped to trust the result. Never make
-  // the common case worse to rescue the rare one.
-  const strictFloor = 0.35 * novPeak / 2;
-  let raw = trackGrid(strictFloor);
-  const snappedIn = (arr) => arr.reduce((n, b) => n + (b.snapped ? 1 : 0), 0);
-  if (snappedIn(raw) < Math.max(4, raw.length * 0.25)) {
-    const nz = Array.from(nov).filter(v => v > 0).sort((a, b) => a - b);
-    const p85 = nz.length ? nz[Math.floor(nz.length * 0.85)] : 0;
-    if (p85 > 0 && p85 < strictFloor) {
-      const relaxed = trackGrid(p85);
-      if (snappedIn(relaxed) > snappedIn(raw)) raw = relaxed;
-    }
-  }
+  // ⚠️ Keep the snap bar STRICT. A percentile bar was tried and measurably
+  // broke the noisy-intro case: a 10s noise lead-in cleared the lower bar,
+  // "snapped" twice in a row and defeated the intro trim (precision 100% -> 48%).
+  // Noise failing to snap CONSISTENTLY is exactly what makes this rule work.
+  // Dense-percussion tracks that barely snap are handled by degrading below,
+  // not by lowering this bar.
+  const snapFloor = 0.35 * novPeak / 2;
+  const raw = trackGrid(snapFloor);
   // Drop everything before the first TWO CONSECUTIVE snapped beats — beats
   // "detected" over a quiet intro are noise-snaps or grid extrapolation.
   let firstReal = -1;
@@ -2237,6 +2223,36 @@ function detectBeats(pcm, sr) {
     return { reason: 'no_stable_pulse',
              stats: { ...stats, bpmGuess: Math.round(bpm * 10) / 10, gridBeats: raw.length,
                       snappedBeats: snapped, snapFloor: +snapFloor.toFixed(2), kept: keep.length } };
+  }
+
+  // Refine pass: now that the intro is decided, nudge each kept beat onto the
+  // nearest real onset using a LOWER bar than the trim used. The two bars do
+  // different jobs and must stay separate — the strict bar is what stops a
+  // noise intro faking a pulse (a blanket lower bar dropped a noisy-intro case
+  // from 100% to 48% precision), while the trim decision is already made by the
+  // time we get here, so refinement is safe. MEASURED in the harness: median
+  // distance from a beat to a real onset 56.1ms -> 36.4ms on a real
+  // tech-house track, with the intro trim and all synthetic cases unchanged.
+  // Bounded to +-2 frames (~46ms) so it can only nudge, never re-time the grid.
+  {
+    const nz = Array.from(nov).filter(v => v > 0).sort((a, b) => a - b);
+    const refineBar = nz.length ? nz[Math.floor(nz.length * 0.85)] : 0;
+    if (refineBar > 0 && refineBar < snapFloor) {
+      const R = 2;
+      for (const b of keep) {
+        const c = Math.round((b.t * sr / BEAT_HOP) - ONSET_OFFSET);
+        let bi = -1, bv = refineBar;
+        for (let i = Math.max(0, c - R); i <= Math.min(nFrames - 1, c + R); i++) {
+          if (nov[i] > bv) { bv = nov[i]; bi = i; }
+        }
+        if (bi >= 0) {
+          b.t = (bi + ONSET_OFFSET) * BEAT_HOP / sr;
+          b.s = Math.max(0, Math.min(1, nov[bi] / (novPeak || 1)));
+          b.e = energyCurve[bi];
+        }
+      }
+      keep.sort((a, b) => a.t - b.t);
+    }
   }
   return {
     bpm: Math.round(bpm * 10) / 10,
