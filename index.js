@@ -785,6 +785,24 @@ app.get('/api/faceswap/download/:jobId', (req, res) => {
 
 const tempVideos = new Map(); // token -> { filePath, createdAt }
 
+// ─────────────────────────────────────────
+// PROCESS GUARDS
+//
+// On Node 22 an unhandled promise rejection TERMINATES the process — which on
+// this single-container service means every in-flight request dies with a 502,
+// not just the one that threw. Flagged 2026-08-06 as "the first thing to
+// instrument if the 502 recurs" (it then recurred on 2026-08-28 for captions)
+// and never added. Logging and staying up is strictly better here: the request
+// that caused it still fails on its own, but it no longer takes its neighbours
+// down with it.
+// ─────────────────────────────────────────
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL-GUARD] unhandledRejection:', reason && reason.stack || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL-GUARD] uncaughtException:', err && err.stack || err);
+});
+
 function cleanOldTempVideos() {
   const cutoff = Date.now() - 30 * 60 * 1000; // 30 min TTL
   for (const [token, v] of tempVideos) {
@@ -794,6 +812,15 @@ function cleanOldTempVideos() {
     }
   }
 }
+
+// cleanOldTempVideos was only called by /api/temp-video and /api/faststart — but
+// SEVEN routes write into this map (room-sound, burn-captions, stitch,
+// assemble-reel and variants were the five that never pruned). Their output
+// files are large (a 26MB recreate, a 45MB variant set) and are dead ~30 min
+// after the caller re-hosts to Blob, so they accumulated on the container disk
+// until one of the two pruning routes happened to be hit. A timer also covers
+// the idle case, where no request comes in to trigger a prune at all.
+setInterval(cleanOldTempVideos, 5 * 60 * 1000).unref();
 
 // POST /api/temp-video — download video via yt-dlp, return a public URL fal.ai can fetch
 app.post('/api/temp-video', async (req, res) => {
