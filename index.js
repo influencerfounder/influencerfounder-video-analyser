@@ -87,6 +87,90 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
   fs.writeFileSync(outputPath, Buffer.from(videoRes.data));
 }
 
+// ─────────────────────────────────────────
+// TikTok video fetch — yt-dlp first (free), Apify as an automatic fallback.
+// yt-dlp's TikTok extractor breaks whenever TikTok changes their page shape. On
+// 2026-08-31 it returned "Unexpected response from webpage request" for every
+// public video, which surfaced in the Studio as a bare "retry". Instagram hit
+// the same wall in July and was moved to Apify wholesale; TikTok keeps yt-dlp as
+// the free first attempt (it works most of the time and costs nothing) and falls
+// back automatically, so a breakage is a ~$0.002 charge instead of a dead feature.
+// It also self-heals: once yt-dlp is fixed upstream the free path resumes on its own.
+//
+// downloadAddr is a SIGNED TikTok CDN url — fetched immediately in the same
+// request, never stored. shouldDownloadVideos is deliberately NOT used: it is a
+// charged add-on that writes into a key-value store instead of returning a url.
+// ─────────────────────────────────────────
+async function downloadTikTokViaApify(videoUrl, outputPath) {
+  const apifyKey = process.env.APIFY_API_KEY;
+  if (!apifyKey) throw new Error('APIFY_API_KEY not configured');
+
+  let items;
+  try {
+    const resp = await axios.post(
+      `https://api.apify.com/v2/actors/clockworks~tiktok-scraper/run-sync-get-dataset-items?token=${apifyKey}`,
+      { postURLs: [videoUrl], resultsPerPage: 1, shouldDownloadVideos: false, shouldDownloadCovers: false },
+      { timeout: 280000 }
+    );
+    items = resp.data;
+  } catch (e) {
+    throw new Error('Apify TikTok scrape failed: ' + (e.response?.data?.error?.message || e.message));
+  }
+
+  const item = Array.isArray(items) ? items[0] : null;
+  // Tried in order — downloadAddr is the documented direct file, the others are
+  // fallbacks in case the actor's shape differs from its docs. Whichever one
+  // actually downloads wins; a signed url that 403s just moves to the next.
+  const candidates = [
+    item?.videoMeta?.downloadAddr,
+    item?.videoMeta?.playAddr,
+    Array.isArray(item?.mediaUrls) ? item.mediaUrls[0] : null,
+  ].filter(Boolean);
+
+  if (!candidates.length) {
+    const raw = String(item?.error || item?.errorDescription || '').toLowerCase();
+    const err = new Error(
+      /not_?found|does not exist|deleted|removed|404/.test(raw)
+        ? 'This TikTok video no longer exists — it was deleted or the link is wrong.'
+        : /private|restrict|login|age|unavailable|region/.test(raw)
+          ? 'This TikTok account is private or the video is restricted, so it cannot be fetched.'
+          : 'Could not fetch this TikTok video — it may be private, deleted, or region-locked.'
+    );
+    err.apifyError = raw || null;
+    throw err;
+  }
+
+  let lastErr = null;
+  for (const remote of candidates) {
+    try {
+      const videoRes = await axios.get(remote, {
+        responseType: 'arraybuffer',
+        timeout: 60000,
+        maxContentLength: 200 * 1024 * 1024,
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.tiktok.com/' },
+      });
+      fs.writeFileSync(outputPath, Buffer.from(videoRes.data));
+      if (fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 1000) return;
+    } catch (e) { lastErr = e; }
+  }
+  throw new Error('TikTok video url could not be downloaded' + (lastErr ? ': ' + lastErr.message : ''));
+}
+
+// Each call site keeps its own yt-dlp flags and timeout; this only owns the
+// try-then-fall-back decision, so all three TikTok paths share one behaviour.
+async function downloadTikTok(videoUrl, outputPath, ytDlpAttempt) {
+  try {
+    await ytDlpAttempt();
+    if (fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 1000) return 'yt-dlp';
+    throw new Error('yt-dlp produced no usable file');
+  } catch (e) {
+    console.log(`[tiktok] yt-dlp failed (${String(e.message).slice(0, 140)}) — falling back to Apify`);
+    try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (_) {}
+    await downloadTikTokViaApify(videoUrl, outputPath);
+    return 'apify';
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -175,19 +259,24 @@ app.post('/api/clone', async (req, res) => {
         ytDlpBin = execSync('which yt-dlp || echo /usr/local/bin/yt-dlp', { encoding: 'utf8' }).trim().split('\n')[0];
       } catch(_) {}
 
-      await new Promise((resolve, reject) => {
-        execFile(ytDlpBin, [
-          '-o', videoPath,
-          '-f', 'mp4/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-          '--no-playlist',
-          '--quiet',
-          '--no-warnings',
-          videoUrl,
-        ], { timeout: 90000 }, (err, stdout, stderr) => {
-          if (err) return reject(new Error('yt-dlp failed: ' + (stderr || err.message)));
-          resolve();
-        });
-      });
+      try {
+        const via = await downloadTikTok(videoUrl, videoPath, () => new Promise((resolve, reject) => {
+          execFile(ytDlpBin, [
+            '-o', videoPath,
+            '-f', 'mp4/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            '--no-playlist',
+            '--quiet',
+            '--no-warnings',
+            videoUrl,
+          ], { timeout: 90000 }, (err, stdout, stderr) => {
+            if (err) return reject(new Error('yt-dlp failed: ' + (stderr || err.message)));
+            resolve();
+          });
+        }));
+        console.log(`[clone] tiktok downloaded via ${via}`);
+      } catch (e) {
+        return res.status(400).json({ success: false, error: e.message, apifyError: e.apifyError || null });
+      }
       if (!fs.existsSync(videoPath) || fs.statSync(videoPath).size < 1000) {
         return res.status(400).json({ success: false, error: 'Could not download video from this URL. The post may be private or the link may have expired.' });
       }
@@ -847,10 +936,18 @@ app.post('/api/temp-video', async (req, res) => {
       try { ytDlpPath = (await execFileAsync('which', ['yt-dlp'])).stdout.trim(); } catch (_) { ytDlpPath = '/usr/local/bin/yt-dlp'; }
 
       console.log(`[tempvid:${token}] downloading: ${videoUrl.slice(0, 60)}`);
-      await execFileAsync(ytDlpPath, [
+      const runYtDlp = () => execFileAsync(ytDlpPath, [
         '--no-playlist', '-f', 'mp4/best[height<=720]', '--merge-output-format', 'mp4',
         '-o', outputPath, videoUrl,
       ], { timeout: 120000 });
+      // Only TikTok gets the Apify fallback — a plain direct url has nothing to fall
+      // back to, and paying for a scrape of a non-TikTok host would be wrong.
+      if (/tiktok\.com\/@[^/]+\/video\/|tiktok\.com\/t\//.test(videoUrl)) {
+        const via = await downloadTikTok(videoUrl, outputPath, runYtDlp);
+        console.log(`[tempvid:${token}] tiktok via ${via}`);
+      } else {
+        await runYtDlp();
+      }
     }
 
     if (!fs.existsSync(outputPath)) throw new Error('Download produced no output file');
@@ -2430,7 +2527,9 @@ app.post('/api/extract-audio', async (req, res) => {
     if (isInstagram) {
       await downloadInstagramViaApify(videoUrl, inputPath);
     } else if (isTikTok) {
-      execSync(`yt-dlp -f "best[ext=mp4]/best" -o "${inputPath}" "${videoUrl}"`, { stdio: 'pipe', timeout: 180000 });
+      await downloadTikTok(videoUrl, inputPath, async () => {
+        execSync(`yt-dlp -f "best[ext=mp4]/best" -o "${inputPath}" "${videoUrl}"`, { stdio: 'pipe', timeout: 180000 });
+      });
     } else {
       const dl = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 180000, maxContentLength: 300 * 1024 * 1024 });
       fs.writeFileSync(inputPath, Buffer.from(dl.data));
