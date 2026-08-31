@@ -229,7 +229,7 @@ app.post('/api/clone', async (req, res) => {
     // and only swaps the system prompt and response shape. A separate endpoint would
     // have duplicated all of that — the duplication class this codebase keeps paying
     // for. Default '' keeps every existing caller byte-identical.
-    const { videoUrl, locationId, kieApiKey, mode, bgBrief } = req.body;
+    const { videoUrl, locationId, kieApiKey, mode, bgBrief, hookReport } = req.body;
     const isBgSwap = mode === 'bgswap';
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
@@ -506,9 +506,50 @@ app.post('/api/clone', async (req, res) => {
       source: { type: 'base64', media_type: 'image/jpeg', data: b64 }
     }));
 
+    // 🪝 HOOK WINDOW LEADS THE CONTENT (2026-08-31) — the 4 densely-sampled 0-3s frames,
+    // labelled and in order, so the builder can actually SEE the hook it has to preserve.
+    // Until now these were extracted PURELY to be returned to the scorecard: the builder
+    // saw only the evenly-sampled set, which on a longer clip can hold a single frame from
+    // 0-3s — the exact blindness the scorecard fixed for itself on 2026-07-10 and that was
+    // never swept into the prompt builder. They ride FIRST because prompt weight is
+    // front-loaded and the hook is the one beat that decides whether a recreate works.
+    // Kept OUT of imageContent on purpose: the Kie branch below even-samples that array to
+    // stay under the gateway's image ceiling, and sampling a mixed text/image array would
+    // both drop hook frames and splice stray labels into the subset.
+    const hookContent = (hookFrames.length && !isBgSwap) ? [
+      { type: 'text', text: `HOOK WINDOW — the source's opening ${hookFrames.length} frames in order (${hookFrames.map(h => h.ts + 's').join(', ')}). This is the scroll-stopping moment you must preserve.` },
+      ...hookFrames.map(h => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: h.dataUrl.split(',')[1] } })),
+      { type: 'text', text: 'FULL CLIP — evenly sampled frames covering the whole video:' },
+    ] : [];
+    const hookImgCount = hookContent.length ? hookFrames.length : 0;   // derive from hookContent so the bgswap gate can never desync the Kie frame budget
+
     const userText = transcript
       ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the Seedance prompt.`
       : `These ${frameBase64s.length} frames were extracted from the viral video (no audio). Create the Seedance prompt.`;
+
+    // 🪝 MEASURED hook report, when the caller has one (2026-08-31). The Virality
+    // Scorecard runs AFTER this builder in the Studio and is fed this call's own hook
+    // frames, so hook_report cannot exist on a first pass — the frames above are how
+    // pass 1 (and the whole phone-app worker, which never runs the scorecard at all)
+    // sees the hook. On a RE-analyse the Studio replays the stored report, and a
+    // measured mechanism beats one re-derived from the same frames.
+    let hookBlock = '';
+    try {
+      const hr = hookReport || null;
+      if (hr && typeof hr === 'object') {
+        const bits = [];
+        if (hr.hook_type) bits.push(`- mechanism: ${String(hr.hook_type).slice(0, 160)}`);
+        if (hr.scroll_stop_grade) bits.push(`- scroll-stop grade: ${String(hr.scroll_stop_grade).slice(0, 80)}`);
+        if (hr.grade_reason) bits.push(`- why: ${String(hr.grade_reason).slice(0, 300)}`);
+        if (hr.mute_test && typeof hr.mute_test.pass === 'boolean') {
+          bits.push(`- works with sound off: ${hr.mute_test.pass ? 'YES — the hook is visual, keep it visual' : 'NO — the hook leans on audio, so give the recreate a VISUAL equivalent'}`);
+        }
+        if (hr.first_frame_verdict) bits.push(`- opening frame as thumbnail: ${String(hr.first_frame_verdict).slice(0, 300)}`);
+        if (bits.length) {
+          hookBlock = `\n\nMEASURED HOOK REPORT for this exact video — this was scored from the same hook frames, so use it rather than re-deriving it, and rebuild this mechanism as beat [0-2s]:\n${bits.join('\n')}`;
+        }
+      }
+    } catch (_) { hookBlock = ''; }
 
     // ── Change-background mode (spec supplied by Mike 2026-08-18, locked) ──
     // Deliberately the MINIMAL DIRECTIVE format, not the heavy 3-block
@@ -570,6 +611,7 @@ STEP 1 — CLASSIFY THE SOURCE as exactly one of TWO lanes:
 This classification is INTERNAL — it only decides which realism layer Step 3 appends. Never print a lane name anywhere in the output. When genuinely torn, choose AUTHENTIC — polished-looking creator content is still phone-made far more often than it looks.
 
 STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject + Action + Environment + Camera + Lighting + Style. Rules:
+- 🪝 PRESERVE THE HOOK MECHANISM — do this FIRST, before describing anything else. The leading labelled frames are the source's 0-3s hook window in order. Work out WHY that opening stops a scroll: the MECHANISM, not the scenery. Common mechanisms: starting mid-action with no setup, an object or person entering frame unexpectedly, a reveal deliberately withheld, a direct look to lens, an implied question, a jarring visual pattern-interrupt, an on-screen text claim. Then rebuild THAT SAME mechanism as beat [0-2s] — same trigger, same timing, same thing withheld — dressed in the new subject and setting. Copying the source's setting while opening calmly throws away the one thing that made it work: a faithful-looking recreate with a dead first two seconds is the single most common way these fail. If the source opens on on-screen text, say so and carry an equivalent line.
 - Open with a short capture-style scaffold as the very first clause — plain language matching the Step 1 lane, but never the lane word itself and never aspect ratio or duration (the tool sets 9:16 and clip length separately). E.g. "Handheld phone selfie capture:" or "Cinema camera capture:". Never bury this mid-prompt
 - Use [INFLUENCER] as the person placeholder — do NOT describe physical appearance (no hair color, eye color, skin tone, height, build — reference photos handle that)
 - Describe outfit, action, environment, mood, shot progression
@@ -605,7 +647,21 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // reproduces that reference, so without this line the persona walks out of a
     // car or down a street with no shoes on. Phrased as a setting rule rather
     // than "always wear shoes" so beach/pool/at-home scenes stay correct.
-    const LANE_SUFFIX = 'Footwear fits the setting: the person wears shoes anywhere a real person would — street, car, shop, gym, office, any public indoor space — and is barefoot only where that is genuinely natural, such as a beach, pool or inside their own home. Avoid jitter, bent limbs, temporal flicker, warping or morphing, and extra fingers. No music — natural ambient background sound only.';
+    // ⛔ FOOTWEAR RULE REMOVED 2026-08-31 (Mike: "remove the shoe prompt everywhere") —
+    // 43 words on EVERY recreate, and the root fix is upstream: footwearClause in the
+    // Studio's portrait generator puts real sneakers on the master, and references beat
+    // prompt text on anything they depict. VIDEO_QUALITY_SUFFIX dropped its own copy on
+    // 2026-08-30 for exactly that reason; LANE_SUFFIX was simply never swept. Do NOT
+    // re-add it — if footwear ever regresses the fix is a shod master, not a sentence.
+    // ⛔ NO-MUSIC LINE REMOVED with it — replaced by the generate_audio:false PARAMETER
+    // on the recreate paths. A parameter is deterministic where a sentence is a hope,
+    // and it also removes the ByteDance copyright-filter class that silently kills a
+    // whole paid generation when Seedance's own soundtrack trips it.
+    // ✅ KEPT: the artifact avoid-list. It is Seedance's officially documented negative
+    // mechanism and these five are the canonical character-video negatives — 12 words
+    // for the cheapest guard in the prompt, and with 50 words freed above it now lands
+    // far closer to the ~150-word attention window instead of past it.
+    const LANE_SUFFIX = 'Avoid jitter, bent limbs, temporal flicker, warping or morphing, and extra fingers.';
 
     // Kie.ai's Claude endpoint is native Anthropic Messages format (verified
     // 2026-07-17 with real base64 frames — identical request shape, model
@@ -618,7 +674,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       ? `These ${frameBase64s.length} frames were extracted from my own source video. `
         + `Its exact duration is ${Math.round(duration * 10) / 10} seconds — use this figure, do not estimate.\n\n`
         + `The background change I want: ${String(bgBrief || '').trim() || '(none specified — ask one clarifying question in the ANALYSIS instead of guessing)'}`
-      : userText;
+      : userText + hookBlock;   // hookBlock is clone-flow only — bgswap keeps the user's own source, so its hook is already theirs
     const maxTok = isBgSwap ? 2600 : 1000;
 
     let claudeResponse;
@@ -633,20 +689,22 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       // (KIE_SAFE_FRAME_COUNT) — no wasted attempts at sizes we already know
       // hang. Anthropic direct (the owner path below) has no such limit and
       // keeps the full 80-frame budget unchanged.
+      // The hook frames are images too, so they come OUT of the same ceiling — 16 evenly
+      // sampled + 4 hook = 20, not 24. Budgeting them keeps the proven-safe total intact.
       const KIE_SAFE_FRAME_COUNT = 20;
-      const n = Math.min(KIE_SAFE_FRAME_COUNT, imageContent.length);
+      const n = Math.min(KIE_SAFE_FRAME_COUNT - hookImgCount, imageContent.length);
       const subset = n === imageContent.length
         ? imageContent
         : Array.from({ length: n }, (_, i) => imageContent[Math.round(i * (imageContent.length - 1) / (n - 1))]);
       const note = n < imageContent.length ? ` (${n} representative frames shown, evenly sampled from the full clip.)` : '';
       claudeResponse = await axios.post('https://api.kie.ai/claude/v1/messages', {
         model: 'claude-sonnet-5', max_tokens: maxTok, system: sysFinal,
-        messages: [{ role: 'user', content: [...subset, { type: 'text', text: userFinal + note }] }]
+        messages: [{ role: 'user', content: [...hookContent, ...subset, { type: 'text', text: userFinal + note }] }]
       }, { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' }, timeout: 80000 });
     } else {
       claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
         model: 'claude-sonnet-4-6', max_tokens: maxTok, system: sysFinal,
-        messages: [{ role: 'user', content: [...imageContent, { type: 'text', text: userFinal }] }]
+        messages: [{ role: 'user', content: [...hookContent, ...imageContent, { type: 'text', text: userFinal }] }]
       }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
     }
 
