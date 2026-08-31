@@ -202,7 +202,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.2.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.3.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -627,7 +627,7 @@ STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject +
 STEP 3 — DO NOT append any realism layer, camera-quality block, fps mention, or avoid-list yourself.
 ALSO BANNED ANYWHERE IN THE PROMPT, not just the opening clause:
   (a) aspect ratio, resolution or duration in ANY form — no "9:16", no "vertical", no "1080p", no "8 seconds total", no "[0-2s]"-style totals at the end. The tool sets the format and the clip length separately, so any figure you write is either ignored or actively contradicts the real setting. Timestamped BEATS inside the action are fine and wanted; a stated total duration or frame format is not.
-  (b) the person's physical appearance — no hair colour or length, eye colour, skin tone, age, height, build, ethnicity or tattoos. The user swaps in their own AI Influencer whose look is set by reference photos, and references beat prompt text on anything they depict, so a description of the SOURCE person can only fight those references. Write [INFLUENCER] and describe what they DO and WEAR, never what they look like. The server appends the lane's realism layer and the negative suffix in code (so the user can switch lanes afterwards). Your base prompt must not duplicate that content — never write sensor noise / film grain / "avoid ..." lines, and never demand "sharp clarity" or "stable picture".
+  (b) the person's physical appearance — no hair colour or length, eye colour, skin tone, age, height, build, ethnicity or tattoos. The user swaps in their own AI Influencer whose look is set by reference photos, and references beat prompt text on anything they depict, so a description of the SOURCE person can only fight those references. Write [INFLUENCER] and describe what they DO and WEAR, never what they look like. The server appends the lane's realism layer in code (so the user can switch lanes afterwards). Your base prompt must not duplicate that content — never write sensor noise / film grain lines, and never demand "sharp clarity" or "stable picture". There is deliberately NO avoid-list any more: do not write "avoid ..." lines of your own either. Every word you spend is a word inside a ~150-word attention budget, so spend them on the hook, the action and the light.
 
 OUTPUT FORMAT — exactly this, nothing else:
 Line 1: "LANE: AUTHENTIC" or "LANE: HIGH-END" (stripped by the server and shown to the user as a switchable choice — it is the ONLY place the lane may appear).
@@ -647,21 +647,26 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // reproduces that reference, so without this line the persona walks out of a
     // car or down a street with no shoes on. Phrased as a setting rule rather
     // than "always wear shoes" so beach/pool/at-home scenes stay correct.
-    // ⛔ FOOTWEAR RULE REMOVED 2026-08-31 (Mike: "remove the shoe prompt everywhere") —
-    // 43 words on EVERY recreate, and the root fix is upstream: footwearClause in the
-    // Studio's portrait generator puts real sneakers on the master, and references beat
-    // prompt text on anything they depict. VIDEO_QUALITY_SUFFIX dropped its own copy on
-    // 2026-08-30 for exactly that reason; LANE_SUFFIX was simply never swept. Do NOT
-    // re-add it — if footwear ever regresses the fix is a shod master, not a sentence.
-    // ⛔ NO-MUSIC LINE REMOVED with it — replaced by the generate_audio:false PARAMETER
-    // on the recreate paths. A parameter is deterministic where a sentence is a hope,
-    // and it also removes the ByteDance copyright-filter class that silently kills a
-    // whole paid generation when Seedance's own soundtrack trips it.
-    // ✅ KEPT: the artifact avoid-list. It is Seedance's officially documented negative
-    // mechanism and these five are the canonical character-video negatives — 12 words
-    // for the cheapest guard in the prompt, and with 50 words freed above it now lands
-    // far closer to the ~150-word attention window instead of past it.
-    const LANE_SUFFIX = 'Avoid jitter, bent limbs, temporal flicker, warping or morphing, and extra fingers.';
+    // ⛔ THE WHOLE CODE-APPENDED TAIL IS GONE (2026-08-31, Mike, in three passes).
+    // It was 63 words on EVERY recreate prompt, and the measured median prompt is 254
+    // words against Seedance's ~150-word attention ceiling — so the tail sat at word
+    // ~224 and was very likely never read at all. What it used to hold:
+    //   • FOOTWEAR (43w) — the root fix is upstream: footwearClause in the Studio's
+    //     portrait generator puts real sneakers on the master, and references beat
+    //     prompt text on anything they depict. VIDEO_QUALITY_SUFFIX dropped its own
+    //     copy 2026-08-30; this one was simply never swept. If footwear regresses,
+    //     the fix is a shod master, NOT a sentence.
+    //   • NO MUSIC (8w) — now the generate_audio:false PARAMETER on both recreate
+    //     paths. Deterministic where a sentence was a hope, and it removes the
+    //     ByteDance copyright-filter class that silently kills a paid generation.
+    //   • AVOID-LIST (12w: jitter, bent limbs, temporal flicker, warping/morphing,
+    //     extra fingers) — Mike: "AI nowadays doesn't have extra fingers and limbs".
+    //     Correct for 2026 models; the finger/limb guards are SDXL-era. ⚠️ The one
+    //     item with recent evidence behind it was WARPING/MORPHING — our own logs
+    //     record print/logo smear during camera transitions (Streetwear Editorial,
+    //     2026-07-11) and morph-smear from prompts asking for fake cuts. If that
+    //     ever comes back, restore ONLY that: append ' Avoid warping or morphing.'
+    //     here — do NOT restore the full five, and do not re-add footwear or music.
 
     // Kie.ai's Claude endpoint is native Anthropic Messages format (verified
     // 2026-07-17 with real base64 frames — identical request shape, model
@@ -756,7 +761,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       talkingHead = talkMatch[1].toUpperCase() === 'YES';
       basePrompt = basePrompt.slice(talkMatch[0].length).trim();
     }
-    const clonePrompt = `${basePrompt} ${LANE_LAYERS[lane]} ${LANE_SUFFIX}`;
+    const clonePrompt = `${basePrompt} ${LANE_LAYERS[lane]}`;
 
     res.json({
       success: true,
