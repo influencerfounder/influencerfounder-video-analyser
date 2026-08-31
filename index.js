@@ -109,7 +109,7 @@ async function downloadTikTokViaApify(videoUrl, outputPath) {
   try {
     const resp = await axios.post(
       `https://api.apify.com/v2/actors/clockworks~tiktok-scraper/run-sync-get-dataset-items?token=${apifyKey}`,
-      { postURLs: [videoUrl], resultsPerPage: 1, shouldDownloadVideos: false, shouldDownloadCovers: false },
+      { postURLs: [videoUrl], resultsPerPage: 1, shouldDownloadVideos: true, shouldDownloadCovers: false },
       { timeout: 280000 }
     );
     items = resp.data;
@@ -118,14 +118,13 @@ async function downloadTikTokViaApify(videoUrl, outputPath) {
   }
 
   const item = Array.isArray(items) ? items[0] : null;
-  // Tried in order — downloadAddr is the documented direct file, the others are
-  // fallbacks in case the actor's shape differs from its docs. Whichever one
-  // actually downloads wins; a signed url that 403s just moves to the next.
-  const candidates = [
-    item?.videoMeta?.downloadAddr,
-    item?.videoMeta?.playAddr,
-    Array.isArray(item?.mediaUrls) ? item.mediaUrls[0] : null,
-  ].filter(Boolean);
+  // PROBED against the live actor 2026-08-31, because the field names in the
+  // write-ups are wrong for this actor version: videoMeta carries NO downloadAddr
+  // and NO playAddr (its keys are height/width/duration/coverUrl/definition/format/
+  // subtitleLinks/transcriptionLink/...). The ONLY downloadable url is mediaUrls[0],
+  // and it is populated ONLY when shouldDownloadVideos is true — which is why that
+  // flag is on despite being a charged add-on. mediaUrls is an empty array without it.
+  const candidates = (Array.isArray(item?.mediaUrls) ? item.mediaUrls : []).filter(Boolean);
 
   if (!candidates.length) {
     const raw = String(item?.error || item?.errorDescription || '').toLowerCase();
@@ -143,7 +142,13 @@ async function downloadTikTokViaApify(videoUrl, outputPath) {
   let lastErr = null;
   for (const remote of candidates) {
     try {
-      const videoRes = await axios.get(remote, {
+      // mediaUrls points into Apify's own key-value store, which is PRIVATE — an
+      // unauthenticated GET returns 403. Measured: with the token appended it
+      // returns a real 1,065,656-byte mp4 (ftypisom).
+      const authed = remote.includes('api.apify.com')
+        ? remote + (remote.includes('?') ? '&' : '?') + 'token=' + apifyKey
+        : remote;
+      const videoRes = await axios.get(authed, {
         responseType: 'arraybuffer',
         timeout: 60000,
         maxContentLength: 200 * 1024 * 1024,
