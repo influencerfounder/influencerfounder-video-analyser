@@ -202,7 +202,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.6.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.7.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1926,8 +1926,17 @@ async function burnCueList(inPath, outPath, cues, opts = {}) {
     );
   });
 
+  // ⚠️ MUST use the SYSTEM ffmpeg, never ffmpeg-static. The static build ships WITHOUT libfreetype,
+  // so `drawtext` does not exist in it and every burn dies with the cryptic "Filter not found"
+  // (exit code 8). That was fixed for the Whisper caption routes on 2026-08-14 and never applied
+  // to THIS function — so First Week reel captions failed on every single build from the day the
+  // feature shipped (08-28) until 2026-09-01, and the error was invisible because the response
+  // never carried captionError. Same bug class, sibling function, one line apart in effect.
+  if (!SYSTEM_FFMPEG) throw new Error('no system ffmpeg with drawtext available (ffmpeg-static has no libfreetype, so captions cannot be burned)');
   await new Promise((resolve, reject) => {
-    ffmpeg(inPath)
+    const cmd = ffmpeg(inPath);
+    cmd.setFfmpegPath(SYSTEM_FFMPEG);
+    cmd
       .videoFilters(filters)
       .outputOptions(['-c:v libx264', '-crf', '18', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
       .output(outPath)
