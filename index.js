@@ -602,7 +602,7 @@ TWO-VERSION RULE — if the creative direction has interpretive room ("make it l
 
 CRITICAL DON'TS — never use the heavy 3-block CRITICAL KEEP / CRITICAL CHANGE / DO NOT structure here. Never re-describe the source shot by shot. Never deliver partial blocks or "insert this here" instructions; every prompt must be complete and copy-pasteable. Never skip the text strip, the audio strip, or the ANALYSIS section. Never add disclaimers, caveats or filler.`;
 
-    const systemPrompt = `You are a Seedance 2.5 prompt engineer. Study the frames and transcript carefully and follow these four steps exactly.
+    const systemPrompt = `You are a short-form video prompt engineer. Study the frames and transcript carefully and follow these four steps exactly.
 
 STEP 1 — CLASSIFY THE SOURCE as exactly one of TWO lanes:
 - AUTHENTIC: phone-shot / creator-made — handheld or propped phone, casual real-world setting, available or simple lighting, unpolished. The huge majority of viral short-form lives here.
