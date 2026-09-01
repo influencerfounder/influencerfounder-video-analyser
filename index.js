@@ -202,7 +202,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.5.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.6.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -2157,9 +2157,14 @@ app.post('/api/assemble-reel', async (req, res) => {
     tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
     const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
     console.log(`[reel:${token}] assembled ${normPaths.length}/${shots.length} shots, ${seconds}s at ${outW}x${outH}`);
+    // ⚠️ captionsBurned / captionError were COMPUTED (see the burn block above) and never returned
+    // — so a burn that silently did nothing was indistinguishable from captions being switched off,
+    // which is exactly how First Week captions went unnoticed. The 2026-08-25 fix removed these two
+    // fields from /api/temp-video (where they were an out-of-scope ReferenceError) but never added
+    // them to THIS response, which is the one that owns them. Found 2026-09-01.
     res.json({ success: true, videoUrl: publicUrl, token, shotCount: normPaths.length,
                requested: shots.length, seconds, width: outW, height: outH, hasAudio: !!audioUrl,
-               audioDelaySec });
+               audioDelaySec, captionsRequested: cues.length, captionsBurned, captionError });
   } catch (err) {
     console.error(`[reel:${token}] error:`, err.message);
     res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
