@@ -85,6 +85,21 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
     maxContentLength: 200 * 1024 * 1024,
   });
   fs.writeFileSync(outputPath, Buffer.from(videoRes.data));
+
+  // Music metadata — field names PROBED against the live actor 2026-09-01 (the
+  // 2026-08-31 lesson: write-ups lie about this actor family's schemas). Items
+  // carry musicInfo { artist_name, song_name, uses_original_audio, ... }.
+  // Surfaced so the tool can name the sound the source video used — Mike adds
+  // the real track when posting, and knowing WHICH track the viral source used
+  // is half of modelling it.
+  const mi = item?.musicInfo || null;
+  return {
+    sourceAudio: mi ? {
+      title: String(mi.song_name || ''),
+      artist: String(mi.artist_name || ''),
+      original: !!mi.uses_original_audio,
+    } : null,
+  };
 }
 
 // ─────────────────────────────────────────
@@ -139,6 +154,14 @@ async function downloadTikTokViaApify(videoUrl, outputPath) {
     throw err;
   }
 
+  // musicMeta { musicName, musicAuthor, musicOriginal } — PROBED live 2026-09-01.
+  const mm = item?.musicMeta || null;
+  const sourceAudio = mm ? {
+    title: String(mm.musicName || ''),
+    artist: String(mm.musicAuthor || ''),
+    original: !!mm.musicOriginal,
+  } : null;
+
   let lastErr = null;
   for (const remote of candidates) {
     try {
@@ -155,7 +178,7 @@ async function downloadTikTokViaApify(videoUrl, outputPath) {
         headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.tiktok.com/' },
       });
       fs.writeFileSync(outputPath, Buffer.from(videoRes.data));
-      if (fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 1000) return;
+      if (fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 1000) return { sourceAudio };
     } catch (e) { lastErr = e; }
   }
   throw new Error('TikTok video url could not be downloaded' + (lastErr ? ': ' + lastErr.message : ''));
@@ -166,13 +189,16 @@ async function downloadTikTokViaApify(videoUrl, outputPath) {
 async function downloadTikTok(videoUrl, outputPath, ytDlpAttempt) {
   try {
     await ytDlpAttempt();
-    if (fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 1000) return 'yt-dlp';
+    // yt-dlp gives no music metadata (a second -j fetch could, but the extractor
+    // is currently broken anyway so everything real goes via Apify) — the audio
+    // name is simply unknown on this path and the UI omits the row.
+    if (fs.existsSync(outputPath) && fs.statSync(outputPath).size >= 1000) return { via: 'yt-dlp', sourceAudio: null };
     throw new Error('yt-dlp produced no usable file');
   } catch (e) {
     console.log(`[tiktok] yt-dlp failed (${String(e.message).slice(0, 140)}) — falling back to Apify`);
     try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (_) {}
-    await downloadTikTokViaApify(videoUrl, outputPath);
-    return 'apify';
+    const r = await downloadTikTokViaApify(videoUrl, outputPath);
+    return { via: 'apify', sourceAudio: (r && r.sourceAudio) || null };
   }
 }
 
@@ -202,7 +228,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.7.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.8.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -247,9 +273,11 @@ app.post('/api/clone', async (req, res) => {
     const isInstagram = /instagram\.com\/(p|reel|reels)\//.test(videoUrl);
     const isTikTok = /tiktok\.com\/@[^/]+\/video\/|tiktok\.com\/t\//.test(videoUrl);
 
+    let sourceAudio = null; // { title, artist, original } from the source post, when known
     if (isInstagram) {
       try {
-        await downloadInstagramViaApify(videoUrl, videoPath);
+        const igDl = await downloadInstagramViaApify(videoUrl, videoPath);
+        sourceAudio = (igDl && igDl.sourceAudio) || null;
       } catch (e) {
         return res.status(400).json({ success: false, error: e.message, reason: e.reason || null, apifyError: e.apifyError || null });
       }
@@ -278,7 +306,8 @@ app.post('/api/clone', async (req, res) => {
             resolve();
           });
         }));
-        console.log(`[clone] tiktok downloaded via ${via}`);
+        console.log(`[clone] tiktok downloaded via ${via.via}`);
+        sourceAudio = via.sourceAudio || null;
       } catch (e) {
         return res.status(400).json({ success: false, error: e.message, apifyError: e.apifyError || null });
       }
@@ -775,6 +804,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       lane,
       laneLayers: LANE_LAYERS,
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
+      sourceAudio,
       clonePrompt
     });
 
@@ -1010,7 +1040,7 @@ app.post('/api/temp-video', async (req, res) => {
       // Only TikTok gets the Apify fallback — a plain direct url has nothing to fall
       // back to, and paying for a scrape of a non-TikTok host would be wrong.
       if (/tiktok\.com\/@[^/]+\/video\/|tiktok\.com\/t\//.test(videoUrl)) {
-        const via = await downloadTikTok(videoUrl, outputPath, runYtDlp);
+        const via = (await downloadTikTok(videoUrl, outputPath, runYtDlp)).via;
         console.log(`[tempvid:${token}] tiktok via ${via}`);
       } else {
         await runYtDlp();
