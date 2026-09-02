@@ -244,7 +244,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.13.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.14.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -277,7 +277,11 @@ app.post('/api/clone', async (req, res) => {
     // layer) — the DEFAULT, exactly the May 1:1 method that predates the reach decline. 'realism' =
     // the SAME May 1:1 prompt with the lane realism layer appended (authentic/high-end auto-classified).
     // The July scaffolded/condensing builder is fully removed — it was the suspected viral-cliff cause.
-    const promptStyle = ['original','realism'].includes(req.body.promptStyle) ? req.body.promptStyle : 'original';
+    // 'improve' = the DELIBERATE re-engineering mode (a SEPARATE feature from recreation): it resurrects the
+    // scaffolded builder (systemPrompt) — hook-mechanism-first, timestamped shots, full sequence, realism layer —
+    // NOT to copy the source but to make a stronger version of it, optionally steered by improveBrief.
+    const promptStyle = ['original','realism','improve'].includes(req.body.promptStyle) ? req.body.promptStyle : 'original';
+    const improveBrief = String(req.body.improveBrief || '').slice(0, 600).trim();
     const isBgSwap = mode === 'bgswap';
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
@@ -744,14 +748,17 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // (so the server can append the realism layer). The July scaffolded/timestamped builder is gone
     // from the recreate path entirely — its condensing/re-engineering was the suspected viral-cliff cause.
     const sysFinal = isBgSwap ? BG_SWAP_SYSTEM
+      : promptStyle === 'improve' ? systemPrompt          // the scaffolded/hook-optimised builder, used to IMPROVE (not copy)
       : promptStyle === 'realism' ? REALISM_CLONE_SYSTEM
       : ORIGINAL_CLONE_SYSTEM;
     const userFinal = isBgSwap
       ? `These ${frameBase64s.length} frames were extracted from my own source video. `
         + `Its exact duration is ${Math.round(duration * 10) / 10} seconds — use this figure, do not estimate.\n\n`
         + `The background change I want: ${String(bgBrief || '').trim() || '(none specified — ask one clarifying question in the ANALYSIS instead of guessing)'}`
-      : originalUserText;   // both 'original' and 'realism' use the verbatim May user message — the only
-                            // difference between them is the realism layer, appended below for 'realism'
+      : promptStyle === 'improve'
+        ? `IMPROVE MODE — this is NOT a faithful 1:1 copy. Study the source to learn WHY it works (its hook mechanism, pacing, payoff), then write a prompt for a STRONGER version of the same core concept: sharpen the hook, tighten the pacing and heighten the payoff to maximise scroll-stopping power and watch-through. Keep [INFLUENCER] as the subject and keep the winning idea, but you MAY change setting, props, shot order or ending if it makes the video more likely to go viral.${improveBrief ? ` The user's specific direction: "${improveBrief}" — prioritise this.` : ''}\n\n` + userText + hookBlock
+        : originalUserText;   // 'original' and 'realism' use the verbatim May user message — the only
+                              // difference between them is the realism layer, appended below for 'realism'/'improve'
     const maxTok = isBgSwap ? 2600 : 1000;
 
     let claudeResponse;
@@ -833,7 +840,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       talkingHead = talkMatch[1].toUpperCase() === 'YES';
       basePrompt = basePrompt.slice(talkMatch[0].length).trim();
     }
-    const clonePrompt = promptStyle === 'realism' ? `${basePrompt} ${LANE_LAYERS[lane]}` : basePrompt;
+    const clonePrompt = (promptStyle === 'realism' || promptStyle === 'improve') ? `${basePrompt} ${LANE_LAYERS[lane]}` : basePrompt;
 
     res.json({
       success: true,
