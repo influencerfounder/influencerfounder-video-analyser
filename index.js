@@ -1638,7 +1638,7 @@ app.post('/api/burn-captions', async (req, res) => {
     const drawFilters = usable.map((c, i) => {
       const f = path.join(tmpDir, `cap_${i}.txt`);
       fs.writeFileSync(f, c.text, 'utf8');
-      return `drawtext=fontfile='${CAPTION_FONT_PATH}':textfile='${f}':expansion=none:fontsize=${fontSize}:fontcolor=white:borderw=${Math.round(fontSize * 0.12)}:bordercolor=black:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${c.start.toFixed(3)},${c.end.toFixed(3)})'`;
+      return `drawtext=fontfile='${CAPTION_FONT_PATH}':textfile='${f}':expansion=none:fontsize=${fontSize}:fontcolor=white${captionEdgeArgs(fontSize, req.body && req.body.edge)}:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${c.start.toFixed(3)},${c.end.toFixed(3)})'`;
     });
 
     // Pin frame size and pixel format BEFORE the drawtext chain. "Error reinitializing
@@ -2130,6 +2130,20 @@ function verdictFor(distance) {
 
 // Burn a list of {text,start,end} cues onto a video. Shared by the reel assembler and the
 // Whisper-driven caption endpoint, so the look and the escaping rules cannot drift apart.
+// How the text is separated from the picture behind it.
+// ⚠️ Both caption paths used to hard-code a heavy outline (borderw ~12-14% of the font size),
+// which at ~34px draws a ~5px black line around every letter — Mike, 2026-09-02: "creates a thick
+// black line around the captions, I don't like that". A soft drop shadow keeps the text readable
+// over a bright frame without the outlined look, so it is the default. 'outline' restores the old
+// heavy edge; 'none' is plain text and is only safe over consistently dark footage.
+function captionEdgeArgs(fontSize, edge) {
+  const e = String(edge || 'shadow').toLowerCase();
+  if (e === 'none') return '';
+  if (e === 'outline') return `:borderw=${Math.round(fontSize * 0.14)}:bordercolor=black@0.85`;
+  const off = Math.max(1, Math.round(fontSize * 0.05));
+  return `:shadowcolor=black@0.55:shadowx=${off}:shadowy=${off}`;
+}
+
 // One drawtext per cue, each visible only in its own window. Text goes through a FILE
 // (textfile=) not inline, which removes filter-string escaping — apostrophes, colons, %
 // and backslashes — as a failure mode entirely.
@@ -2163,7 +2177,7 @@ async function burnCueList(inPath, outPath, cues, opts = {}) {
     fs.writeFileSync(f, c.text, 'utf8');
     filters.push(
       `drawtext=fontfile='${fontPath}':textfile='${f}':expansion=none:fontsize=${fontSize}` +
-      `:fontcolor=${opts.color || 'white'}:borderw=${Math.round(fontSize * 0.14)}:bordercolor=black@0.85` +
+      `:fontcolor=${opts.color || 'white'}${captionEdgeArgs(fontSize, opts.edge)}` +
       `:x=(w-text_w)/2:y=${y}:enable='between(t,${c.start.toFixed(3)},${c.end.toFixed(3)})'`
     );
   });
