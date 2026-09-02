@@ -244,7 +244,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.16.2', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.16.3', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -790,8 +790,8 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // they are verbatim-stable — the frontend holds both layers and can swap them
     // exactly when the user overrides the detected lane before generating.
     const LANE_LAYERS = {
-      'AUTHENTIC': 'Filmed on a smartphone: natural hand tremor with small framing corrections, slightly off-center framing, mild lens softness, faint sensor noise, mild compression artifacts, small auto-exposure shifts, uneven ambient lighting with natural shadow falloff, real skin with visible pores and tiny blemishes, no beauty filter, stray hair flyaways, natural facial asymmetry, lived-in surroundings, unedited social-media snapshot look, 30fps.',
-      'HIGH-END': 'Shot on a cinema camera: subtle lens vignetting, gentle highlight halation, fine organic film grain, controlled lighting with soft physical falloff and true shadows, photorealistic skin keeping pores and micro-texture under the key light, restrained filmic color grade, performers with natural body weight and visible breath, never posed stillness, 24fps.',
+      'AUTHENTIC': 'Filmed on a smartphone: natural hand tremor with small framing corrections, slightly off-center framing, mild lens softness, faint sensor noise, mild compression artifacts, small auto-exposure shifts, uneven ambient lighting with natural shadow falloff, real skin with visible pores and tiny blemishes, no beauty filter, stray hair flyaways, natural facial asymmetry, lived-in surroundings, unedited social-media snapshot look, with everyday handheld phone-video motion.',
+      'HIGH-END': 'Shot on a cinema camera: subtle lens vignetting, gentle highlight halation, fine organic film grain, controlled lighting with soft physical falloff and true shadows, photorealistic skin keeping pores and micro-texture under the key light, restrained filmic color grade, performers with natural body weight and visible breath, never posed stillness, with the smooth cadence of film.',
     };
     // Footwear is stated explicitly because the influencer's own full-body
     // reference photo is a plain studio shot and is very often BAREFOOT (it is
