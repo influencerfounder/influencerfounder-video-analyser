@@ -244,7 +244,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.14.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.16.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -262,6 +262,24 @@ app.get('/', (req, res) => {
 // Downloads video → extracts frames → transcribes audio → Claude vision
 // ─────────────────────────────────────────
 
+// ─────────────────────────────────────────
+// VIRAL DRIVER TAXONOMY (2026-09-02, Mike: "why did this video go viral?")
+//
+// A closed list on purpose. Free-text "why" invites vague answers ("great
+// editing") that cannot be counted, and the whole point is that the Viral Brain
+// GROUPS BY this value to learn which mechanisms actually perform for THIS
+// account. An open string splits into a hundred one-row groups and says nothing.
+//
+// ⚠️ MIRRORED in the service's BRAIN_ENUMS.driver — the service validates and
+// DROPS anything not on its own list, so that copy is authoritative. Keep them
+// in sync; a value added here and not there is silently discarded (which is the
+// safe direction, but it means the Brain never learns it).
+const VIRAL_DRIVERS = [
+  'pattern_interrupt','withheld_reveal','aspirational_fantasy','transformation',
+  'relatable_tension','curiosity_gap','social_proof_reaction','comedic_subversion',
+  'loop_bait','info_density','other',
+];
+
 app.post('/api/clone', async (req, res) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-'));
 
@@ -271,7 +289,7 @@ app.post('/api/clone', async (req, res) => {
     // and only swaps the system prompt and response shape. A separate endpoint would
     // have duplicated all of that — the duplication class this codebase keeps paying
     // for. Default '' keeps every existing caller byte-identical.
-    const { videoUrl, locationId, kieApiKey, mode, bgBrief, hookReport } = req.body;
+    const { videoUrl, locationId, kieApiKey, mode, bgBrief, hookReport, driverPriors } = req.body;
     // Recreate prompt style (Mike's A/B, 2026-09-02). 'original' = the exact
     // May 2026 director method (recreate the video 1:1, swap the person; NO realism
     // layer) — the DEFAULT, exactly the May 1:1 method that predates the reach decline. 'realism' =
@@ -361,6 +379,30 @@ app.post('/api/clone', async (req, res) => {
     const duration = await new Promise((resolve) => {
       ffmpeg.ffprobe(videoPath, (err, meta) => resolve(err ? 15 : (meta?.format?.duration || 15)));
     });
+
+    // 2b. Keep a short-lived PLAYABLE copy of the source video, so the Studio can
+    // show the original next to the finished recreate ("what went well / what to
+    // improve"). The file is already downloaded and probed here — copying it out of
+    // tmpDir (which the finally block deletes) into the existing tempVideos map
+    // costs one local file copy and NO extra download / Apify call. 30-min TTL,
+    // pruned by the existing interval; the Studio re-hosts it durably (Blob/GHL)
+    // while the recreate generates, so the comparison outlives this copy.
+    // Scheme is forced to https: express has no `trust proxy` here, so req.protocol
+    // reads `http` behind Railway's proxy and an http src would be blocked as mixed
+    // content on the https Studio page.
+    let sourceVideoUrl = '', sourceVideoToken = '';
+    try {
+      cleanOldTempVideos();
+      sourceVideoToken = `src${Date.now()}_${(Math.random().toString(36) + '000000').slice(2, 8)}`;
+      const srcCopyPath = path.join(os.tmpdir(), `tempvid_${sourceVideoToken}.mp4`);
+      fs.copyFileSync(videoPath, srcCopyPath);
+      tempVideos.set(sourceVideoToken, { filePath: srcCopyPath, createdAt: Date.now() });
+      sourceVideoUrl = `https://${req.get('host')}/api/temp-video/${sourceVideoToken}`;
+    } catch (e) {
+      // FAILS OPEN — losing the comparison copy must never fail an analysis.
+      console.warn('[clone] could not keep a source copy for comparison:', e.message);
+      sourceVideoUrl = ''; sourceVideoToken = '';
+    }
 
     // 3. Extract frames for Claude's analysis — SAME duration-based budget as the /watch
     // skill's auto_fps (short clips sampled densely, long clips capped at 80, single-pass
@@ -606,6 +648,34 @@ app.post('/api/clone', async (req, res) => {
       }
     } catch (_) { hookBlock = ''; }
 
+    // 📈 LEARNED PRIORS — this account's OWN measured results per driver,
+    // supplied by the service from the Viral Brain (viral_analyses GROUP BY
+    // driver tag). This is what makes the tool self-improving: the more videos
+    // are analysed AND posted, the better it knows which mechanisms actually
+    // travel for THIS account rather than in general.
+    //
+    // The service only sends rows that clear its own evidence bar, so anything
+    // arriving here is already worth acting on. We still cap the list and the
+    // strings: they land inside a Claude prompt, and only the SHAPE is ours.
+    // Absent/empty (a new account, or a Brain outage) -> no block at all, and
+    // the builder behaves exactly as it did before this existed.
+    let priorsBlock = '';
+    try {
+      const rows = Array.isArray(driverPriors) ? driverPriors.slice(0, 8) : [];
+      const lines = rows
+        .filter(r => r && typeof r === 'object' && r.driver)
+        .map(r => {
+          const d = String(r.driver).slice(0, 40);
+          const n = Number(r.n) || 0;
+          const m = Number(r.medianMultiplier);
+          const perf = Number.isFinite(m) ? `${Math.round(m * 10) / 10}x normal views` : 'no outcome data yet';
+          return `- ${d}: ${perf} (measured across ${n} video${n === 1 ? '' : 's'})`;
+        });
+      if (lines.length) {
+        priorsBlock = `\n\nWHAT THIS ACCOUNT HAS ALREADY LEARNED \u2014 measured outcomes of its own analysed and posted videos, not theory. Only mechanisms with enough evidence to be worth trusting are listed:\n${lines.join('\n')}\n\nUse this when writing PLAN: if the source's driver has performed well here, lean into it harder. If it has performed poorly, say so plainly in PLAN and shift the improvement toward a mechanism that HAS worked \u2014 without abandoning the source's core idea, and never by inventing something the frames cannot support.`;
+      }
+    } catch (_) { priorsBlock = ''; }
+
     // ── Change-background mode (spec supplied by Mike 2026-08-18, locked) ──
     // Deliberately the MINIMAL DIRECTIVE format, not the heavy 3-block
     // CRITICAL KEEP / CRITICAL CHANGE / DO NOT structure used for from-scratch
@@ -656,7 +726,27 @@ TWO-VERSION RULE — if the creative direction has interpretive room ("make it l
 
 CRITICAL DON'TS — never use the heavy 3-block CRITICAL KEEP / CRITICAL CHANGE / DO NOT structure here. Never re-describe the source shot by shot. Never deliver partial blocks or "insert this here" instructions; every prompt must be complete and copy-pasteable. Never skip the text strip, the audio strip, or the ANALYSIS section. Never add disclaimers, caveats or filler.`;
 
-    const systemPrompt = `You are a short-form video prompt engineer. Study the frames and transcript carefully and follow these four steps exactly.
+    const systemPrompt = `You are a short-form video strategist and prompt engineer. Study the frames and transcript carefully and follow these five steps exactly.
+
+STEP 0 — DIAGNOSE WHY THIS VIDEO WENT VIRAL. Do this FIRST, before you write a single word of the prompt, and commit to the answer in the output — every later step must serve it.
+A video does not travel because it looks good. It travels because ONE mechanism does the work: it stops the scroll, holds attention, and gives the viewer a reason to rewatch, save or send it. Name that mechanism — do not describe the video.
+Choose EXACTLY ONE primary driver, returning the token exactly as written:
+- pattern_interrupt — a jarring or unexpected visual in the first seconds that breaks the scroll rhythm
+- withheld_reveal — the payoff is deliberately delayed and the viewer stays to see it
+- aspirational_fantasy — the viewer wants to BE this person or live this moment (lifestyle, status, being noticed, desirability)
+- transformation — a visible before-to-after change
+- relatable_tension — a frustration, struggle or social awkwardness the viewer recognises as their own
+- curiosity_gap — an unanswered "how did they do that / what happens next" drives the watch
+- social_proof_reaction — someone in frame visibly reacts to the subject, and THAT reaction is the payload
+- comedic_subversion — a setup followed by a twist that lands as a joke
+- loop_bait — the ending flows back into the opening, or the clip is short enough to rewatch compulsively
+- info_density — genuinely useful information delivered fast; saved rather than shared
+- other — only when nothing above genuinely fits
+Rules for this step:
+- Judge ONLY from what is in the frames and transcript. Never from the caption, the follower count, or an assumption about the account.
+- If several mechanisms are present, name the one the video would DIE without. The rest belong in the plan, not the driver.
+- Be honest when the driver is audio-dependent (a trending sound, a spoken punchline). Say so in LIMIT — a silent visual recreate cannot inherit it, so the plan must substitute a VISUAL equivalent rather than pretend the problem away.
+- Never inflate. If the video is ordinary and its reach probably came from the creator's existing audience rather than the content, say exactly that in WHY and pick the closest driver anyway.
 
 STEP 1 — CLASSIFY THE SOURCE as exactly one of TWO lanes:
 - AUTHENTIC: phone-shot / creator-made — handheld or propped phone, casual real-world setting, available or simple lighting, unpolished. The huge majority of viral short-form lives here.
@@ -665,6 +755,7 @@ STEP 1 — CLASSIFY THE SOURCE as exactly one of TWO lanes:
 This classification is INTERNAL — it only decides which realism layer Step 3 appends. Never print a lane name anywhere in the output. When genuinely torn, choose AUTHENTIC — polished-looking creator content is still phone-made far more often than it looks.
 
 STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject + Action + Environment + Camera + Lighting + Style. Rules:
+- 🎯 SERVE THE STEP 0 DRIVER — this outranks every other rule here. The shot that delivers the driver gets the most words and the clearest description; anything that does not serve it gets cut to make room. You are re-engineering ONE mechanism to hit harder, not redecorating a scene. Never name the driver token inside the prompt itself — it is a decision, not prompt text.
 - 🪝 PRESERVE THE HOOK MECHANISM — do this FIRST, before describing anything else. The leading labelled frames are the source's 0-3s hook window in order. Work out WHY that opening stops a scroll: the MECHANISM, not the scenery. Common mechanisms: starting mid-action with no setup, an object or person entering frame unexpectedly, a reveal deliberately withheld, a direct look to lens, an implied question, a jarring visual pattern-interrupt, an on-screen text claim. Then rebuild THAT SAME mechanism as the opening shot [0-2s] — same trigger, same timing, same thing withheld — dressed in the new subject and setting. Copying the source's setting while opening calmly throws away the one thing that made it work: a faithful-looking recreate with a dead first two seconds is the single most common way these fail. If the source opens on on-screen text, say so and carry an equivalent line.
 - 🎭 REACTION IS OFTEN THE HOOK — CONDITIONAL: study the frames for a BYSTANDER REACTION: someone in the scene visibly reacting to the subject — a head-turn, a double-take, an admiring or shocked glance, a person stopping to look. For "someone walks through a public place" content this reaction IS the viral payload (the fantasy is being noticed). If the source clearly has one, identify WHO reacts and HOW, and preserve that exact shot at the moment it occurs — e.g. "[2-4s]: a woman nearby turns her head to look back at [INFLUENCER] with a lingering admiring glance". Only include this when the source actually shows it; if there is no such reaction, do NOT invent one or add generic "bystanders staring" filler.
 - 🎯 DESCRIBE ONLY WHAT IS LITERALLY IN FRAME — never infer a comedic bit, a held product/prop, or a "can't-believe-this" gesture the frames do not plainly show. An arm raised to run a hand through the hair, or hands clasped behind the head, is a confident grooming gesture, NOT a head-grab, and there is no product in hand unless one is clearly visible. Inventing an action the source never had is worse than describing it plainly.
@@ -678,7 +769,7 @@ STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject +
 - If any shot shows hands touching an object (phone, cup, product, fabric), anchor the hand explicitly to it (e.g. "fingers grip the phone case") — free-floating hand descriptions are the most common cause of hand artifacts
 - Break the action into timestamped shots in sequence: [0-2s]: opening shot. [2-5s]: main action. Keep each shot to 1-2 sentences. Weave natural involuntary human motion through the shots: a soft slightly-uneven blink (never metronomic), a visible breath with gentle shoulder rise, a glance at something specific then back (gaze always has a destination — a locked dead-center stare renders as frozen and glassy), a small weight shift or self-adjustment (brushing a strand of hair back, tugging a sleeve). Different body parts move on slightly different timing — overlapping, never synchronized
 - If the person walks in any shot, describe real gait mechanics: heel-to-toe footsteps with weight shifting onto each leg, arms swinging opposite the legs, head staying level — never a gliding or floating walk
-- Cover the FULL sequence of the video start to finish — every distinct shot and every notable reaction, in order, not just the hook plus one main action. Do not compress or drop moments to save words. Stay within ~150 words (Seedance's attention ceiling), but spend them on faithfully covering the whole clip — a recreate models the source as closely as possible.
+- Cover the FULL sequence of the video start to finish — every distinct shot and every notable reaction, in order, not just the hook plus one main action. Do not compress or drop moments to save words. Stay within ~150 words (Seedance's attention ceiling) and spend them where the driver lives — this is an IMPROVED version, not a copy, so a beat that does not serve the driver may be shortened or dropped to buy words for the one that does.
 
 STEP 3 — DO NOT append any realism layer, camera-quality block, fps mention, or avoid-list yourself.
 ALSO BANNED ANYWHERE IN THE PROMPT, not just the opening clause:
@@ -688,7 +779,12 @@ ALSO BANNED ANYWHERE IN THE PROMPT, not just the opening clause:
 OUTPUT FORMAT — exactly this, nothing else:
 Line 1: "LANE: AUTHENTIC" or "LANE: HIGH-END" (stripped by the server and shown to the user as a switchable choice — it is the ONLY place the lane may appear).
 Line 2: "TALKING: YES" or "TALKING: NO" — YES only if the video is a TALKING-HEAD: a person on camera actually SPEAKING/narrating to the viewer with lip-synced spoken words (a monologue, piece-to-camera, vlog talk, interview answer). NO for everything else — music videos / lip-syncing to a song / singing, dance, product b-roll, montage, voiceover-over-visuals with no on-camera speaker, or no speech at all. When unsure, answer NO.
-Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanation, and never a lane word inside the prompt itself.`;
+Line 3: "DRIVER: <token>" — the single Step 0 token, exactly as written in the list.
+Line 4: "WHY: <one sentence>" — why THAT mechanism made this specific video travel, citing what you actually see (a moment, a timestamp, a reaction). No hedging, no generic praise.
+Line 5: "BEAT: <one sentence>" — the exact moment in the source that delivers the driver (e.g. "the head-turn from the woman passing at ~4s").
+Line 6: "PLAN: <one or two sentences>" — how the prompt you are about to write makes that mechanism hit HARDER than the original. Be concrete and specific to this video.
+Line 7: "LIMIT: <one sentence or 'none'>" — what will NOT transfer to an AI recreate (audio-dependent punchline, a real location, a named person, on-screen text) and what you substituted instead.
+Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanation, no markdown, and never a lane word or a driver token inside the prompt itself.`;
 
     // Lane realism layers + negative suffix are appended in CODE (not by Claude) so
     // they are verbatim-stable — the frontend holds both layers and can swap them
@@ -756,7 +852,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         + `Its exact duration is ${Math.round(duration * 10) / 10} seconds — use this figure, do not estimate.\n\n`
         + `The background change I want: ${String(bgBrief || '').trim() || '(none specified — ask one clarifying question in the ANALYSIS instead of guessing)'}`
       : promptStyle === 'improve'
-        ? `IMPROVE MODE — this is NOT a faithful 1:1 copy. Study the source to learn WHY it works (its hook mechanism, pacing, payoff), then write a prompt for a STRONGER version of the same core concept: sharpen the hook, tighten the pacing and heighten the payoff to maximise scroll-stopping power and watch-through. Keep [INFLUENCER] as the subject and keep the winning idea, but you MAY change setting, props, shot order or ending if it makes the video more likely to go viral.${improveBrief ? ` The user's specific direction: "${improveBrief}" — prioritise this.` : ''}\n\n` + userText + hookBlock
+        ? `IMPROVE MODE — this is NOT a faithful 1:1 copy. Complete STEP 0 first and commit to a driver, then write a prompt for a STRONGER version of the same core concept: sharpen the hook, tighten the pacing and heighten the payoff to maximise scroll-stopping power and watch-through. Keep [INFLUENCER] as the subject and keep the winning idea, but you MAY change setting, props, shot order or ending if it makes the video more likely to go viral.${improveBrief ? ` The user's specific direction: "${improveBrief}" — prioritise this.` : ''}\n\n` + userText + hookBlock + priorsBlock
         : originalUserText;   // 'original' and 'realism' use the verbatim May user message — the only
                               // difference between them is the realism layer, appended below for 'realism'/'improve'
     const maxTok = isBgSwap ? 2600 : 1000;
@@ -817,6 +913,8 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         raw: basePrompt,
         durationSec: Math.round(duration * 10) / 10,
         firstFrameUrl: firstFrameUrl || frameDataUrls[0] || '',
+        sourceVideoUrl,
+        sourceVideoToken,
         metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length },
       });
     }
@@ -840,6 +938,36 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       talkingHead = talkMatch[1].toUpperCase() === 'YES';
       basePrompt = basePrompt.slice(talkMatch[0].length).trim();
     }
+    // 🧠 WHY-IT-WENT-VIRAL REPORT (improve mode only). Parsed AFTER the LANE and
+    // TALKING strips so those two anchored regexes keep matching line 1 / line 2
+    // exactly as before — the report lines are appended below them, never above.
+    //
+    // Every field is optional by design: if the model drops a line we keep the
+    // rest and the prompt still ships. A missing report degrades the UI to what
+    // it showed yesterday; it must never fail an analysis the user paid for.
+    let viralReport = null;
+    {
+      const pull = (label) => {
+        const m = basePrompt.match(new RegExp('^' + label + ':\\s*(.+?)\\s*$', 'im'));
+        return m ? m[1].trim() : '';
+      };
+      const rawDriver = pull('DRIVER').toLowerCase().replace(/[^a-z_]/g, '');
+      const driver = VIRAL_DRIVERS.includes(rawDriver) ? rawDriver : '';
+      const why   = pull('WHY').slice(0, 400);
+      const beat  = pull('BEAT').slice(0, 300);
+      const plan  = pull('PLAN').slice(0, 500);
+      let   limit = pull('LIMIT').slice(0, 300);
+      if (/^none\.?$/i.test(limit)) limit = '';
+      if (driver || why || plan) viralReport = { driver, why, beat, plan, limit };
+      // Strip every report line out of the prompt body. Anchored per line so a
+      // sentence inside the prompt that merely CONTAINS one of these words is
+      // untouched \u2014 only a real line-leading "LABEL:" is removed.
+      basePrompt = basePrompt
+        .replace(/^(DRIVER|WHY|BEAT|PLAN|LIMIT):.*$/gim, '')
+        .replace(/^\s*\n+/, '')
+        .trim();
+    }
+
     const clonePrompt = (promptStyle === 'realism' || promptStyle === 'improve') ? `${basePrompt} ${LANE_LAYERS[lane]}` : basePrompt;
 
     res.json({
@@ -849,6 +977,8 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       hookFrames,
       durationSec: Math.round(duration * 10) / 10,
       firstFrameUrl: firstFrameUrl || frameDataUrls[0] || '',
+      sourceVideoUrl,
+      sourceVideoToken,
       transcript,
       transcriptError: transcriptError || undefined,
       talkingHead,
@@ -858,6 +988,8 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
       sourceAudio,
       promptStyle,
+      viralReport,
+      viralDrivers: VIRAL_DRIVERS,
       clonePrompt
     });
 
@@ -1119,11 +1251,38 @@ app.post('/api/temp-video', async (req, res) => {
 });
 
 // GET /api/temp-video/:token — serve the downloaded video
+// Range support added 2026-09-02: the recreate side-by-side comparison plays this
+// URL directly in a browser <video>, and without 206 responses a viewer cannot
+// SCRUB (Safari/iOS often refuses to play at all). Server-side consumers send no
+// Range header and take the unchanged full-file 200 path, so nothing regresses.
 app.get('/api/temp-video/:token', (req, res) => {
   const v = tempVideos.get(req.params.token);
   if (!v || !fs.existsSync(v.filePath)) return res.status(404).json({ error: 'Video not found or expired' });
+  const size = fs.statSync(v.filePath).size;
   res.setHeader('Content-Type', 'video/mp4');
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Accept-Ranges', 'bytes');
+  const range = req.headers.range;
+  const m = range && /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
+  if (m) {
+    let start = m[1] === '' ? null : parseInt(m[1], 10);
+    let end = m[2] === '' ? null : parseInt(m[2], 10);
+    if (start === null) { // suffix range: bytes=-N (last N bytes)
+      const n = Math.min(end || 0, size);
+      start = size - n; end = size - 1;
+    } else if (end === null || end >= size) {
+      end = size - 1;
+    }
+    if (!(start >= 0) || start > end || start >= size) {
+      res.setHeader('Content-Range', `bytes */${size}`);
+      return res.status(416).end();
+    }
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+    res.setHeader('Content-Length', String(end - start + 1));
+    return fs.createReadStream(v.filePath, { start, end }).pipe(res);
+  }
+  res.setHeader('Content-Length', String(size));
   fs.createReadStream(v.filePath).pipe(res);
 });
 
