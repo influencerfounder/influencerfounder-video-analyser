@@ -244,7 +244,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.11.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.12.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -275,9 +275,9 @@ app.post('/api/clone', async (req, res) => {
     // Recreate prompt style (Mike's A/B, 2026-09-02). 'original' = the exact
     // May 2026 director method (recreate the video 1:1, swap the person; NO realism
     // layer) — the DEFAULT, as it predates the reach decline. 'faithful' = the scaffolded
-    // builder covering the FULL shot sequence + reactions (~150w). 'optimized' (60-100w
-    // condensing) is RETIRED — kept in the whitelist for back-compat but mapped to faithful.
-    const promptStyle = ['original','optimized','faithful'].includes(req.body.promptStyle) ? req.body.promptStyle : 'original';
+    // builder covering the FULL shot sequence + reactions (~150w). The old condensing arm is
+    // FULLY REMOVED — condensing a proven viral video was the viral-cliff cause.
+    const promptStyle = ['original','faithful'].includes(req.body.promptStyle) ? req.body.promptStyle : 'original';
     const isBgSwap = mode === 'bgswap';
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
@@ -674,7 +674,7 @@ STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject +
 - If any shot shows hands touching an object (phone, cup, product, fabric), anchor the hand explicitly to it (e.g. "fingers grip the phone case") — free-floating hand descriptions are the most common cause of hand artifacts
 - Break the action into timestamped shots in sequence: [0-2s]: opening shot. [2-5s]: main action. Keep each shot to 1-2 sentences. Weave natural involuntary human motion through the shots: a soft slightly-uneven blink (never metronomic), a visible breath with gentle shoulder rise, a glance at something specific then back (gaze always has a destination — a locked dead-center stare renders as frozen and glassy), a small weight shift or self-adjustment (brushing a strand of hair back, tugging a sleeve). Different body parts move on slightly different timing — overlapping, never synchronized
 - If the person walks in any shot, describe real gait mechanics: heel-to-toe footsteps with weight shifting onto each leg, arms swinging opposite the legs, head staying level — never a gliding or floating walk
-- Target 60-100 words total for the base prompt. Never exceed 150 words — Seedance ignores details beyond that.
+- Cover the FULL sequence of the video start to finish — every distinct shot and every notable reaction, in order, not just the hook plus one main action. Do not compress or drop moments to save words. Stay within ~150 words (Seedance's attention ceiling), but spend them on faithfully covering the whole clip — a recreate models the source as closely as possible.
 
 STEP 3 — DO NOT append any realism layer, camera-quality block, fps mention, or avoid-list yourself.
 ALSO BANNED ANYWHERE IN THE PROMPT, not just the opening clause:
@@ -736,13 +736,10 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     const originalUserText = transcript
       ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the video prompt.`
       : `These ${frameBase64s.length} frames were extracted from the viral video (no audio). Create the video prompt.`;
-    // 'faithful' = the optimized builder with only the word-budget rule swapped.
-    const FAITHFUL_WORD_RULE = '- Cover the FULL sequence of the video start to finish — every distinct shot and every notable reaction, in order, not just the hook plus one main action. Do not compress or drop moments to save words. Stay within ~150 words (Seedance\'s attention ceiling), but spend them on faithfully covering the whole clip.';
-    const OPTIMIZED_WORD_RULE = '- Target 60-100 words total for the base prompt. Never exceed 150 words — Seedance ignores details beyond that.';
-    // 'optimized' (the 60-100-word condensing builder, live since 17 Jun) is RETIRED for recreates —
-    // condensing a proven viral video drops its later shots + reaction beat (the suspected viral-cliff cause).
-    // The scaffolded path now ALWAYS covers the full sequence; a stale page sending 'optimized' is safe.
-    const scaffoldedSystem = systemPrompt.replace(OPTIMIZED_WORD_RULE, FAITHFUL_WORD_RULE);
+    // The condensing recreate builder that ran from 17 Jun through the viral cliff is FULLY REMOVED —
+    // a recreate models the source as closely as possible, never condensed. The base prompt now covers the
+    // full sequence by construction, so 'faithful' uses it directly.
+    const scaffoldedSystem = systemPrompt;
     const sysFinal = isBgSwap ? BG_SWAP_SYSTEM
       : promptStyle === 'original' ? ORIGINAL_CLONE_SYSTEM
       : scaffoldedSystem;
