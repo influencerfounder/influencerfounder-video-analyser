@@ -203,6 +203,22 @@ async function downloadTikTok(videoUrl, outputPath, ytDlpAttempt) {
 }
 
 const app = express();
+
+// ── Recreate duration/model recommendation — the SINGLE source of truth ──
+// Both the phone-app/queue worker AND the desktop Recreate tab read these two
+// fields off the /api/clone response, so their choice can never drift apart
+// (Mike, 2026-09-02: "always consistent for desktop and phone app"). RULE:
+// round the source length UP to the smallest clip that fully covers it — a
+// shorter clip cuts off content, so a length between two options always takes
+// the LONGER (a 7.5s source -> 10s, never 5s). Seedance 2.0 offers 5/10/15s; a
+// source longer than 15s auto-switches to Seedance 2.5 (up to 30s) at the same
+// aspect ratio and resolution tier.
+function recommendRecreateSpec(sourceSecs) {
+  const sec = Number(sourceSecs) || 0;
+  if (sec > 15) return { recommendedDuration: 30, recommendedSpeedMode: 'v25' };
+  const recommendedDuration = sec <= 5 ? 5 : sec <= 10 ? 10 : 15;
+  return { recommendedDuration, recommendedSpeedMode: 'v20' };
+}
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: '50mb' }));
@@ -228,7 +244,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.8.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.9.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -640,6 +656,8 @@ This classification is INTERNAL — it only decides which realism layer Step 3 a
 
 STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject + Action + Environment + Camera + Lighting + Style. Rules:
 - 🪝 PRESERVE THE HOOK MECHANISM — do this FIRST, before describing anything else. The leading labelled frames are the source's 0-3s hook window in order. Work out WHY that opening stops a scroll: the MECHANISM, not the scenery. Common mechanisms: starting mid-action with no setup, an object or person entering frame unexpectedly, a reveal deliberately withheld, a direct look to lens, an implied question, a jarring visual pattern-interrupt, an on-screen text claim. Then rebuild THAT SAME mechanism as beat [0-2s] — same trigger, same timing, same thing withheld — dressed in the new subject and setting. Copying the source's setting while opening calmly throws away the one thing that made it work: a faithful-looking recreate with a dead first two seconds is the single most common way these fail. If the source opens on on-screen text, say so and carry an equivalent line.
+- 🎭 REACTION IS OFTEN THE HOOK — CONDITIONAL: study the frames for a BYSTANDER REACTION: someone in the scene visibly reacting to the subject — a head-turn, a double-take, an admiring or shocked glance, a person stopping to look. For "someone walks through a public place" content this reaction IS the viral payload (the fantasy is being noticed). If the source clearly has one, identify WHO reacts and HOW, and preserve that exact beat at the moment it occurs — e.g. "[2-4s]: a woman nearby turns her head to look back at [INFLUENCER] with a lingering admiring glance". Only include this when the source actually shows it; if there is no such reaction, do NOT invent one or add generic "bystanders staring" filler.
+- 🎯 DESCRIBE ONLY WHAT IS LITERALLY IN FRAME — never infer a comedic bit, a held product/prop, or a "can't-believe-this" gesture the frames do not plainly show. An arm raised to run a hand through the hair, or hands clasped behind the head, is a confident grooming/posture beat, NOT a head-grab, and there is no product in hand unless one is clearly visible. Inventing an action the source never had is worse than describing it plainly.
 - Open with a short capture-style scaffold as the very first clause — plain language matching the Step 1 lane, but never the lane word itself and never aspect ratio or duration (the tool sets 9:16 and clip length separately). E.g. "Handheld phone selfie capture:" or "Cinema camera capture:". Never bury this mid-prompt
 - Use [INFLUENCER] as the person placeholder — do NOT describe physical appearance (no hair color, eye color, skin tone, height, build — reference photos handle that)
 - Describe outfit, action, environment, mood, shot progression
@@ -803,6 +821,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       talkingHead,
       lane,
       laneLayers: LANE_LAYERS,
+      ...recommendRecreateSpec(duration),
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
       sourceAudio,
       clonePrompt
