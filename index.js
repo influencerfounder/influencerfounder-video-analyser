@@ -244,7 +244,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.9.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.9.1', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -557,7 +557,7 @@ app.post('/api/clone', async (req, res) => {
     // saw only the evenly-sampled set, which on a longer clip can hold a single frame from
     // 0-3s — the exact blindness the scorecard fixed for itself on 2026-07-10 and that was
     // never swept into the prompt builder. They ride FIRST because prompt weight is
-    // front-loaded and the hook is the one beat that decides whether a recreate works.
+    // front-loaded and the hook is the one shot that decides whether a recreate works.
     // Kept OUT of imageContent on purpose: the Kie branch below even-samples that array to
     // stay under the gateway's image ceiling, and sampling a mixed text/image array would
     // both drop hook frames and splice stray labels into the subset.
@@ -591,7 +591,7 @@ app.post('/api/clone', async (req, res) => {
         }
         if (hr.first_frame_verdict) bits.push(`- opening frame as thumbnail: ${String(hr.first_frame_verdict).slice(0, 300)}`);
         if (bits.length) {
-          hookBlock = `\n\nMEASURED HOOK REPORT for this exact video — this was scored from the same hook frames, so use it rather than re-deriving it, and rebuild this mechanism as beat [0-2s]:\n${bits.join('\n')}`;
+          hookBlock = `\n\nMEASURED HOOK REPORT for this exact video — this was scored from the same hook frames, so use it rather than re-deriving it, and rebuild this mechanism as the opening shot [0-2s]:\n${bits.join('\n')}`;
         }
       }
     } catch (_) { hookBlock = ''; }
@@ -628,14 +628,14 @@ Ultra-realistic iPhone UGC look throughout, with zero text.
 
 LOCKED RULES — apply to every prompt without exception:
 1. OWNERSHIP CLAUSE: always open with the "recreation of my own original... I own @video_1 and all rights to it" line. It clarifies legitimacy and passes classifier safety checks.
-2. FULL REFERENCE FRAMING: always state "@video_1 is the full reference for everything in the output". Trust the reference; never re-describe the shots in granular beat-sheet detail.
+2. FULL REFERENCE FRAMING: always state "@video_1 is the full reference for everything in the output". Trust the reference; never re-describe the shots in granular shot-by-shot detail.
 3. "ONLY change" FRAMING: always isolate the delta as a numbered list. (1) is always the environment/element swap, (2) is always the text strip. This two-point structure is mandatory.
    (Audio, duration and aspect ratio are NOT written into the prompt: the tool sets audio off
    and the format via API parameters — generate_audio:false, duration, aspect_ratio — so any
    words about them are noise the model has to ignore. Removed 2026-09-01.)
 4. TRIPLE-LOCK TEXT STRIP: always include the explicit no-text line, worded as in the template.
 5. REALISM CLOSE: always close with "Ultra-realistic iPhone UGC look throughout, with zero text".
-6. FOREGROUND INVENTORY: when describing what to keep, briefly list the ACTUAL elements visible in the frames — clothing, product, hand jewellery, surface props. Do not invent. Do not describe shots beat by beat.
+6. FOREGROUND INVENTORY: when describing what to keep, briefly list the ACTUAL elements visible in the frames — clothing, product, hand jewellery, surface props. Do not invent. Do not re-describe the video shot by shot.
 7. ENVIRONMENT DENSITY: for the swap, be specific and visually rich — materials, colours, lighting tone, props, atmosphere. Never lazy ("luxurious room"). Write like "deep walnut wood panelled wall with brass accents, low-profile platform bed with cream linen, warm ambient pendant light, Persian rug on travertine floor". Density of specific visual elements produces better output.
 
 DEFENSIVE FRAMING — if the source is a potentially sensitive context (bathroom + water, intimate-coded setting) and a classifier might block generation, layer these in: "styled product showcase set" instead of "real bathroom"; "clothed reviewer's hand" instead of "a hand"; "well-lit ambient product display lighting" instead of "moody dim lighting"; "no person present in the set" where applicable. Drop romantic/intimate/spa/sensual vocabulary. The ownership clause already helps; these push it further.
@@ -655,9 +655,9 @@ STEP 1 — CLASSIFY THE SOURCE as exactly one of TWO lanes:
 This classification is INTERNAL — it only decides which realism layer Step 3 appends. Never print a lane name anywhere in the output. When genuinely torn, choose AUTHENTIC — polished-looking creator content is still phone-made far more often than it looks.
 
 STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject + Action + Environment + Camera + Lighting + Style. Rules:
-- 🪝 PRESERVE THE HOOK MECHANISM — do this FIRST, before describing anything else. The leading labelled frames are the source's 0-3s hook window in order. Work out WHY that opening stops a scroll: the MECHANISM, not the scenery. Common mechanisms: starting mid-action with no setup, an object or person entering frame unexpectedly, a reveal deliberately withheld, a direct look to lens, an implied question, a jarring visual pattern-interrupt, an on-screen text claim. Then rebuild THAT SAME mechanism as beat [0-2s] — same trigger, same timing, same thing withheld — dressed in the new subject and setting. Copying the source's setting while opening calmly throws away the one thing that made it work: a faithful-looking recreate with a dead first two seconds is the single most common way these fail. If the source opens on on-screen text, say so and carry an equivalent line.
-- 🎭 REACTION IS OFTEN THE HOOK — CONDITIONAL: study the frames for a BYSTANDER REACTION: someone in the scene visibly reacting to the subject — a head-turn, a double-take, an admiring or shocked glance, a person stopping to look. For "someone walks through a public place" content this reaction IS the viral payload (the fantasy is being noticed). If the source clearly has one, identify WHO reacts and HOW, and preserve that exact beat at the moment it occurs — e.g. "[2-4s]: a woman nearby turns her head to look back at [INFLUENCER] with a lingering admiring glance". Only include this when the source actually shows it; if there is no such reaction, do NOT invent one or add generic "bystanders staring" filler.
-- 🎯 DESCRIBE ONLY WHAT IS LITERALLY IN FRAME — never infer a comedic bit, a held product/prop, or a "can't-believe-this" gesture the frames do not plainly show. An arm raised to run a hand through the hair, or hands clasped behind the head, is a confident grooming/posture beat, NOT a head-grab, and there is no product in hand unless one is clearly visible. Inventing an action the source never had is worse than describing it plainly.
+- 🪝 PRESERVE THE HOOK MECHANISM — do this FIRST, before describing anything else. The leading labelled frames are the source's 0-3s hook window in order. Work out WHY that opening stops a scroll: the MECHANISM, not the scenery. Common mechanisms: starting mid-action with no setup, an object or person entering frame unexpectedly, a reveal deliberately withheld, a direct look to lens, an implied question, a jarring visual pattern-interrupt, an on-screen text claim. Then rebuild THAT SAME mechanism as the opening shot [0-2s] — same trigger, same timing, same thing withheld — dressed in the new subject and setting. Copying the source's setting while opening calmly throws away the one thing that made it work: a faithful-looking recreate with a dead first two seconds is the single most common way these fail. If the source opens on on-screen text, say so and carry an equivalent line.
+- 🎭 REACTION IS OFTEN THE HOOK — CONDITIONAL: study the frames for a BYSTANDER REACTION: someone in the scene visibly reacting to the subject — a head-turn, a double-take, an admiring or shocked glance, a person stopping to look. For "someone walks through a public place" content this reaction IS the viral payload (the fantasy is being noticed). If the source clearly has one, identify WHO reacts and HOW, and preserve that exact shot at the moment it occurs — e.g. "[2-4s]: a woman nearby turns her head to look back at [INFLUENCER] with a lingering admiring glance". Only include this when the source actually shows it; if there is no such reaction, do NOT invent one or add generic "bystanders staring" filler.
+- 🎯 DESCRIBE ONLY WHAT IS LITERALLY IN FRAME — never infer a comedic bit, a held product/prop, or a "can't-believe-this" gesture the frames do not plainly show. An arm raised to run a hand through the hair, or hands clasped behind the head, is a confident grooming gesture, NOT a head-grab, and there is no product in hand unless one is clearly visible. Inventing an action the source never had is worse than describing it plainly.
 - Open with a short capture-style scaffold as the very first clause — plain language matching the Step 1 lane, but never the lane word itself and never aspect ratio or duration (the tool sets 9:16 and clip length separately). E.g. "Handheld phone selfie capture:" or "Cinema camera capture:". Never bury this mid-prompt
 - Use [INFLUENCER] as the person placeholder — do NOT describe physical appearance (no hair color, eye color, skin tone, height, build — reference photos handle that)
 - Describe outfit, action, environment, mood, shot progression
@@ -665,14 +665,14 @@ STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject +
 - Keep camera movement and subject movement in SEPARATE clauses — mixing them in one clause is Seedance's most common documented failure mode
 - Name specific lighting direction and quality, and make it slightly imperfect — real light is uneven ("warm window light from the left, slightly hot on one cheek, soft shadow falloff to the right" beats "natural lighting")
 - Ground the scene in a lived-in world: one or two ordinary specific details (a half-empty glass on the counter, a jacket over the chair, a slightly crooked picture frame) beat a clean empty backdrop — real rooms are never perfectly tidy or symmetric
-- If any beat shows hands touching an object (phone, cup, product, fabric), anchor the hand explicitly to it (e.g. "fingers grip the phone case") — free-floating hand descriptions are the most common cause of hand artifacts
-- Use timestamp beats for shot progression: [0-2s]: opening beat. [2-5s]: main action. Keep each beat to 1-2 sentences. Weave natural involuntary human motion through the beats: a soft slightly-uneven blink (never metronomic), a visible breath with gentle shoulder rise, a glance at something specific then back (gaze always has a destination — a locked dead-center stare renders as frozen and glassy), a small weight shift or self-adjustment (brushing a strand of hair back, tugging a sleeve). Different body parts move on slightly different timing — overlapping, never synchronized
-- If the person walks in any beat, describe real gait mechanics: heel-to-toe footsteps with weight shifting onto each leg, arms swinging opposite the legs, head staying level — never a gliding or floating walk
+- If any shot shows hands touching an object (phone, cup, product, fabric), anchor the hand explicitly to it (e.g. "fingers grip the phone case") — free-floating hand descriptions are the most common cause of hand artifacts
+- Break the action into timestamped shots in sequence: [0-2s]: opening shot. [2-5s]: main action. Keep each shot to 1-2 sentences. Weave natural involuntary human motion through the shots: a soft slightly-uneven blink (never metronomic), a visible breath with gentle shoulder rise, a glance at something specific then back (gaze always has a destination — a locked dead-center stare renders as frozen and glassy), a small weight shift or self-adjustment (brushing a strand of hair back, tugging a sleeve). Different body parts move on slightly different timing — overlapping, never synchronized
+- If the person walks in any shot, describe real gait mechanics: heel-to-toe footsteps with weight shifting onto each leg, arms swinging opposite the legs, head staying level — never a gliding or floating walk
 - Target 60-100 words total for the base prompt. Never exceed 150 words — Seedance ignores details beyond that.
 
 STEP 3 — DO NOT append any realism layer, camera-quality block, fps mention, or avoid-list yourself.
 ALSO BANNED ANYWHERE IN THE PROMPT, not just the opening clause:
-  (a) aspect ratio, resolution or duration in ANY form — no "9:16", no "vertical", no "1080p", no "8 seconds total", no "[0-2s]"-style totals at the end. The tool sets the format and the clip length separately, so any figure you write is either ignored or actively contradicts the real setting. Timestamped BEATS inside the action are fine and wanted; a stated total duration or frame format is not.
+  (a) aspect ratio, resolution or duration in ANY form — no "9:16", no "vertical", no "1080p", no "8 seconds total", no "[0-2s]"-style totals at the end. The tool sets the format and the clip length separately, so any figure you write is either ignored or actively contradicts the real setting. Timestamped SHOTS inside the action (e.g. [0-2s], [2-5s]) are fine and wanted; a stated total duration or frame format is not.
   (b) the person's physical appearance — no hair colour or length, eye colour, skin tone, age, height, build, ethnicity or tattoos. The user swaps in their own AI Influencer whose look is set by reference photos, and references beat prompt text on anything they depict, so a description of the SOURCE person can only fight those references. Write [INFLUENCER] and describe what they DO and WEAR, never what they look like. The server appends the lane's realism layer in code (so the user can switch lanes afterwards). Your base prompt must not duplicate that content — never write sensor noise / film grain lines, and never demand "sharp clarity" or "stable picture". There is deliberately NO avoid-list any more: do not write "avoid ..." lines of your own either. Every word you spend is a word inside a ~150-word attention budget, so spend them on the hook, the action and the light.
 
 OUTPUT FORMAT — exactly this, nothing else:
