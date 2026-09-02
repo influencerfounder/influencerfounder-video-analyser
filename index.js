@@ -244,7 +244,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.12.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.13.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -274,10 +274,10 @@ app.post('/api/clone', async (req, res) => {
     const { videoUrl, locationId, kieApiKey, mode, bgBrief, hookReport } = req.body;
     // Recreate prompt style (Mike's A/B, 2026-09-02). 'original' = the exact
     // May 2026 director method (recreate the video 1:1, swap the person; NO realism
-    // layer) — the DEFAULT, as it predates the reach decline. 'faithful' = the scaffolded
-    // builder covering the FULL shot sequence + reactions (~150w). The old condensing arm is
-    // FULLY REMOVED — condensing a proven viral video was the viral-cliff cause.
-    const promptStyle = ['original','faithful'].includes(req.body.promptStyle) ? req.body.promptStyle : 'original';
+    // layer) — the DEFAULT, exactly the May 1:1 method that predates the reach decline. 'realism' =
+    // the SAME May 1:1 prompt with the lane realism layer appended (authentic/high-end auto-classified).
+    // The July scaffolded/condensing builder is fully removed — it was the suspected viral-cliff cause.
+    const promptStyle = ['original','realism'].includes(req.body.promptStyle) ? req.body.promptStyle : 'original';
     const isBgSwap = mode === 'bgswap';
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
@@ -733,22 +733,25 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // Wan's conventions and sabotage the very comparison — so the model word is
     // neutralised to "video". Everything else is the May instruction word-for-word.
     const ORIGINAL_CLONE_SYSTEM = 'You are a video director. Study these frames and transcript carefully and create a video prompt that recreates this EXACT video 1:1 — same scene, camera angle, lighting, composition, energy, movement, clothing style. Replace the original creator with [INFLUENCER]. Return only the prompt text, no JSON, no explanation.';
+    // 'realism' = the EXACT May 1:1 prompt (same body/user message as 'original') with the lane realism
+    // layer appended — the ONLY difference from 'original'. A LANE line is added so authentic vs high-end
+    // is auto-classified per video; the server strips that line and appends LANE_LAYERS[lane].
+    const REALISM_CLONE_SYSTEM = ORIGINAL_CLONE_SYSTEM.replace('Return only the prompt text, no JSON, no explanation.', 'FIRST output a single line — exactly "LANE: AUTHENTIC" if the source looks phone-shot / UGC / handheld, or "LANE: HIGH-END" if it looks cinematic / professionally lit / polished. Then a blank line, then only the prompt text (no JSON, no explanation, and never mention the lane again inside the prompt).');
     const originalUserText = transcript
       ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the video prompt.`
       : `These ${frameBase64s.length} frames were extracted from the viral video (no audio). Create the video prompt.`;
-    // The condensing recreate builder that ran from 17 Jun through the viral cliff is FULLY REMOVED —
-    // a recreate models the source as closely as possible, never condensed. The base prompt now covers the
-    // full sequence by construction, so 'faithful' uses it directly.
-    const scaffoldedSystem = systemPrompt;
+    // Both recreate arms use the verbatim May 1:1 director body. 'realism' only adds the LANE line
+    // (so the server can append the realism layer). The July scaffolded/timestamped builder is gone
+    // from the recreate path entirely — its condensing/re-engineering was the suspected viral-cliff cause.
     const sysFinal = isBgSwap ? BG_SWAP_SYSTEM
-      : promptStyle === 'original' ? ORIGINAL_CLONE_SYSTEM
-      : scaffoldedSystem;
+      : promptStyle === 'realism' ? REALISM_CLONE_SYSTEM
+      : ORIGINAL_CLONE_SYSTEM;
     const userFinal = isBgSwap
       ? `These ${frameBase64s.length} frames were extracted from my own source video. `
         + `Its exact duration is ${Math.round(duration * 10) / 10} seconds — use this figure, do not estimate.\n\n`
         + `The background change I want: ${String(bgBrief || '').trim() || '(none specified — ask one clarifying question in the ANALYSIS instead of guessing)'}`
-      : promptStyle === 'original' ? originalUserText   // May had no hook report — keep it verbatim
-      : userText + hookBlock;   // hookBlock is clone-flow only — bgswap keeps the user's own source, so its hook is already theirs
+      : originalUserText;   // both 'original' and 'realism' use the verbatim May user message — the only
+                            // difference between them is the realism layer, appended below for 'realism'
     const maxTok = isBgSwap ? 2600 : 1000;
 
     let claudeResponse;
@@ -830,7 +833,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       talkingHead = talkMatch[1].toUpperCase() === 'YES';
       basePrompt = basePrompt.slice(talkMatch[0].length).trim();
     }
-    const clonePrompt = promptStyle === 'original' ? basePrompt : `${basePrompt} ${LANE_LAYERS[lane]}`;
+    const clonePrompt = promptStyle === 'realism' ? `${basePrompt} ${LANE_LAYERS[lane]}` : basePrompt;
 
     res.json({
       success: true,
