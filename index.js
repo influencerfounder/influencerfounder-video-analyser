@@ -244,7 +244,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.10.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.11.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -274,9 +274,9 @@ app.post('/api/clone', async (req, res) => {
     const { videoUrl, locationId, kieApiKey, mode, bgBrief, hookReport } = req.body;
     // Recreate prompt style (Mike's A/B, 2026-09-02). 'original' = the exact
     // May 2026 director method (recreate the video 1:1, swap the person; NO realism
-    // layer) — the DEFAULT for now, as it predates the reach decline. 'optimized' =
-    // the current hook-theory / 60-100-word builder. 'faithful' = optimized but the
-    // word cap lifted so the FULL shot sequence + reactions are transcribed.
+    // layer) — the DEFAULT, as it predates the reach decline. 'faithful' = the scaffolded
+    // builder covering the FULL shot sequence + reactions (~150w). 'optimized' (60-100w
+    // condensing) is RETIRED — kept in the whitelist for back-compat but mapped to faithful.
     const promptStyle = ['original','optimized','faithful'].includes(req.body.promptStyle) ? req.body.promptStyle : 'original';
     const isBgSwap = mode === 'bgswap';
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
@@ -739,12 +739,13 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // 'faithful' = the optimized builder with only the word-budget rule swapped.
     const FAITHFUL_WORD_RULE = '- Cover the FULL sequence of the video start to finish — every distinct shot and every notable reaction, in order, not just the hook plus one main action. Do not compress or drop moments to save words. Stay within ~150 words (Seedance\'s attention ceiling), but spend them on faithfully covering the whole clip.';
     const OPTIMIZED_WORD_RULE = '- Target 60-100 words total for the base prompt. Never exceed 150 words — Seedance ignores details beyond that.';
-    const optimizedOrFaithfulSystem = promptStyle === 'faithful'
-      ? systemPrompt.replace(OPTIMIZED_WORD_RULE, FAITHFUL_WORD_RULE)
-      : systemPrompt;
+    // 'optimized' (the 60-100-word condensing builder, live since 17 Jun) is RETIRED for recreates —
+    // condensing a proven viral video drops its later shots + reaction beat (the suspected viral-cliff cause).
+    // The scaffolded path now ALWAYS covers the full sequence; a stale page sending 'optimized' is safe.
+    const scaffoldedSystem = systemPrompt.replace(OPTIMIZED_WORD_RULE, FAITHFUL_WORD_RULE);
     const sysFinal = isBgSwap ? BG_SWAP_SYSTEM
       : promptStyle === 'original' ? ORIGINAL_CLONE_SYSTEM
-      : optimizedOrFaithfulSystem;
+      : scaffoldedSystem;
     const userFinal = isBgSwap
       ? `These ${frameBase64s.length} frames were extracted from my own source video. `
         + `Its exact duration is ${Math.round(duration * 10) / 10} seconds — use this figure, do not estimate.\n\n`
