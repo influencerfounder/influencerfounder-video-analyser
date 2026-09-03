@@ -244,7 +244,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.19.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.20.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -857,7 +857,13 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // Improve mode already emits timestamped shots, so this only applies to the 1:1 arms.
     // Deliberately self-limiting: it tells the model to invent NO cuts when the source is one take,
     // so a wrongly-ticked box degrades to the current behaviour rather than fabricating a cut.
-    const SHOT_CUTS_RULE = 'SHOT CUTS ARE ON. Mirror the cut structure of the source video. Study the frames for changes of camera setup, framing or angle, and write the action as timestamped shots — [0-2s]: opening shot. [2-4s]: next shot. — one entry per distinct shot you can actually see, in the order they appear. Put that shot list at the TOP of the prompt, before the scene, lighting and realism description, and keep each shot to one or two sentences. Write ONLY the cuts the source genuinely has: if the frames show a single continuous take, describe it as one continuous shot and do NOT invent cuts. Do not state any total duration.';
+    // The shot list must fit the clip we will ACTUALLY generate, not the source's runtime:
+    // measured 2026-09-03, a 42s source produced shots out to [32-42s], which no clip we can
+    // make would ever reach — an instruction that cannot execute is the same dead weight this
+    // feature exists to remove. recommendRecreateSpec is the single source of truth for that
+    // length (the worker and the desktop tab both consume it), so the bound cannot drift.
+    const shotTarget = recommendRecreateSpec(duration).recommendedDuration;
+    const SHOT_CUTS_RULE = `SHOT CUTS ARE ON. Mirror the cut structure of the source video, compressed to fit a ${shotTarget}-second clip. Study the frames for changes of camera setup, framing or angle, and write the action as timestamped shots — [0-2s]: opening shot. [2-4s]: next shot. — one entry per distinct shot you can actually see, in the order they appear. The LAST timestamp must not exceed ${shotTarget}s: if the source runs longer than that, keep the shots that carry the story and drop the rest rather than stretching past the limit. Put that shot list at the TOP of the prompt, before the scene, lighting and realism description, and keep each shot to one or two sentences. Write ONLY the cuts the source genuinely has: if the frames show a single continuous take, describe it as one continuous shot and do NOT invent cuts. Never write a total duration as prose (no "42 seconds") — the shot timestamps are the only timing you state.`;
     const sysSend = (shotCuts && !isBgSwap && promptStyle !== 'improve')
       ? sysFinal + '\n\n' + SHOT_CUTS_RULE
       : sysFinal;
