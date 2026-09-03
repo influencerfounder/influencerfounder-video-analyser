@@ -266,7 +266,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.22.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.23.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -2970,6 +2970,11 @@ app.post('/api/extract-audio', async (req, res) => {
 app.post('/api/extract-frames', async (req, res) => {
   const { videoUrl } = req.body || {};
   const count = Math.min(5, Math.max(1, parseInt(req.body?.count) || 3));
+  // Optional exact timestamps (max 16) — the Studio's day-storyline writer asks for the frame at
+  // the MIDPOINT of each shot's window in the cut reel, so Claude describes the picture that is
+  // genuinely on screen for that shot rather than an evenly-spaced sample that may straddle a cut.
+  const wantStamps = Array.isArray(req.body?.timestamps)
+    ? req.body.timestamps.map(Number).filter(n => Number.isFinite(n) && n >= 0).slice(0, 16) : null;
   if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'frames-'));
@@ -2982,9 +2987,15 @@ app.post('/api/extract-frames', async (req, res) => {
     // Sample strictly INSIDE the clip: the first and last frames of a first-frame-anchored
     // video are the least informative (frame 1 is the anchor we already checked).
     const stamps = [];
-    for (let i = 0; i < count; i++) {
-      const frac = (i + 1) / (count + 1);
-      stamps.push(Math.max(0.05, (dur > 0.2 ? dur : 1) * frac));
+    if (wantStamps && wantStamps.length) {
+      // clamp inside the clip — a stamp past the end yields no frame at all
+      const lim = dur > 0.2 ? dur - 0.05 : 1;
+      wantStamps.forEach(t => stamps.push(Math.max(0.05, Math.min(lim, t))));
+    } else {
+      for (let i = 0; i < count; i++) {
+        const frac = (i + 1) / (count + 1);
+        stamps.push(Math.max(0.05, (dur > 0.2 ? dur : 1) * frac));
+      }
     }
 
     const frames = [];
