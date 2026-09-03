@@ -41,7 +41,20 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
   }
 
   const item = Array.isArray(items) ? items[0] : null;
-  const remoteVideoUrl = item?.downloadedVideo || item?.videoUrl;
+  // ORDER MATTERS — MEASURED 2026-09-03 on the @charliewelham_ reel (DWQbxq4CV6_):
+  //   videoUrl        = Instagram's own progressive file  → 720x1280 h264 @ 1033 kb/s
+  //   downloadedVideo = Apify's re-hosted copy             → 540x960  VP9  @  226 kb/s
+  // The old `downloadedVideo || videoUrl` preference fed the analyser the DEGRADED
+  // copy on every Instagram analysis: 4.6x lower bitrate and 1.8x fewer pixels,
+  // which is where fine one-second actions (a perfume spray, a hand through hair)
+  // smear into nothing before Claude ever sees them. The direct CDN URL fetches
+  // fine from a server with no headers (200, measured). downloadedVideo stays as
+  // the FALLBACK only — its one job is to still return a file if the CDN URL is
+  // missing or refuses. 1080p is NOT obtainable this way: Instagram serves the
+  // 1080 rendition only via the logged-in DASH manifest, which Apify does not
+  // expose (originalWidth/Height report 1080x1920 but no 1080 URL is returned).
+  const candidates = [item?.videoUrl, item?.downloadedVideo].filter(Boolean);
+  const remoteVideoUrl = candidates[0];
   if (!remoteVideoUrl) {
     // Apify distinguishes a DELETED post from one that merely is not publicly
     // readable, and that difference is invisible everywhere else: Instagram's
@@ -79,12 +92,21 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
     throw err;
   }
 
-  const videoRes = await axios.get(remoteVideoUrl, {
-    responseType: 'arraybuffer',
-    timeout: 60000,
-    maxContentLength: 200 * 1024 * 1024,
-  });
-  fs.writeFileSync(outputPath, Buffer.from(videoRes.data));
+  let videoBuf = null, lastErr = null;
+  for (const u of candidates) {
+    try {
+      const videoRes = await axios.get(u, {
+        responseType: 'arraybuffer',
+        timeout: 60000,
+        maxContentLength: 200 * 1024 * 1024,
+      });
+      videoBuf = Buffer.from(videoRes.data);
+      if (u !== candidates[0]) console.warn('[clone] direct CDN videoUrl failed, fell back to Apify downloadedVideo (lower quality)');
+      break;
+    } catch (e) { lastErr = e; }
+  }
+  if (!videoBuf) throw new Error('Instagram video download failed: ' + (lastErr?.message || 'no candidate URL fetched'));
+  fs.writeFileSync(outputPath, videoBuf);
 
   // Music metadata — field names PROBED against the live actor 2026-09-01 (the
   // 2026-08-31 lesson: write-ups lie about this actor family's schemas). Items
@@ -244,7 +266,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.21.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.22.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -428,8 +450,19 @@ app.post('/api/clone', async (req, res) => {
     const ANALYSIS_FRAME_COUNT = 80;
     const fps = Math.min(8.0, ANALYSIS_FRAME_COUNT / Math.max(duration, 0.1));
 
-    // opts.width/opts.qv: analysis frames stay 640/q5 (Claude vision needs no more and
-    // 80 of them go into the prompt) — but frames RETURNED to the client double as
+    // ANALYSIS FRAME QUALITY (raised 2026-09-03): 640px/q5 → native width capped at
+    // 800px (never upscaled — a 720p source stays 720) at q:v 2. Anthropic downsamples
+    // anything past ~1.15MP (≈800x1422 at 9:16), so 800 is the ceiling that still
+    // reaches the model unchanged; q:v 5 was visibly blurring exactly the fine detail
+    // (spray mist, a small bottle in a hand) that a 1-second action lives in. PNG was
+    // considered and rejected: it earns zero extra tokens/detail past this point and
+    // is 3–5x the bytes, which at 80 frames would breach the 32MB request cap.
+    // Cost: ~1230 tokens/frame at 720x1280 vs ~970 at 640 → roughly +$0.07–0.14 per
+    // owner analysis on Sonnet; Kie student path unchanged at 20 frames.
+    const ANALYSIS_SCALE = "scale='min(800,iw)':-2";
+    const ANALYSIS_QV = 2;
+    // opts.width/opts.qv: analysis frames use ANALYSIS_SCALE/ANALYSIS_QV (see above)
+    // — but frames RETURNED to the client double as
     // GENERATION inputs (the filmstrip anchor, the recreate worker's scene frame, the
     // custom-first-frame scene reference), and a 640px q5 JPEG as the source of truth
     // for an anchored generation was a real quality ceiling (found 2026-08-25).
@@ -438,8 +471,8 @@ app.post('/api/clone', async (req, res) => {
         .seekInput(ts)
         .outputOptions([
           '-vframes 1',
-          `-q:v ${opts.qv || 5}`,
-          `-vf scale=${opts.width || 640}:-1`,
+          `-q:v ${opts.qv || ANALYSIS_QV}`,
+          `-vf ${opts.width ? `scale=${opts.width}:-1` : ANALYSIS_SCALE}`,
           '-threads 1'        // single-threaded = predictable low RAM per ffmpeg call
         ])
         .output(outPath)
@@ -451,9 +484,9 @@ app.post('/api/clone', async (req, res) => {
     await new Promise((resolve, reject) => {
       ffmpeg(videoPath)
         .outputOptions([
-          `-vf fps=${fps},scale=640:-1`,
+          `-vf fps=${fps},${ANALYSIS_SCALE}`,
           '-frames:v', String(ANALYSIS_FRAME_COUNT),
-          '-q:v 5',
+          `-q:v ${ANALYSIS_QV}`,
           '-threads 1'
         ])
         .output(path.join(framesDir, 'frame-%03d.jpg'))
