@@ -244,7 +244,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.18.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.19.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -300,6 +300,8 @@ app.post('/api/clone', async (req, res) => {
     // NOT to copy the source but to make a stronger version of it, optionally steered by improveBrief.
     const promptStyle = ['original','realism','improve'].includes(req.body.promptStyle) ? req.body.promptStyle : 'original';
     const improveBrief = String(req.body.improveBrief || '').slice(0, 600).trim();
+    // ✂️ Shot Cuts (opt-in, 2026-09-03) — see SHOT_CUTS_RULE below for why this exists.
+    const shotCuts = req.body.shotCuts === true;
     const isBgSwap = mode === 'bgswap';
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
@@ -847,6 +849,18 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       : promptStyle === 'improve' ? systemPrompt          // the scaffolded/hook-optimised builder, used to IMPROVE (not copy)
       : promptStyle === 'realism' ? REALISM_CLONE_SYSTEM
       : ORIGINAL_CLONE_SYSTEM;
+    // ✂️ SHOT CUTS — a flat-prose 1:1 prompt renders as ONE continuous camera move even when the
+    // source cuts between setups: measured 2026-09-03, a source with 4 real cuts produced an output
+    // with 0, because the cut structure sat in prose at ~word 370 of a 412-word prompt and Seedance
+    // reads roughly the first 150 words with full attention. Timestamped shots put the structure where
+    // it IS read. Lives in the SYSTEM prompt on purpose: it costs the GENERATED prompt zero words.
+    // Improve mode already emits timestamped shots, so this only applies to the 1:1 arms.
+    // Deliberately self-limiting: it tells the model to invent NO cuts when the source is one take,
+    // so a wrongly-ticked box degrades to the current behaviour rather than fabricating a cut.
+    const SHOT_CUTS_RULE = 'SHOT CUTS ARE ON. Mirror the cut structure of the source video. Study the frames for changes of camera setup, framing or angle, and write the action as timestamped shots — [0-2s]: opening shot. [2-4s]: next shot. — one entry per distinct shot you can actually see, in the order they appear. Put that shot list at the TOP of the prompt, before the scene, lighting and realism description, and keep each shot to one or two sentences. Write ONLY the cuts the source genuinely has: if the frames show a single continuous take, describe it as one continuous shot and do NOT invent cuts. Do not state any total duration.';
+    const sysSend = (shotCuts && !isBgSwap && promptStyle !== 'improve')
+      ? sysFinal + '\n\n' + SHOT_CUTS_RULE
+      : sysFinal;
     const userFinal = isBgSwap
       ? `These ${frameBase64s.length} frames were extracted from my own source video. `
         + `Its exact duration is ${Math.round(duration * 10) / 10} seconds — use this figure, do not estimate.\n\n`
@@ -878,12 +892,12 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         : Array.from({ length: n }, (_, i) => imageContent[Math.round(i * (imageContent.length - 1) / (n - 1))]);
       const note = n < imageContent.length ? ` (${n} representative frames shown, evenly sampled from the full clip.)` : '';
       claudeResponse = await axios.post('https://api.kie.ai/claude/v1/messages', {
-        model: 'claude-sonnet-5', max_tokens: maxTok, system: sysFinal,
+        model: 'claude-sonnet-5', max_tokens: maxTok, system: sysSend,
         messages: [{ role: 'user', content: [...hookContent, ...subset, { type: 'text', text: userFinal + note }] }]
       }, { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' }, timeout: 80000 });
     } else {
       claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
-        model: 'claude-sonnet-4-6', max_tokens: maxTok, system: sysFinal,
+        model: 'claude-sonnet-4-6', max_tokens: maxTok, system: sysSend,
         messages: [{ role: 'user', content: [...hookContent, ...imageContent, { type: 'text', text: userFinal }] }]
       }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
     }
@@ -988,6 +1002,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
       sourceAudio,
       promptStyle,
+      shotCuts: !!(shotCuts && !isBgSwap && promptStyle !== 'improve'),
       viralReport,
       viralDrivers: VIRAL_DRIVERS,
       clonePrompt
