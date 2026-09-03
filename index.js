@@ -244,7 +244,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.20.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.21.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -302,6 +302,11 @@ app.post('/api/clone', async (req, res) => {
     const improveBrief = String(req.body.improveBrief || '').slice(0, 600).trim();
     // ✂️ Shot Cuts (opt-in, 2026-09-03) — see SHOT_CUTS_RULE below for why this exists.
     const shotCuts = req.body.shotCuts === true;
+    // The analyser has never known WHO the recreate is for, so every prompt said they/them —
+    // and the pronoun correction only arrived as a clause appended at generation time, past
+    // Seedance's ~150-word attention window. Whitelisted, and absent/unknown stays they/them
+    // (the standing rule: never guess a gender, never fall back to a default one).
+    const personaGender = ['male', 'female'].includes(req.body.personaGender) ? req.body.personaGender : null;
     const isBgSwap = mode === 'bgswap';
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
@@ -864,9 +869,19 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // length (the worker and the desktop tab both consume it), so the bound cannot drift.
     const shotTarget = recommendRecreateSpec(duration).recommendedDuration;
     const SHOT_CUTS_RULE = `SHOT CUTS ARE ON. Mirror the cut structure of the source video, compressed to fit a ${shotTarget}-second clip. Study the frames for changes of camera setup, framing or angle, and write the action as timestamped shots — [0-2s]: opening shot. [2-4s]: next shot. — one entry per distinct shot you can actually see, in the order they appear. The LAST timestamp must not exceed ${shotTarget}s: if the source runs longer than that, keep the shots that carry the story and drop the rest rather than stretching past the limit. Put that shot list at the TOP of the prompt, before the scene, lighting and realism description, and keep each shot to one or two sentences. Write ONLY the cuts the source genuinely has: if the frames show a single continuous take, describe it as one continuous shot and do NOT invent cuts. Never write a total duration as prose (no "42 seconds") — the shot timestamps are the only timing you state.`;
-    const sysSend = (shotCuts && !isBgSwap && promptStyle !== 'improve')
-      ? sysFinal + '\n\n' + SHOT_CUTS_RULE
-      : sysFinal;
+    // ⚧ PRONOUNS — grammar only. Stated explicitly as grammar because naming a gender is exactly
+    // what invites "a bearded man with dark hair" back into the prompt, which references already
+    // decide and which we banned on 2026-09-03.
+    const PRONOUN_RULE = personaGender === 'male'
+      ? 'PRONOUNS: refer to [INFLUENCER] with he/him/his throughout — never they/them. This is a GRAMMAR instruction only and does NOT license describing how he looks: the ban on hair, beard or facial hair, build, skin tone, age, ethnicity and tattoos still applies in full.'
+      : personaGender === 'female'
+      ? 'PRONOUNS: refer to [INFLUENCER] with she/her/hers throughout — never they/them. This is a GRAMMAR instruction only and does NOT license describing how she looks: the ban on hair, build, skin tone, age, ethnicity and tattoos still applies in full.'
+      : '';
+    const sysSend = [
+      sysFinal,
+      (shotCuts && !isBgSwap && promptStyle !== 'improve') ? SHOT_CUTS_RULE : '',
+      (PRONOUN_RULE && !isBgSwap) ? PRONOUN_RULE : '',
+    ].filter(Boolean).join('\n\n');
     const userFinal = isBgSwap
       ? `These ${frameBase64s.length} frames were extracted from my own source video. `
         + `Its exact duration is ${Math.round(duration * 10) / 10} seconds — use this figure, do not estimate.\n\n`
@@ -1009,6 +1024,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       sourceAudio,
       promptStyle,
       shotCuts: !!(shotCuts && !isBgSwap && promptStyle !== 'improve'),
+      personaGender: (PRONOUN_RULE && !isBgSwap) ? personaGender : null,
       viralReport,
       viralDrivers: VIRAL_DRIVERS,
       clonePrompt
