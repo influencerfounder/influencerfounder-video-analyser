@@ -86,7 +86,10 @@ t('every field renders, and it says WHERE the mechanism goes', () => {
   ['MEASURED HOOK REPORT', 'mechanism: curiosity gap', 'scroll-stop grade: B',
    'opens mid-pour', 'sound off: YES', 'strong thumbnail'].forEach(x =>
     assert(r.hookBlock.includes(x), 'missing: ' + x));
-  assert(/beat \[0-2s\]/.test(r.hookBlock), 'must name the beat to rebuild');
+  // "shot", not "beat" — Mike's standing vocabulary rule (2026-09-02): "beat" is
+  // reserved for the music Beat Edit feature. The rename landed in the prompt and
+  // this assertion was not updated with it. Do not change it back.
+  assert(/shot \[0-2s\]/.test(r.hookBlock), 'must name the shot to rebuild');
 });
 t('mute_test:false asks for a VISUAL equivalent instead', () => {
   const r = run(HF, false, 80, { hook_type: 'bold claim', mute_test: { pass: false } });
@@ -113,9 +116,18 @@ t('LANE_SUFFIX no longer exists and nothing interpolates it', () => {
   assert(!/const LANE_SUFFIX/.test(LIVE), 'the constant is back');
   assert(!/\$\{LANE_SUFFIX\}/.test(LIVE), 'something still interpolates it');
 });
-t('the clone prompt is base + realism layer, full stop', () => {
-  assert(/const clonePrompt = `\$\{basePrompt\} \$\{LANE_LAYERS\[lane\]\}`;/.test(LIVE),
-    'clonePrompt assembly changed shape');
+t('the clone prompt is base, plus the realism layer only where it belongs', () => {
+  // promptStyle split the assembly three ways (2026-09-02, verified on real output):
+  // 'original' is the bare 1:1 May prompt with NO realism layer, while realism/improve
+  // append it. The invariant this guards is unchanged from 2026-08-31 — the layer is
+  // the ONLY thing appended, and the deleted LANE_SUFFIX tail never comes back.
+  const m = LIVE.match(/const clonePrompt = ([^\n]*);/);
+  assert(m, 'clonePrompt assembly not found — anchor drifted');
+  assert(/`\$\{basePrompt\} \$\{LANE_LAYERS\[lane\]\}`/.test(m[1]),
+    'the realism arm no longer appends exactly basePrompt + the lane layer');
+  assert(/:\s*basePrompt/.test(m[1]),
+    'the original arm no longer returns the bare base prompt');
+  assert(!/LANE_SUFFIX/.test(m[1]), 'the deleted tail is back in the assembly');
 });
 t('footwear / no-music / avoid-list exist ONLY in the tombstone', () => {
   ['Footwear fits the setting', 'No music —', 'Avoid jitter'].forEach(x =>
@@ -131,7 +143,14 @@ t('STEP 3 no longer promises a "negative suffix" it does not append', () => {
 t('the version marker was bumped (the free deploy signal)', () => {
   const m = SRC.match(/version: '(\d+\.\d+\.\d+)'/);
   assert(m, 'version field missing');
-  assert.strictEqual(m[1], '2.3.0', 'got ' + m[1]);
+  // Assert the marker exists and is at/past the version this feature shipped in —
+  // never pin an exact value. The point of the field is that it gets BUMPED on every
+  // deploy (the free proof a prompt-only Railway change actually landed), so an
+  // equality check is guaranteed to fail on the next one. It sat stale at 2.3.0
+  // while the service reached 2.26.0.
+  const cmp = (a, b) => { const x = a.split('.').map(Number), y = b.split('.').map(Number);
+    for (let i = 0; i < 3; i++) { if (x[i] !== y[i]) return x[i] - y[i]; } return 0; };
+  assert(cmp(m[1], '2.3.0') >= 0, 'version went backwards: ' + m[1]);
 });
 
 console.log('\n' + (fail ? 'x FAIL' : 'OK') + ' ' + pass + ' passed, ' + fail + ' failed');
