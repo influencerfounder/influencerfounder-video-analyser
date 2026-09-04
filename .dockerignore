@@ -1,0 +1,23 @@
+# ⚠️ SCOPE. This exists to keep the prompt-regression fixtures (test/promptreg/fixtures,
+# ~10MB of source mp4s) out of the Railway image. They are test inputs only — nothing in
+# index.js reads anything under test/.
+#
+# Cache cost: the Dockerfile does `COPY package*.json ./` → `npm ci` → `COPY . .`. Nothing
+# excluded here matches package*.json, so that layer's content is unchanged and the heavy
+# apt/python/insightface layers above it keep their cache. Only the final `COPY . .` is
+# invalidated, which is the cheapest layer in the file.
+#
+# ⚠️ node_modules is DELIBERATELY NOT excluded. It is committed to git in this repo (1303
+# files) and `COPY . .` runs AFTER `npm ci --omit=dev`, so the committed copy currently
+# overwrites part of the installed tree. Excluding it would change what production runs —
+# a separate decision that needs its own verification, not a side effect of this file.
+
+test/
+.git/
+.gitignore
+.env
+.env.*
+*.md
+tmp/
+*.log
+.DS_Store

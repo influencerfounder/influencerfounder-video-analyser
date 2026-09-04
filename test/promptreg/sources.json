@@ -1,0 +1,55 @@
+{
+  "_readme": "FIXED source set for the prompt regression suite. Each entry is a real video that represents a failure CLASS we have actually shipped a bug on. Do not remove one because it passes — a passing source is the proof a class is still safe. Add a source when a NEW class of failure is found in production.",
+  "_motionScale": "motion = mean frame-to-frame absolute difference, 64x112 grayscale, 0-255. Measured by build-fixtures.js from the local mp4. Real Instagram sources measured 2026-09-04 span 0.86 (a held shot) to 9.92 (a busy street).",
+  "sources": [
+    {
+      "slug": "cosanostra",
+      "url": "https://www.instagram.com/reel/DcWjQxoCmZR/",
+      "class": "low-motion held shot",
+      "personaGender": "male",
+      "why": "THE freeze case (2026-09-04). Subject stands by a car; the only real motion is a body crossing the lens in the foreground and a step down. The accuracy guard's 'keep background people incidental' had no lower bound, so the prompt came back demanding 'completely static ... nearly still' and the recreate rendered a 9s frozen frame (motion 0.149 vs the source's 0.862). This source exists to make that impossible to ship again."
+    },
+    {
+      "slug": "luisyoung",
+      "url": "https://www.instagram.com/reel/DYpSJhUNbRr/",
+      "class": "low-motion, second sample",
+      "personaGender": "male",
+      "why": "Second-lowest measured source. Guards against tuning the motion rules to cosanostra specifically — a fix that only works on one low-motion video is not a fix."
+    },
+    {
+      "slug": "mosaffari",
+      "url": "https://www.instagram.com/reel/DcXJQKbOtFa/",
+      "class": "mid-motion night exterior",
+      "personaGender": "male",
+      "why": "Sits in the middle of the measured range. Catches a rule that over-corrects — if a motion fix starts inventing action on a merely-calm source, it shows up here before it reaches the busy sources where extra motion hides."
+    },
+    {
+      "slug": "jayden_pav",
+      "url": "https://www.instagram.com/reel/DcTapZVN0dY/",
+      "class": "walk toward camera, high-end lane",
+      "personaGender": "male",
+      "why": "The control from 2026-09-04: same hour, same persona, same prompt build as the freeze case, and it came out fine (kept 63% of source motion vs 17%). It is the reference for what a healthy recreate looks like."
+    },
+    {
+      "slug": "mario_perozzi",
+      "url": "https://www.instagram.com/reel/DZZs7ERt7py/",
+      "class": "talking head, long (>15s), object in hand",
+      "personaGender": "male",
+      "why": "Three classes at once: real speech (transcript path + the talking-head flag), 21.6s so it crosses the >15s duration branch, and a product held in frame — the beat class the perfume-spray miss belonged to (2026-09-03)."
+    },
+    {
+      "slug": "charliewelham",
+      "url": "https://www.instagram.com/reel/DamIuoPTS0Y/",
+      "class": "busy public street, bystanders",
+      "personaGender": "male",
+      "why": "The video the ACCURACY OVER EMBELLISHMENT guard was written for (2026-09-02): the prompt was inflating one admiring glance into a phone-filming paparazzi crowd. Highest measured motion. If a future motion fix loosens that guard too far, the crowd filler comes back HERE first."
+    },
+    {
+      "slug": "chloemiraa",
+      "url": "https://www.instagram.com/reel/DcoEDu7yAmV/",
+      "class": "female persona",
+      "personaGender": "female",
+      "why": "The only female-persona source. Guards the PRONOUN rule (she/her, never they/them) and confirms the appearance ban holds on a female persona too."
+    }
+  ]
+}

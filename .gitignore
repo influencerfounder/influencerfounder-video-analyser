@@ -1,1 +1,7 @@
 .vercel
+
+# Prompt-regression suite: source mp4s are rebuildable (build-fixtures.js) and heavy (12MB).
+# The .json fixtures stay tracked -- they hold the pre-fix baseline prompts, which cannot be
+# recaptured once the fixed prompt is deployed.
+test/promptreg/fixtures/*.mp4
+test/promptreg/results/
