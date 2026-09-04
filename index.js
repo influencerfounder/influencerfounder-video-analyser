@@ -235,11 +235,35 @@ const app = express();
 // the LONGER (a 7.5s source -> 10s, never 5s). Seedance 2.0 offers 5/10/15s; a
 // source longer than 15s auto-switches to Seedance 2.5 (up to 30s) at the same
 // aspect ratio and resolution tier.
+// Recreate duration = the source's own length, rounded to the NEAREST second.
+// (Mike, 2026-09-04. Was: bucketed UP to 5/10/15.)
+//
+// WHY EXACT-LENGTH BEATS BUCKETING — it kills BOTH failure modes at once:
+//   • Padding -> SLOW MOTION. Bucketing up handed the model more time than the action
+//     needed (a ~7s source became a 10s clip), and Seedance fills spare time by slowing
+//     the motion down. That is what made recreates crawl. Prompt text alone does NOT
+//     stop it: a clip whose prompt literally said "real-time, no slow motion" still
+//     played slow at 10s, because duration is the dominant lever, not wording.
+//   • Truncation -> CUT CONTENT. Bucketing DOWN (the pre-2026-09-02 bug) chopped a
+//     7.5s source to 5s and lost a third of the video.
+// Matching the source exactly is short enough not to pad and long enough not to cut,
+// so it retires the whole round-up-vs-round-down tradeoff.
+//
+// [MEASURED 2026-09-04] Seedance honours ANY integer duration — it is a RANGE, not a
+// 5/10/15 enum. A real duration:7 generation returned a 7.04s clip. Do not re-bucket.
+// Floor 4 = Seedance's own minimum; ceiling 15 = Seedance 2.0's cap.
+// A source > 15s still switches to 2.5 at 30s (2.0 cannot go past 15).
 function recommendRecreateSpec(sourceSecs) {
   const sec = Number(sourceSecs) || 0;
-  if (sec > 15) return { recommendedDuration: 30, recommendedSpeedMode: 'v25' };
-  const recommendedDuration = sec <= 5 ? 5 : sec <= 10 ? 10 : 15;
-  return { recommendedDuration, recommendedSpeedMode: 'v20' };
+  // `|| 5` catches an unknown/zero source length (nothing to match, so use the default).
+  // Seedance's own floor is 4s.
+  const exact = Math.max(4, Math.round(sec) || 5);
+  // Past 15s only Seedance 2.5 can carry it (2.0 caps at 15). Run the SOURCE's length
+  // there too, not a flat 30 — a 16s source stretched into a 30s clip is the same
+  // padding-becomes-slow-motion bug at a different boundary. 30 is 2.5's hard ceiling,
+  // so a genuinely longer source is the one case where content still gets cut.
+  if (exact > 15) return { recommendedDuration: Math.min(30, exact), recommendedSpeedMode: 'v25' };
+  return { recommendedDuration: exact, recommendedSpeedMode: 'v20' };
 }
 const PORT = process.env.PORT || 3000;
 
@@ -266,7 +290,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.24.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.25.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
