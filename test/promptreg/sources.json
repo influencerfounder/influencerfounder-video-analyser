@@ -26,9 +26,9 @@
     {
       "slug": "jayden_pav",
       "url": "https://www.instagram.com/reel/DcTapZVN0dY/",
-      "class": "walk toward camera, high-end lane",
+      "class": "walk toward camera, high-end lane; SLOWED-DOWN source (slow-mo edit, 'Mega Slowed' track)",
       "personaGender": "male",
-      "why": "The control from 2026-09-04: same hour, same persona, same prompt build as the freeze case, and it came out fine (kept 63% of source motion vs 17%). It is the reference for what a healthy recreate looks like."
+      "why": "The control from 2026-09-04: same hour, same persona, same prompt build as the freeze case, and it came out fine (kept 63% of source motion vs 17%). It is the reference for what a healthy recreate looks like. ALSO the 2026-09-05 tempo case: the source is a slowed-down edit, and the prompt came back with 'slowly pulls the sunglasses down… deliberate, unhurried' — Seedance rendered that as playback slow motion at a length that already matched the source (9.97s → 10.04s). Guards the tempo-word ban."
     },
     {
       "slug": "mario_perozzi",

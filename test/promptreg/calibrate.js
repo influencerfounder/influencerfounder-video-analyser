@@ -32,18 +32,19 @@ for (const s of manifest.sources) {
     appearance: hit(RX.appearance), params: hit(RX.params), crowd: RX.findCrowdFiller(p),
     pronoun: RX.findWrongPronoun(p, s.personaGender || fx.personaGender),
     movement: RX.findMovement(p).map(h => h.verb), still: RX.findStillness(p).map(h => h.phrase), staticCam: hit(RX.staticCamera),
+    tempo: RX.findTempo(p).map(h => h.word),
   });
 }
 
 console.log('\nCALIBRATION — assertion patterns vs the CURRENT production prompts\n');
-console.log('slug             motion   dur   words  appear params crowd  pron   moves  STILL  staticCam');
+console.log('slug             motion   dur   words  appear params crowd  pron   moves  STILL  staticCam  TEMPO');
 console.log('─'.repeat(88));
 for (const r of rows) {
   if (r.missing) { console.log(`${r.slug.padEnd(16)} ${r.halfBuilt ? '<video + motion captured, ANALYSIS FAILED — re-run builder>' : '<fixture not built yet>'}`); continue; }
   const n = a => String(a.length).padStart(3);
   console.log(
     `${r.slug.padEnd(16)} ${String(r.motion).padStart(6)} ${String(r.dur).padStart(5)} ${String(r.words).padStart(6)}  ` +
-    `${n(r.appearance)}    ${n(r.params)}   ${n(r.crowd)}   ${n(r.pronoun)}   ${n(r.movement)}   ${n(r.still)}    ${n(r.staticCam)}`
+    `${n(r.appearance)}    ${n(r.params)}   ${n(r.crowd)}   ${n(r.pronoun)}   ${n(r.movement)}   ${n(r.still)}    ${n(r.staticCam)}      ${n(r.tempo)}`
   );
 }
 
@@ -57,6 +58,9 @@ for (const r of rows) {
   if (r.crowd.length)      bad.push(`  crowd      : ${JSON.stringify(r.crowd)}`);
   if (r.still.length)      bad.push(`  STILLNESS  : ${JSON.stringify(r.still)}`);
   if (r.staticCam.length)  bad.push(`  staticCam  : ${JSON.stringify(r.staticCam)} (informational)`);
+  // ⚠️ Baselines predate the 2026-09-05 tempo rule, so hits here are the OLD behaviour, not false
+  // positives — what matters is that none of them is a camera move (calibration of the exclusion).
+  if (r.tempo.length)      bad.push(`  TEMPO      : ${JSON.stringify(r.tempo)} (pre-rule baseline; must not be camera moves)`);
   if (!r.movement.length)  bad.push(`  ⚠ NO MOVEMENT DESCRIBED AT ALL`);
   if (bad.length) console.log(`\n${r.slug} (motion ${r.motion}):\n${bad.join('\n')}`);
 }

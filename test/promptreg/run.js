@@ -212,6 +212,14 @@ function check(prompt, fx) {
   // Camera-aware for the same reason movement is: "the camera holds still" is legitimate
   // and the system prompt explicitly allows it, so a raw match would fail a prompt for
   // obeying its own rule.
+  // ⭐ TEMPO (2026-09-05). Attribution-aware like the two above: "the camera slowly pushes in"
+  // is a legitimate lens move and is excluded; "he slowly pulls the sunglasses down" is the
+  // Paris failure — Seedance renders subject-tempo words as playback slow motion even when the
+  // clip length already matches the source. The banned list mirrors the system prompt 1:1.
+  const tempo = RX.findTempo(prompt).map(h => h.word);
+  t('no tempo words on the person', !tempo.length,
+    `tempo words attached to a person — renders as fake slow-motion playback: ${tempo.join(', ')}`);
+
   const still = RX.findStillness(prompt).map(h => h.phrase);
   t(`no stillness claim (source motion ${fx.motion})`, !still.length,
     `claims the subject holds still on a source that measurably moves: ${still.join(', ')}`);

@@ -130,6 +130,29 @@ module.exports = {
   // the lens, not the body.
   CAMERA_SUBJECT: /\b(?:the\s+)?(?:camera|lens|shot|clip|video|footage|frame)\b[^.]{0,40}\b(?:opens?|holds?|stays?|remains?|drifts?|pans?|tilts?|pushes?|moves?|begins?|starts?)\b/i,
 
+  // ⭐ G — TEMPO WORDS ON THE PERSON (added 2026-09-05, the Paris-recreate class).
+  //
+  // The failure: a slowed-down source (a "slowed" track, slow-mo edit) made the analyser write
+  // "slowly pulls the sunglasses down… a deliberate, unhurried pull-down… calm and unhurried",
+  // and Seedance rendered those words as PLAYBACK slow motion — the fake, floaty look — while the
+  // clip length matched the source exactly (9.97s → 10.04s). Duration was not the lever; the
+  // words were. The system prompt now bans this exact list for anyone in frame; this list MUST
+  // stay identical to the one quoted in ORIGINAL_CLONE_SYSTEM.
+  //
+  // ⚠️ CALIBRATION NOTE: the 7 stored baselines PREDATE this rule and 6 of them carry 1–2 hits
+  // (calibrate.js shows them). That is expected — they are the old behaviour, not false positives.
+  // ⚠️ "deliberate" (adjective) is NOT matched, on purpose: the first full run under the rule had
+  // Claude still writing "a short deliberate look" / "deliberate strokes" — intent, not tempo, and
+  // a slow LOOK described as "short" is the opposite of the failure. Only "deliberately" counts.
+  // The camera exclusion IS calibrated on them: "the camera slowly pushes in", "the camera slowly
+  // drifts in", "a slow push-in" must never count, because a slow LENS is legitimate.
+  tempo: /\b(?:slowly|slow|unhurried(?:ly)?|deliberately|lingering|lingers?|languid(?:ly)?|leisurely|gradual(?:ly)?|for\s+a\s+beat|dreamlike|slow[- ]motion|slowed(?:-down)?)\b/gi,
+  // A tempo word within ~45 chars of one of these describes the lens, not the body.
+  CAMERA_WORD: /\b(?:camera|lens|shot|frame|framing|focus|push-in|push|pan|pans|tilt|drift|drifts|zoom|dolly|rack|tracking)\b/i,
+  // A sentence has to be ABOUT people for a tempo word in it to be a subject-tempo claim; "the
+  // lantern light gradually…" is scenery.
+  PEOPLE: /\[INFLUENCER\]|\b(?:he|she|they|him|her|them|his|their|man|woman|person|people|figure|figures|exchange|conversation|gesture|hands?|head|body|arm|arms|fingers?)\b/i,
+
   // Informational only — a static camera alone is fine and often correct.
   staticCamera: [
     /\bcamera\s+(?:holds?|remains?|stays?)\s+(?:completely\s+)?static\b/i,
@@ -247,4 +270,30 @@ module.exports.findWrongPronoun = function (prompt, gender) {
   // side, so this rule's job is the mixed case, and a 3x lean is unambiguous.
   if (gendered > 0 && neutral < 3 * gendered) return [];
   return [`${neutral} they/them vs ${gendered} ${gender === 'male' ? 'he/him' : 'she/her'}`];
+};
+
+// Tempo words attributed to a PERSON (not the camera). Returns the genuine hits only.
+//
+// Same attribution discipline as findMovement: sentence-scoped, and a word is skipped when a
+// camera noun sits within 45 characters before it or 30 after ("the camera slowly drifts in",
+// "a slow push-in"). Negated sentences are skipped too — the prompt is allowed to SAY "never
+// slow motion" (the 2026-09-01 negation-matching trap).
+module.exports.findTempo = function (prompt) {
+  const M = module.exports;
+  const hits = [];
+  for (const raw of String(prompt || '').split(/(?<=[.!?])\s+|\s+—\s+|\n+/)) {
+    const sent = raw.trim();
+    if (!sent) continue;
+    if (!M.PEOPLE.test(sent)) continue;
+    if (M.NEGATION.test(sent)) continue;
+    const re = new RegExp(M.tempo.source, 'gi');
+    let m;
+    while ((m = re.exec(sent))) {
+      const before = sent.slice(Math.max(0, m.index - 45), m.index);
+      const after = sent.slice(m.index + m[0].length, m.index + m[0].length + 30);
+      if (M.CAMERA_WORD.test(before) || M.CAMERA_WORD.test(after)) continue;
+      hits.push({ word: m[0], sentence: sent.slice(0, 90) });
+    }
+  }
+  return hits;
 };
