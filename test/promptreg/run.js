@@ -69,7 +69,12 @@ if (!Array.isArray(HOOK_TS)) throw new Error('could not read the hook-frame time
 /* ───────────────────────── api key (never printed) ──────────────────────────────────────── */
 function anthropicKey() {
   if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
-  for (const f of [path.join(DIR, '..', '..', '.env'), path.join(os.homedir(), 'influencerfounder-service', '.env')]) {
+  for (const f of [
+    path.join(DIR, '..', '..', '.env'),
+    path.join(DIR, '..', '..', '..', 'InfluencerFounder-tool', '.env'),
+    path.join(os.homedir(), 'Claude Code', 'InfluencerFounder', 'InfluencerFounder-tool', '.env'),
+    path.join(os.homedir(), 'influencerfounder-service', '.env'),
+  ]) {
     try {
       const m = fs.readFileSync(f, 'utf8').match(/^ANTHROPIC_API_KEY\s*=\s*"?([^"\n\r]+)"?/m);
       if (m) return m[1].trim();
@@ -172,6 +177,11 @@ function check(prompt, fx) {
   // this one word is safe (the real 2026-09-02 failure trips 3 other patterns).
   const crowd = RX.findCrowdFiller(prompt);
   t('no crowd/paparazzi filler', !crowd.length, `invented crowd attention: ${crowd.join(', ')}`);
+
+  // A locked camera is legitimate; INSISTING on it is the Larnaca failure — the prompt spends
+  // words teaching the model to nail the lens down, and the source's push-in is lost.
+  const camDeny = hit(RX.cameraDenial);
+  t('no emphatic camera-movement denial', !camDeny.length, `insists the camera cannot move: ${camDeny.join(', ')}`);
 
   const words = prompt.split(/\s+/).filter(Boolean).length;
   // Collapse detector, NOT a style rule -- and it is DURATION-RELATIVE because a flat band is

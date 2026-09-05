@@ -95,6 +95,27 @@ module.exports = {
     /\bmoves?\s+(?:toward|forward|closer|past|through|across)\b/i,
   ],
 
+  // ⭐ H — CAMERA-MOVEMENT DENIAL (added 2026-09-05, the Larnaca class).
+  //
+  // The failure: the 1:1 arm systematically asserted a LOCKED camera and re-attributed the
+  // lens move to the subject — "the camera holds its position as [INFLUENCER] walks toward it
+  // and the frame gradually fills with him" — so a source built on a push-in onto a bystander
+  // reaction rendered as one static wide. Measured on the 7 baselines BEFORE the fix: 11
+  // locked-camera statements against 7 move mentions, and cosanostra went as far as "holds its
+  // position WITHOUT ANY PUSH, PULL, OR PAN for the duration".
+  //
+  // ⚠️ SCOPED TO THE EMPHATIC DENIAL ONLY. A plain "the camera holds its position" is NOT
+  // matched and must never be: a locked-off camera is real and common, and banning the phrase
+  // would push the model into inventing moves — the mirror-image bug. Only the forms that
+  // spend words INSISTING the lens is nailed down are the failure.
+  cameraDenial: [
+    /\bwithout\s+any\s+(?:push|pull|pan|zoom|movement|camera\s+move)/i,
+    /\bno\s+camera\s+(?:movement|move|motion)\b/i,
+    /\b(?:camera|lens)\b[^.]{0,50}\b(?:never\s+moves?|does\s+not\s+move|at\s+no\s+point\s+moves?)\b/i,
+    /\bno\s+(?:push[- ]in|pull[- ]out|pan|tilt|zoom)\b/i,
+    /\bentirely\s+(?:static|locked)\b[^.]{0,30}\b(?:camera|lens|shot)\b/i,
+  ],
+
   // stillSubject: on a source that measurably moves, the prompt must NOT claim the
   // subject holds still. A static CAMERA is legitimate and is NOT in this list —
   // only claims about the PERSON being motionless.
