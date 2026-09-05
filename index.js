@@ -1844,8 +1844,8 @@ app.post('/api/stitch', async (req, res) => {
 });
 
 // ─────────────────────────────────────────
-// DEVICE STAMP — REMOVED 2026-08-25 (Mike's call, see KRYFEX-VIRAL-DECLINE-
-// RAPPORT.md §3 in the Website folder). Fabricated iPhone capture metadata was
+// DEVICE STAMP — REMOVED 2026-08-25 (Mike's call, see personas/kryfex/KRYFEX-VIRAL-DECLINE-
+// RAPPORT.md §3 in the InfluencerFounder docs folder). Fabricated iPhone capture metadata was
 // pure added risk: platforms read pixels and know the real posting device, so
 // every fabricated field is a checkable contradiction. /api/stamp-video,
 // STAMP_KEYS, sanitiseMetaValue and the variants route's metadata injection
@@ -1868,7 +1868,7 @@ app.post('/api/stitch', async (req, res) => {
 // against the original is likely regardless. The strategy may still work —
 // detection is not the same as suppression, and re-serving to non-followers is
 // legitimate for your own content — but do not assume the tweaks are what makes
-// it work. See METADATA-DUPLICATE-DETECTION-RAPPORT.md.
+// it work. See docs/rapports/METADATA-DUPLICATE-DETECTION-RAPPORT.md in the InfluencerFounder docs folder.
 //
 // Unlike the device stamp this MUST re-encode (the point is to change pixels),
 // so it is not lossless. CRF 18 keeps that visually negligible.
