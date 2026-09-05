@@ -52,6 +52,7 @@ const RULES = [
   ['do-not-invent-action guard', /do not invent action the frames do not show/i],
   ['crowd accuracy guard', /crowd staring/i],
   ['parameters-not-prose rule', /PARAMETERS ARE NOT PROSE/],
+  ['tempo-word ban (real-time even on a slowed source)', /NEVER attach a tempo word to a person/],
 ];
 for (const [name, re] of RULES) {
   t(`ORIGINAL carries the ${name}`, re.test(ORIG || ''), 'rule missing from ORIGINAL');
