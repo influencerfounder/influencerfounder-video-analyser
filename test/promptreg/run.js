@@ -58,6 +58,25 @@ const literal = (decl, label) => {
 
 const ORIGINAL_CLONE_SYSTEM = literal("const ORIGINAL_CLONE_SYSTEM = '", 'ORIGINAL_CLONE_SYSTEM');
 const PRONOUN_RULE_FN = new Function('personaGender', grab('const PRONOUN_RULE = personaGender', ": '';", 'PRONOUN_RULE') + '\n return PRONOUN_RULE;');
+// ⭐ THE REALISM LANE — added 2026-09-05. Until now this suite ran promptStyle 'original'
+// while PRODUCTION sends 'realism' (the Recreate tab's default), so it had never once
+// exercised the lane it exists to protect, and never saw the appended realism layer at all.
+// Both are read from live source rather than replicated here — replicating server logic in
+// the harness is exactly how a suite ends up confidently testing a stale copy of itself.
+const REALISM_CLONE_SYSTEM = ORIGINAL_CLONE_SYSTEM.replace(
+  'Return only the prompt text, no JSON, no explanation.',
+  'FIRST output a single line — exactly "LANE: AUTHENTIC" if the source looks phone-shot / UGC / handheld, or "LANE: HIGH-END" if it looks cinematic / professionally lit / polished. Then a blank line, then only the prompt text (no JSON, no explanation, and never mention the lane again inside the prompt).');
+if (REALISM_CLONE_SYSTEM === ORIGINAL_CLONE_SYSTEM)
+  throw new Error('the LANE line anchor moved in index.js — the realism system prompt is no longer derivable');
+const LANE_LAYERS = (() => {
+  const out = {};
+  for (const lane of ['AUTHENTIC', 'HIGH-END']) {
+    const m = SRC.match(new RegExp("'" + lane + "':\\s*'([^']*)'"));
+    if (!m) throw new Error('LANE_LAYERS.' + lane + ' not found in index.js');
+    out[lane] = m[1];
+  }
+  return out;
+})();
 const num = (name) => { const m = SRC.match(new RegExp(`const ${name}\\s*=\\s*([0-9.]+)`)); if (!m) throw new Error(`constant not found: ${name}`); return parseFloat(m[1]); };
 const ANALYSIS_FRAME_COUNT = num('ANALYSIS_FRAME_COUNT');
 const ANALYSIS_QV = num('ANALYSIS_QV');
@@ -112,7 +131,7 @@ async function promptFor(fx, mp4) {
   if (DEPLOYED) {
     const r = await fetch(`${RAILWAY}/api/clone`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ videoUrl: fx.url, promptStyle: 'original', personaGender: fx.personaGender })
+      body: JSON.stringify({ videoUrl: fx.url, promptStyle: 'realism', personaGender: fx.personaGender })
     }).then(r => r.json());
     if (!r.success) throw new Error('deployed analyse failed: ' + r.error);
     return r.clonePrompt;
@@ -128,7 +147,7 @@ async function promptFor(fx, mp4) {
   const userText = fx.transcript
     ? `These ${analysis.length} frames were extracted from the viral video. Transcript: "${fx.transcript}"\n\nCreate the video prompt.`
     : `These ${analysis.length} frames were extracted from the viral video (no audio). Create the video prompt.`;
-  const system = [ORIGINAL_CLONE_SYSTEM, PRONOUN_RULE_FN(fx.personaGender)].filter(Boolean).join('\n\n');
+  const system = [REALISM_CLONE_SYSTEM, PRONOUN_RULE_FN(fx.personaGender)].filter(Boolean).join('\n\n');
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
@@ -137,7 +156,12 @@ async function promptFor(fx, mp4) {
   });
   const d = await r.json();
   if (!d.content) throw new Error('claude call failed: ' + JSON.stringify(d).slice(0, 300));
-  return d.content[0].text.trim();
+  // Mirror the server: strip the LANE line it asked for, then append that lane's layer.
+  let raw = d.content[0].text.trim();
+  const lm = raw.match(/^\s*LANE:\s*(AUTHENTIC|HIGH-END)\s*$/mi);
+  const lane = lm ? lm[1].toUpperCase() : 'AUTHENTIC';
+  raw = raw.replace(/^\s*LANE:.*$/mi, '').replace(/^\s*\n+/, '').trim();
+  return `${raw} ${LANE_LAYERS[lane]}`;
 }
 
 /* ───────────────────────── the assertions ───────────────────────────────────────────────── */
