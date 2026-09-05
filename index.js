@@ -290,7 +290,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.28.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.28.1', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -853,9 +853,22 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // Lane realism layers + negative suffix are appended in CODE (not by Claude) so
     // they are verbatim-stable — the frontend holds both layers and can swap them
     // exactly when the user overrides the detected lane before generating.
+// ✂️ TIER-1 TRIM (2026-09-05, Mike: "make that smaller with less words but don't give in on quality").
+// AUTHENTIC 61->48, HIGH-END 55->41 — 27 words off EVERY recreate, since these are always appended.
+// Removed ONLY duplication and adjectives that bound nothing:
+//   • handheld motion was stated TWICE ("natural hand tremor…" and "…everyday handheld phone-video motion")
+//   • "unedited social-media snapshot look" restates the opening "Filmed on a smartphone:"
+//   • "with the smooth cadence of film" restates "Shot on a cinema camera:"
+//   • filler: "natural" facial asymmetry, "tiny" blemishes, "physical" falloff, "color" grade, "performers with"
+// All 13 distinct visual demands survive; "compression artifacts" folded into "compression and
+// auto-exposure artefacts" rather than dropped.
+// ⚠️ DO NOT STRIP THE HEDGES — "mild", "faint", "small", "slightly", "subtle", "gentle" are INTENSITY
+// LIMITS, not filler. "mild lens softness" and "lens softness" are different instructions: the second
+// has no ceiling and Seedance will render a mushy, noisy frame. A further cut to ~40 words was drafted
+// (tier 2) and deliberately NOT shipped — it needs a real A/B on video, not a word count.
     const LANE_LAYERS = {
-      'AUTHENTIC': 'Filmed on a smartphone: natural hand tremor with small framing corrections, slightly off-center framing, mild lens softness, faint sensor noise, mild compression artifacts, small auto-exposure shifts, uneven ambient lighting with natural shadow falloff, real skin with visible pores and tiny blemishes, no beauty filter, stray hair flyaways, natural facial asymmetry, lived-in surroundings, unedited social-media snapshot look, with everyday handheld phone-video motion.',
-      'HIGH-END': 'Shot on a cinema camera: subtle lens vignetting, gentle highlight halation, fine organic film grain, controlled lighting with soft physical falloff and true shadows, photorealistic skin keeping pores and micro-texture under the key light, restrained filmic color grade, performers with natural body weight and visible breath, never posed stillness, with the smooth cadence of film.',
+      'AUTHENTIC': 'Filmed on a smartphone: hand tremor with small framing corrections, slightly off-center framing, mild lens softness, faint sensor noise, mild compression and auto-exposure artefacts, uneven ambient light with natural shadow falloff, real skin with visible pores and blemishes, no beauty filter, stray hair flyaways, facial asymmetry, lived-in surroundings.',
+      'HIGH-END': 'Shot on a cinema camera: subtle lens vignetting, gentle highlight halation, fine organic film grain, controlled light with soft falloff and true shadows, photorealistic skin keeping pores and micro-texture, restrained filmic grade, natural body weight and visible breath, never posed stillness.',
     };
     // Footwear is stated explicitly because the influencer's own full-body
     // reference photo is a plain studio shot and is very often BAREFOOT (it is
