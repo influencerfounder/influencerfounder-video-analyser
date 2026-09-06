@@ -33,6 +33,11 @@ const SRC = fs.readFileSync(SRC_FILE, 'utf8');
 const ONLY = (process.argv.find(a => a.startsWith('--only=')) || '').split('=')[1];
 const SAVE = (process.argv.find(a => a.startsWith('--save=')) || '').split('=')[1];
 const DEPLOYED = process.argv.includes('--deployed');
+// ✂️ Test the Shot Cuts arm. Deployed mode only, on purpose: the rule interpolates a shot
+// target derived by recommendRecreateSpec on the server, so asking the server for it is the
+// only way to test what production would actually send — replicating that here would be a
+// second copy of the logic, which is how this suite would end up testing itself.
+const SHOTCUTS = process.argv.includes('--shotcuts');
 const RAILWAY = process.env.ANALYSER_URL || 'https://influencerfounder-video-analyser-production.up.railway.app';
 
 /* ───────────────────────── binaries (same traps as build-fixtures.js) ───────────────────── */
@@ -131,11 +136,12 @@ async function promptFor(fx, mp4) {
   if (DEPLOYED) {
     const r = await fetch(`${RAILWAY}/api/clone`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ videoUrl: fx.url, promptStyle: 'realism', personaGender: fx.personaGender })
+      body: JSON.stringify({ videoUrl: fx.url, promptStyle: 'realism', personaGender: fx.personaGender, shotCuts: SHOTCUTS })
     }).then(r => r.json());
     if (!r.success) throw new Error('deployed analyse failed: ' + r.error);
     return r.clonePrompt;
   }
+  if (SHOTCUTS) throw new Error('--shotcuts requires --deployed (the shot target is derived server-side)');
   const key = anthropicKey();
   if (!key) throw new Error('no ANTHROPIC_API_KEY (set it, or run with --deployed)');
   const { analysis, hook } = frames(mp4, fx.duration);

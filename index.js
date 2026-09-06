@@ -290,7 +290,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.28.1', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.28.2', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1361,11 +1361,26 @@ app.post('/api/temp-video', async (req, res) => {
 
     tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
     const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
+
+    // The source's REAL length. Added 2026-09-06 for the Studio/app side-by-side
+    // comparison, which labels each pane with its duration — the whole point of
+    // looking at them together is whether the recreate matches the source's timing,
+    // and that is the number the nearest-second duration rule is derived from.
+    // Probed from the downloaded bytes, never from a field name (the 2026-09-03
+    // measure-at-the-model's-input rule). Fails soft to null: a missing label must
+    // never fail a fetch that actually succeeded.
+    let durationSec = null;
+    try {
+      durationSec = await new Promise((resolve) => {
+        ffmpeg.ffprobe(outputPath, (err, meta) => resolve(err ? null : (meta?.format?.duration || null)));
+      });
+    } catch (_) { durationSec = null; }
+
     // NOTE: this response used to also spread `captionsBurned, captionError,
     // captionCues` — variables that only exist inside the assemble-reel route's
     // scope. That was a copy-paste slip which made EVERY temp-video call throw
     // ReferenceError → 500 (found 2026-08-25). Plain response only.
-    res.json({ success: true, videoUrl: publicUrl, token });
+    res.json({ success: true, videoUrl: publicUrl, token, durationSec });
   } catch (err) {
     try { fs.unlinkSync(outputPath); } catch (_) {}
     console.error(`[tempvid:${token}] error:`, err.message);
