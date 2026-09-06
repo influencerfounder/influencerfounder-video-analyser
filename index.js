@@ -290,7 +290,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.28.2', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.29.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -2062,7 +2062,14 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
   // filter is no longer emitted. Do not re-add it for "uniqueness" — it does nothing.
   const noise = 0;
   const vig = lerp(Math.PI / 9, Math.PI / 6);
-  const speed = lerp(1 - T.speedR, 1 + T.speedR);
+  // The tier's speed jitter is drawn even when the fixed speed-up overrides it, so a
+  // given seed still produces the same crop/colour/volume draws with the box on or off.
+  const speedJitter = lerp(1 - T.speedR, 1 + T.speedR);
+  // ⏩ Speed up 5% is OPT-IN (Mike, 2026-09-06), a sibling of the mirror toggle: a fixed
+  // 1.05x playback (video via setpts, audio via atempo so pitch is preserved). It replaces
+  // the tier's ±1.5–4% random jitter rather than stacking on it, so the result is exactly
+  // 5% faster — not 5% plus a random amount.
+  const speed = opts.speedUp ? 1.05 : speedJitter;
 
   // Even dimensions are required by h264.
   const even = (n) => { const v = Math.round(n); return v % 2 ? v + 1 : v; };
@@ -2107,13 +2114,13 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
   const shiftPx = `${Math.round(shiftX * W)},${Math.round(shiftY * H)}px`;
   return {
     vf, af,
-    label: `zoom ${((zoom - 1) * 100).toFixed(1)}% · rot ${rotDeg.toFixed(2)}° · shift ${shiftPx}${opts.flip ? ' · mirrored' : ''} · sat ${sat.toFixed(2)} · ${speed.toFixed(3)}x`,
+    label: `zoom ${((zoom - 1) * 100).toFixed(1)}% · rot ${rotDeg.toFixed(2)}° · shift ${shiftPx}${opts.flip ? ' · mirrored' : ''}${opts.speedUp ? ' · +5% speed' : ''} · sat ${sat.toFixed(2)} · ${speed.toFixed(3)}x`,
     tier: tierName,
     params: {
       tier: tierName,
       zoom: +zoom.toFixed(4), rotDeg: +rotDeg.toFixed(3),
       cropX: cx, cropY: cy, shiftX: +shiftX.toFixed(4), shiftY: +shiftY.toFixed(4),
-      flip: !!opts.flip,
+      flip: !!opts.flip, speedUp: !!opts.speedUp,
       sat: +sat.toFixed(3), con: +con.toFixed(3), bri: +bri.toFixed(3), gam: +gam.toFixed(3),
       noise, speed: +speed.toFixed(4),
     },
@@ -3143,7 +3150,7 @@ app.post('/api/phash-compare', async (req, res) => {
 });
 
 app.post('/api/variants', async (req, res) => {
-  const { videoUrl, count, seed, intensity, flip } = req.body || {};
+  const { videoUrl, count, seed, intensity, flip, speedUp } = req.body || {};
   if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
   const n = Math.max(1, Math.min(VARIANT_MAX, parseInt(count, 10) || 3));
   const runSeed = String(seed || Date.now());
@@ -3159,7 +3166,7 @@ app.post('/api/variants', async (req, res) => {
 
     const out = [];
     for (let i = 0; i < n; i++) {
-      const v = buildVariant(variantRng(runSeed, i), width, height, intensity, { flip: !!flip });
+      const v = buildVariant(variantRng(runSeed, i), width, height, intensity, { flip: !!flip, speedUp: !!speedUp });
       const token = `var_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const outPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
 
