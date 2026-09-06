@@ -25,6 +25,7 @@
 //   node test/promptreg/run.js --deployed     # test what is live on Railway instead
 //   node test/promptreg/run.js --only=cosanostra
 //   node test/promptreg/run.js --save=before  # write prompts to results/before.json for diffing
+//   node test/promptreg/run.js --from=sc-on    # RE-CHECK a saved run with the CURRENT checks — $0, no analysis
 const fs = require('fs'), path = require('path'), { execFileSync } = require('child_process');
 const os = require('os');
 
@@ -32,6 +33,10 @@ const DIR = __dirname, FIX = path.join(DIR, 'fixtures'), SRC_FILE = path.join(DI
 const SRC = fs.readFileSync(SRC_FILE, 'utf8');
 const ONLY = (process.argv.find(a => a.startsWith('--only=')) || '').split('=')[1];
 const SAVE = (process.argv.find(a => a.startsWith('--save=')) || '').split('=')[1];
+// 💤 Re-check saved prompts instead of re-analysing. The 2026-09-05 shot-cuts arm B was run
+// and saved, then reported as "never ran" for a day because nothing had scored it — a saved
+// run is a free evaluation, and a check tightened later can be re-applied to old prompts.
+const FROM = (process.argv.find(a => a.startsWith('--from=')) || '').split('=')[1];
 const DEPLOYED = process.argv.includes('--deployed');
 // ✂️ Test the Shot Cuts arm. Deployed mode only, on purpose: the rule interpolates a shot
 // target derived by recommendRecreateSpec on the server, so asking the server for it is the
@@ -270,7 +275,8 @@ function check(prompt, fx) {
 (async () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(DIR, 'sources.json'), 'utf8'));
   const list = manifest.sources.filter(s => !ONLY || s.slug === ONLY);
-  console.log(`\nPROMPT REGRESSION — ${DEPLOYED ? 'DEPLOYED (Railway)' : 'LOCAL index.js'} · ${list.length} source(s)`);
+  const fromSaved = FROM ? JSON.parse(fs.readFileSync(path.join(DIR, 'results', `${FROM}.json`), 'utf8')) : null;
+  console.log(`\nPROMPT REGRESSION — ${FROM ? `SAVED results/${FROM}.json (no analysis)` : DEPLOYED ? 'DEPLOYED (Railway)' : 'LOCAL index.js'} · ${list.length} source(s)`);
   console.log(`system prompt under test: ${ORIGINAL_CLONE_SYSTEM.split(/\s+/).length} words\n`);
 
   let pass = 0, fail = 0, skipped = 0; const saved = {};
@@ -279,8 +285,13 @@ function check(prompt, fx) {
     if (!fs.existsSync(metaP) || !fs.existsSync(mp4)) { console.log(`── ${s.slug}\n   SKIP — fixture missing, run build-fixtures.js`); skipped++; continue; }
     const fx = JSON.parse(fs.readFileSync(metaP, 'utf8'));
     let prompt;
-    try { prompt = await promptFor(fx, mp4); }
-    catch (e) { console.log(`── ${s.slug}\n   ERROR ${e.message}`); fail++; continue; }
+    if (fromSaved) {
+      prompt = fromSaved[s.slug];
+      if (!prompt) { console.log(`── ${s.slug}\n   SKIP — not in results/${FROM}.json`); skipped++; continue; }
+    } else {
+      try { prompt = await promptFor(fx, mp4); }
+      catch (e) { console.log(`── ${s.slug}\n   ERROR ${e.message}`); fail++; continue; }
+    }
     saved[s.slug] = prompt;
     const res = check(prompt, fx);
     const bad = res.filter(r => !r.ok);
