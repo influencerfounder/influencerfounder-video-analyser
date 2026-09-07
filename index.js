@@ -290,7 +290,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.29.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.30.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -353,6 +353,15 @@ app.post('/api/clone', async (req, res) => {
     // Seedance's ~150-word attention window. Whitelisted, and absent/unknown stays they/them
     // (the standing rule: never guess a gender, never fall back to a default one).
     const personaGender = ['male', 'female'].includes(req.body.personaGender) ? req.body.personaGender : null;
+    // 🎬 TARGET VIDEO MODEL (2026-09-07). Wan 3.0 reads long structured prompts (20,000-char cap;
+    // vendor guides: "past a few hundred well-chosen words attention narrows and softer clauses
+    // drop out") and cuts ONLY where a transition is named, otherwise it keeps one shot going.
+    // Seedance reads ~150 words with full attention. So the builder's word budget and the shot-cut
+    // format are model-aware. Default 'seedance' keeps every existing caller byte-identical —
+    // the Studio's Recreate tab and the worker pass 'wan' only when the Wan chip/model is chosen.
+    // Full research: docs/rapports/WAN-3-PROMPTING-RAPPORT.md (InfluencerFounder docs folder).
+    const targetModel = req.body.targetModel === 'wan' ? 'wan' : 'seedance';
+    const isWan = targetModel === 'wan';
     const isBgSwap = mode === 'bgswap';
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
 
@@ -685,8 +694,8 @@ app.post('/api/clone', async (req, res) => {
     const hookImgCount = hookContent.length ? hookFrames.length : 0;   // derive from hookContent so the bgswap gate can never desync the Kie frame budget
 
     const userText = transcript
-      ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the Seedance prompt.`
-      : `These ${frameBase64s.length} frames were extracted from the viral video (no audio). Create the Seedance prompt.`;
+      ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the ${isWan ? 'video' : 'Seedance'} prompt.`
+      : `These ${frameBase64s.length} frames were extracted from the viral video (no audio). Create the ${isWan ? 'video' : 'Seedance'} prompt.`;
 
     // 🪝 MEASURED hook report, when the caller has one (2026-08-31). The Virality
     // Scorecard runs AFTER this builder in the Studio and is fed this call's own hook
@@ -826,19 +835,19 @@ STEP 2 — BUILD THE BASE PROMPT using this structure: Shot scaffold + Subject +
 - Open with a short capture-style scaffold as the very first clause — plain language matching the Step 1 lane, but never the lane word itself and never aspect ratio or duration (the tool sets 9:16 and clip length separately). E.g. "Handheld phone selfie capture:" or "Cinema camera capture:". Never bury this mid-prompt
 - Use [INFLUENCER] as the person placeholder — do NOT describe physical appearance (no hair color, eye color, skin tone, height, build — reference photos handle that)
 - Describe outfit, action, environment, mood, shot progression
-- Use ONE primary camera movement, chosen from Seedance's own vocabulary: push-in, pull-out, pan, tracking/follow, orbit, handheld, fixed. A compound move must be sequential ("slow push-in then subtle rise") — never simultaneous ("dolly in while panning left")
-- Keep camera movement and subject movement in SEPARATE clauses — mixing them in one clause is Seedance's most common documented failure mode
+- Use ONE primary camera movement, chosen from ${isWan ? "Wan 3.0's" : "Seedance's"} own vocabulary: push-in, pull-out, pan, tracking/follow, orbit, handheld, fixed. A compound move must be sequential ("slow push-in then subtle rise") — never simultaneous ("dolly in while panning left")
+- Keep camera movement and subject movement in SEPARATE clauses — mixing them in one clause is ${isWan ? 'the' : "Seedance's"} most common documented failure mode
 - Name specific lighting direction and quality, and make it slightly imperfect — real light is uneven ("warm window light from the left, slightly hot on one cheek, soft shadow falloff to the right" beats "natural lighting")
 - Ground the scene in a lived-in world: one or two ordinary specific details (a half-empty glass on the counter, a jacket over the chair, a slightly crooked picture frame) beat a clean empty backdrop — real rooms are never perfectly tidy or symmetric
 - If any shot shows hands touching an object (phone, cup, product, fabric), anchor the hand explicitly to it (e.g. "fingers grip the phone case") — free-floating hand descriptions are the most common cause of hand artifacts
 - Break the action into timestamped shots in sequence: [0-2s]: opening shot. [2-5s]: main action. Keep each shot to 1-2 sentences. Weave natural involuntary human motion through the shots: a soft slightly-uneven blink (never metronomic), a visible breath with gentle shoulder rise, a glance at something specific then back (gaze always has a destination — a locked dead-center stare renders as frozen and glassy), a small weight shift or self-adjustment (brushing a strand of hair back, tugging a sleeve). Different body parts move on slightly different timing — overlapping, never synchronized
 - If the person walks in any shot, describe real gait mechanics: heel-to-toe footsteps with weight shifting onto each leg, arms swinging opposite the legs, head staying level — never a gliding or floating walk
-- Cover the FULL sequence of the video start to finish — every distinct shot and every notable reaction, in order, not just the hook plus one main action. Do not compress or drop moments to save words. Stay within ~150 words (Seedance's attention ceiling) and spend them where the driver lives — this is an IMPROVED version, not a copy, so a beat that does not serve the driver may be shortened or dropped to buy words for the one that does.
+- Cover the FULL sequence of the video start to finish — every distinct shot and every notable reaction, in order, not just the hook plus one main action. Do not compress or drop moments to save words. ${isWan ? 'Keep each timestamped shot to 40-80 words and the whole prompt to a few hundred words at most (Wan 3.0 reads long structured prompts, but past that its attention narrows to what is stated most concretely and softer clauses drop out)' : "Stay within ~150 words (Seedance's attention ceiling)"} and spend them where the driver lives — this is an IMPROVED version, not a copy, so a beat that does not serve the driver may be shortened or dropped to buy words for the one that does.
 
 STEP 3 — DO NOT append any realism layer, camera-quality block, fps mention, or avoid-list yourself.
 ALSO BANNED ANYWHERE IN THE PROMPT, not just the opening clause:
   (a) aspect ratio, resolution or duration in ANY form — no "9:16", no "vertical", no "1080p", no "8 seconds total", no "[0-2s]"-style totals at the end. The tool sets the format and the clip length separately, so any figure you write is either ignored or actively contradicts the real setting. Timestamped SHOTS inside the action (e.g. [0-2s], [2-5s]) are fine and wanted; a stated total duration or frame format is not.
-  (b) the person's physical appearance — no hair colour or length, eye colour, skin tone, age, height, build, ethnicity or tattoos. The user swaps in their own AI Influencer whose look is set by reference photos, and references beat prompt text on anything they depict, so a description of the SOURCE person can only fight those references. Write [INFLUENCER] and describe what they DO and WEAR, never what they look like. The server appends the lane's realism layer in code (so the user can switch lanes afterwards). Your base prompt must not duplicate that content — never write sensor noise / film grain lines, and never demand "sharp clarity" or "stable picture". There is deliberately NO avoid-list any more: do not write "avoid ..." lines of your own either. Every word you spend is a word inside a ~150-word attention budget, so spend them on the hook, the action and the light.
+  (b) the person's physical appearance — no hair colour or length, eye colour, skin tone, age, height, build, ethnicity or tattoos. The user swaps in their own AI Influencer whose look is set by reference photos, and references beat prompt text on anything they depict, so a description of the SOURCE person can only fight those references. Write [INFLUENCER] and describe what they DO and WEAR, never what they look like. The server appends the lane's realism layer in code (so the user can switch lanes afterwards). Your base prompt must not duplicate that content — never write sensor noise / film grain lines, and never demand "sharp clarity" or "stable picture". There is deliberately NO avoid-list any more: do not write "avoid ..." lines of your own either. ${isWan ? 'Every word competes for the model\'s attention, so spend them on the hook, the action and the light — never on decoration or generic quality adjectives ("cinematic", "epic", "8K" are absorbed and wasted).' : 'Every word you spend is a word inside a ~150-word attention budget, so spend them on the hook, the action and the light.'}
 
 OUTPUT FORMAT — exactly this, nothing else:
 Line 1: "LANE: AUTHENTIC" or "LANE: HIGH-END" (stripped by the server and shown to the user as a switchable choice — it is the ONLY place the lane may appear).
@@ -954,7 +963,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // feature exists to remove. recommendRecreateSpec is the single source of truth for that
     // length (the worker and the desktop tab both consume it), so the bound cannot drift.
     const shotTarget = recommendRecreateSpec(duration).recommendedDuration;
-    const SHOT_CUTS_RULE = `SHOT CUTS ARE ON. Mirror the cut structure of the source video, compressed to fit a ${shotTarget}-second clip. Study the frames for changes of camera setup, framing or angle, and write the action as timestamped shots — [0-2s]: opening shot. [2-4s]: next shot. — one entry per distinct shot you can actually see, in the order they appear. The LAST timestamp must not exceed ${shotTarget}s: if the source runs longer than that, keep the shots that carry the story and drop the rest rather than stretching past the limit. Put that shot list at the TOP of the prompt, before the scene, lighting and realism description, and keep each shot to one or two sentences. Write ONLY the cuts the source genuinely has: if the frames show a single continuous take, describe it as one continuous shot and do NOT invent cuts. Never write a total duration as prose (no "42 seconds") — the shot timestamps are the only timing you state.`;
+    const SHOT_CUTS_RULE = `SHOT CUTS ARE ON. Mirror the cut structure of the source video, compressed to fit a ${shotTarget}-second clip. Study the frames for changes of camera setup, framing or angle, and write the action as timestamped shots — [0-2s]: opening shot. [2-4s]: next shot. — one entry per distinct shot you can actually see, in the order they appear. The LAST timestamp must not exceed ${shotTarget}s: if the source runs longer than that, keep the shots that carry the story and drop the rest rather than stretching past the limit. Put that shot list at the TOP of the prompt, before the scene, lighting and realism description, and keep each shot to one or two sentences. Write ONLY the cuts the source genuinely has: if the frames show a single continuous take, describe it as one continuous shot and do NOT invent cuts. Never write a total duration as prose (no "42 seconds") — the shot timestamps are the only timing you state.${isWan ? ' This will render on Wan 3.0, which cuts ONLY where a transition is named and otherwise keeps one shot going: write every shot after the first as "[a-bs]: Hard cut transition, …" — the transition words first, then the shot content — and never write a transition on the opening shot.' : ''}`;
     // ⚧ PRONOUNS — grammar only. Stated explicitly as grammar because naming a gender is exactly
     // what invites "a bearded man with dark hair" back into the prompt, which references already
     // decide and which we banned on 2026-09-03.
@@ -1109,6 +1118,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
       sourceAudio,
       promptStyle,
+      targetModel,
       shotCuts: !!(shotCuts && !isBgSwap && promptStyle !== 'improve'),
       personaGender: (PRONOUN_RULE && !isBgSwap) ? personaGender : null,
       viralReport,
