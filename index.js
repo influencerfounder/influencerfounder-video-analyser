@@ -290,7 +290,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.31.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.31.1', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -326,8 +326,23 @@ const VIRAL_DRIVERS = [
   'loop_bait','info_density','other',
 ];
 
+// ⏱ CLAUDE-CALL BUDGET for the student (Kie) path of /api/clone (2026-09-08).
+// The Kie call used to carry a flat 80s timeout, justified by a "120s clone-proxy
+// client timeout" that stopped existing when the proxy moved to 270s. Mike hit the
+// leftover live: a valid Instagram reel, 20 frames, and Kie's gateway answered slower
+// than 80s — the raw axios text "timeout of 80000ms exceeded" reached the Studio with
+// no hint of what to do. The call now gets whatever is left of the proxy's window,
+// minus a margin so OUR verdict (a clear, retryable message) lands before the proxy's
+// own timeout fires and mislabels it as a slow Instagram link. The floor keeps a slow
+// download from handing Claude a budget too small to answer at all.
+const CLONE_PROXY_WINDOW_MS = 270000;   // /api/clone-proxy's axios timeout on Vercel — keep in sync
+const CLONE_BUDGET_MS = CLONE_PROXY_WINDOW_MS - 20000;
+const KIE_CLAUDE_TIMEOUT_FLOOR_MS = 60000;
+const kieClaudeTimeoutMs = (elapsedMs) => Math.max(KIE_CLAUDE_TIMEOUT_FLOOR_MS, CLONE_BUDGET_MS - elapsedMs);
+
 app.post('/api/clone', async (req, res) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-'));
+  const startedAt = Date.now();
 
   try {
     // mode 'bgswap' reuses this endpoint's ENTIRE download + frame-extraction path
@@ -995,8 +1010,8 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       // ~90-100s before failing anywhere near 40+ (not a quick rejection —
       // Kie's own gateway grinds on the request then times out server-side).
       // A retry ladder starting at 80 would burn 100s+ per failed tier,
-      // blowing past clone-proxy's 120s client timeout before ever reaching
-      // a tier that works. So: go straight to the proven-fast/working tier
+      // blowing past clone-proxy's window (270s today, 120s when this was
+      // measured) before ever reaching a tier that works. So: go straight to the proven-fast/working tier
       // (KIE_SAFE_FRAME_COUNT) — no wasted attempts at sizes we already know
       // hang. Anthropic direct (the owner path below) has no such limit and
       // keeps the full 80-frame budget unchanged.
@@ -1008,10 +1023,24 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         ? imageContent
         : Array.from({ length: n }, (_, i) => imageContent[Math.round(i * (imageContent.length - 1) / (n - 1))]);
       const note = n < imageContent.length ? ` (${n} representative frames shown, evenly sampled from the full clip.)` : '';
-      claudeResponse = await axios.post('https://api.kie.ai/claude/v1/messages', {
-        model: 'claude-sonnet-5', max_tokens: maxTok, system: sysSend,
-        messages: [{ role: 'user', content: [...hookContent, ...subset, { type: 'text', text: userFinal + note }] }]
-      }, { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' }, timeout: 80000 });
+      // Budgeted, not flat — see kieClaudeTimeoutMs above. A timeout is turned into
+      // a message that says what happened and what to do: nothing is wrong with the
+      // video, the analysis is idempotent, click again. The raw axios text must never
+      // travel to a student again.
+      const kieTimeoutMs = kieClaudeTimeoutMs(Date.now() - startedAt);
+      try {
+        claudeResponse = await axios.post('https://api.kie.ai/claude/v1/messages', {
+          model: 'claude-sonnet-5', max_tokens: maxTok, system: sysSend,
+          messages: [{ role: 'user', content: [...hookContent, ...subset, { type: 'text', text: userFinal + note }] }]
+        }, { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' }, timeout: kieTimeoutMs });
+      } catch (e) {
+        if (e.code !== 'ECONNABORTED') throw e;
+        console.warn(`[clone] Kie Claude gateway timed out after ${Math.round(kieTimeoutMs / 1000)}s (${n} frames, ${Math.round((Date.now() - startedAt) / 1000)}s into the request)`);
+        const err = new Error(`Kie.ai's Claude gateway did not answer within ${Math.round(kieTimeoutMs / 1000)}s — nothing is wrong with your video. Click Analyse & Clone again; if it keeps happening, Kie.ai is slow right now and it usually clears within a few minutes.`);
+        err.code = 'KIE_CLAUDE_TIMEOUT';
+        err.reason = 'kie_timeout';
+        throw err;
+      }
     } else {
       claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
         model: 'claude-sonnet-4-6', max_tokens: maxTok, system: sysSend,
@@ -1130,7 +1159,10 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
   } catch (err) {
     const status = err.response?.status || 500;
     const message = err.response?.data?.error?.message || err.response?.data?.message || err.response?.data?.msg || err.message;
-    res.status(status).json({ success: false, error: message });
+    // reason is the machine-readable twin of the message (the Apify branches already
+    // set not_found / restricted_page the same way) — kie_timeout tells the Vercel
+    // proxy and the worker "retryable, not the video's fault" without parsing prose.
+    res.status(status).json(err.reason ? { success: false, error: message, reason: err.reason } : { success: false, error: message });
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
   }
