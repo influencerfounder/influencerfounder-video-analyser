@@ -79,6 +79,11 @@ t('the rescue runs on the owner key only for a TRANSIENT Kie failure with ≥45s
   assert.ok(/new Set\(\['kie_timeout', 'kie_rate_limited', 'kie_gateway', 'kie_network'\]\)/.test(rescue), 'kie_key is NOT transient — a bad key or balance is the student\'s to fix');
   assert.ok(/transient && ANTHROPIC_API_KEY && leftMs >= OWNER_FALLBACK_MIN_MS/.test(rescue));
   assert.ok(/const OWNER_FALLBACK_MIN_MS = 45000;/.test(SRC));
+  // 2026-09-09: an upstream 502/503/504 must never leave this service with the same number —
+  // the tool reads those as "the container is not responding" (Railway's edge wording).
+  assert.ok(/const status = \[502, 503, 504\]\.includes\(upstream\) \? 500 : \(upstream \|\| 500\);/.test(SRC), 'the /api/clone catch echoes upstream gateway statuses');
+  assert.ok(/upstreamStatus: upstream/.test(SRC), 'the upstream status is no longer reported');
+  assert.ok(/uptimeSec: Math\.round\(process\.uptime\(\)\)/.test(SRC) && /rssMb:/.test(SRC), 'the root route lost uptimeSec/rssMb — the tool\'s incident probe reads them');
   assert.ok(/content: \[\.\.\.hookContent, \.\.\.subset, \{ type: 'text', text: userFinal \+ note \}\]/.test(rescue), 'subset, not the 80-frame imageContent');
   assert.ok(/model: 'claude-sonnet-4-6'/.test(rescue) && /'x-api-key': ANTHROPIC_API_KEY/.test(rescue) && /timeout: leftMs/.test(rescue));
 });

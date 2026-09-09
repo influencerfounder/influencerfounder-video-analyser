@@ -289,8 +289,13 @@ try {
   console.log(`[startup] yt-dlp: ${ytDlpPath} (${ytDlpVer})`);
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
+// uptimeSec / rssMb (2026-09-09): the tool probes this after every failed analysis and
+// writes the answer into the owner incident — an uptime of seconds at incident time means
+// THIS container just (re)started (a crash or a redeploy), hours means Railway's edge
+// blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
+// traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.32.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.32.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1270,12 +1275,17 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     });
 
   } catch (err) {
-    const status = err.response?.status || 500;
+    const upstream = err.response?.status;
+    // Never echo an UPSTREAM gateway status as our own (2026-09-09): the tool reads a
+    // 502/503/504 from this service as "the analyser container is not responding" —
+    // Railway's edge says exactly that with the same numbers. A 502 from Groq, Kie or a
+    // CDN is a different fact; it travels as upstreamStatus under a plain 500.
+    const status = [502, 503, 504].includes(upstream) ? 500 : (upstream || 500);
     const message = err.response?.data?.error?.message || err.response?.data?.message || err.response?.data?.msg || err.message;
     // reason is the machine-readable twin of the message (the Apify branches already
     // set not_found / restricted_page the same way) — kie_timeout tells the Vercel
     // proxy and the worker "retryable, not the video's fault" without parsing prose.
-    res.status(status).json({ success: false, error: message, ...(err.reason ? { reason: err.reason } : {}), ...(err.fallback ? { fallback: err.fallback } : {}) });
+    res.status(status).json({ success: false, error: message, ...(err.reason ? { reason: err.reason } : {}), ...(upstream && upstream !== status ? { upstreamStatus: upstream } : {}), ...(err.fallback ? { fallback: err.fallback } : {}) });
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
   }
