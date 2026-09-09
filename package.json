@@ -16,5 +16,8 @@
     "fluent-ffmpeg": "^2.1.2",
     "form-data": "^4.0.0",
     "multer": "^1.4.5-lts.1"
+  },
+  "devDependencies": {
+    "railway": "^3.11.0"
   }
 }

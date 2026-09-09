@@ -5,3 +5,9 @@
 # recaptured once the fixed prompt is deployed.
 test/promptreg/fixtures/*.mp4
 test/promptreg/results/
+node_modules/
+.env
+*.mp4
+*.mp3
+*.jpg
+tmp/
