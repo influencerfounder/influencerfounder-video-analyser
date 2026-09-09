@@ -295,7 +295,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.32.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.33.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -348,7 +348,70 @@ const KIE_CLAUDE_TIMEOUT_FLOOR_MS = 60000;
 const OWNER_FALLBACK_MIN_MS = 45000;
 const kieClaudeTimeoutMs = (elapsedMs) => Math.max(KIE_CLAUDE_TIMEOUT_FLOOR_MS, CLONE_BUDGET_MS - elapsedMs);
 
+// ─────────────────────────────────────────
+// JOIN DUPLICATE ANALYSES + 3-MIN RESULT CACHE (2026-09-09, v2.33.0)
+//
+// MEASURED on a student's Recreate (Railway HTTP logs, 08:10–08:22 UTC): Railway's
+// edge duplicated each in-flight POST /api/clone mid-request (a second identical
+// request arrived 141s and 57s in, from the same Vercel function), then answered the
+// caller 502 at 178s / 117s while the container was still working — and one of the
+// runs finished 200 with the full 1 MB answer 2s AFTER the caller had been told 502.
+// Two clicks became FOUR full analyses (Apify, 80 frames, Groq, Kie ×2, the owner's
+// Anthropic key ×4) and the student got nothing. Railway documents no such limit
+// (5 min without data / 15 min with), so the edge cannot be trusted to hold one long
+// request; the work has to survive the connection.
+//
+// So: an identical request (same account, url, mode, style, model, brief, hook
+// report, priors) JOINS the run already in progress instead of starting another, and
+// a finished 200 is kept for 3 minutes so a late retry from the tool — after the edge
+// dropped the first connection — gets the answer for free. Errors are never cached
+// (a retry after a Kie stall must run again). Memory: a few 1 MB bodies, pruned on
+// write. Nothing about the handler itself changes: it runs against a recorder that
+// captures the one res.status().json() it makes.
+// ─────────────────────────────────────────
+const CLONE_INFLIGHT = new Map();
+const CLONE_RECENT = new Map();
+const CLONE_RECENT_TTL_MS = 180000;
+function cloneJoinKey(b) {
+  return JSON.stringify([
+    String(b.locationId || ''), String(b.videoUrl || ''), b.mode || '', b.promptStyle || '', b.targetModel || '',
+    String(b.improveBrief || ''), b.shotCuts === true, b.personaGender || '', b.bgBrief || '',
+    b.hookReport || null, b.driverPriors || null,
+  ]);
+}
+function runRecorded(handler, req) {
+  return new Promise((resolve) => {
+    const rec = {
+      _s: 200,
+      status(c) { rec._s = c; return rec; },
+      json(b) { resolve({ status: rec._s, body: b }); return rec; },
+      send(b) { resolve({ status: rec._s, body: b }); return rec; },
+    };
+    Promise.resolve().then(() => handler(req, rec)).catch((e) => resolve({ status: 500, body: { success: false, error: (e && e.message) || 'analysis failed' } }));
+  });
+}
 app.post('/api/clone', async (req, res) => {
+  const key = cloneJoinKey(req.body || {});
+  const now = Date.now();
+  for (const [k, v] of CLONE_RECENT) if (now - v.at > CLONE_RECENT_TTL_MS) CLONE_RECENT.delete(k);
+  const recent = CLONE_RECENT.get(key);
+  if (recent) {
+    console.log(`[clone] identical request within ${Math.round((now - recent.at) / 1000)}s — served from the result cache (no new analysis)`);
+    return res.status(200).json(recent.body);
+  }
+  let run = CLONE_INFLIGHT.get(key);
+  if (run) {
+    console.log('[clone] identical request while one is still running — joined it (no new analysis)');
+  } else {
+    run = runRecorded(cloneHandler, req).finally(() => CLONE_INFLIGHT.delete(key));
+    CLONE_INFLIGHT.set(key, run);
+  }
+  const { status, body } = await run;
+  if (status === 200 && body && body.success !== false) CLONE_RECENT.set(key, { at: Date.now(), body });
+  res.status(status).json(body);
+});
+
+const cloneHandler = async (req, res) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-'));
   const startedAt = Date.now();
 
@@ -1289,7 +1352,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
   }
-});
+};
 
 // ─────────────────────────────────────────
 // FACE SWAP — frame-by-frame identity lock

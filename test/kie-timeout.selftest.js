@@ -84,6 +84,42 @@ t('the rescue runs on the owner key only for a TRANSIENT Kie failure with ≥45s
   assert.ok(/const status = \[502, 503, 504\]\.includes\(upstream\) \? 500 : \(upstream \|\| 500\);/.test(SRC), 'the /api/clone catch echoes upstream gateway statuses');
   assert.ok(/upstreamStatus: upstream/.test(SRC), 'the upstream status is no longer reported');
   assert.ok(/uptimeSec: Math\.round\(process\.uptime\(\)\)/.test(SRC) && /rssMb:/.test(SRC), 'the root route lost uptimeSec/rssMb — the tool\'s incident probe reads them');
+});
+
+t('duplicate analyses JOIN the running one and a finished 200 is served from a 3-min cache (Railway edge duplicated + 502ed long requests, 2026-09-09)', () => {
+  assert.ok(/const CLONE_INFLIGHT = new Map\(\);/.test(SRC) && /const CLONE_RECENT = new Map\(\);/.test(SRC));
+  assert.ok(/const CLONE_RECENT_TTL_MS = 180000;/.test(SRC), 'cache TTL is 3 min');
+  assert.ok(/run = runRecorded\(cloneHandler, req\)\.finally\(\(\) => CLONE_INFLIGHT\.delete\(key\)\);/.test(SRC), 'the in-flight map is cleared when the run ends');
+  assert.ok(/if \(status === 200 && body && body\.success !== false\) CLONE_RECENT\.set\(key/.test(SRC), 'only a successful body is cached — errors must re-run');
+  const keyFn = SRC.slice(SRC.indexOf('function cloneJoinKey'), SRC.indexOf('function runRecorded'));
+  for (const f of ['locationId', 'videoUrl', 'mode', 'promptStyle', 'targetModel', 'improveBrief', 'shotCuts', 'personaGender', 'bgBrief', 'hookReport', 'driverPriors']) assert.ok(keyFn.includes(f), 'join key misses ' + f);
+  assert.ok(/const cloneHandler = async \(req, res\) => \{/.test(SRC) && /app\.post\('\/api\/clone', async \(req, res\) => \{\n  const key = cloneJoinKey/.test(SRC), 'the route must go through the join wrapper');
+  // Behaviour: drive the real wrapper shape with a fake handler.
+  const m = {};
+  const wrap = new Function('fs', 'path', 'os', 'console', `
+    const CLONE_INFLIGHT = new Map(); const CLONE_RECENT = new Map(); const CLONE_RECENT_TTL_MS = 180000;
+    ${keyFn}
+    ${SRC.slice(SRC.indexOf('function runRecorded'), SRC.indexOf("app.post('/api/clone'"))}
+    let calls = 0;
+    const cloneHandler = async (req, res) => { calls++; await new Promise(r => setTimeout(r, 30)); if (req.body.fail) return res.status(500).json({ success: false, error: 'boom' }); res.status(200).json({ success: true, n: calls }); };
+    const route = ${SRC.slice(SRC.indexOf("async (req, res) => {\n  const key = cloneJoinKey"), SRC.indexOf('\n});\n\nconst cloneHandler') + 2)}
+    return { route, calls: () => calls, CLONE_RECENT };
+  `)(null, null, null, { log() {} });
+  const mkRes = () => { const r = { _s: 200, status(c) { r._s = c; return r; }, json(b) { r.body = b; r.done = true; return r; } }; return r; };
+  return (async () => {
+    const body = { locationId: 'L', videoUrl: 'https://x/1' };
+    const a = mkRes(), b = mkRes();
+    await Promise.all([wrap.route({ body }, a), wrap.route({ body }, b)]);
+    assert.strictEqual(wrap.calls(), 1, 'two concurrent identical requests ran the handler once');
+    assert.deepStrictEqual(a.body, b.body);
+    const c = mkRes(); await wrap.route({ body }, c);
+    assert.strictEqual(wrap.calls(), 1, 'a later identical request is served from the cache');
+    const d = mkRes(); await wrap.route({ body: { ...body, promptStyle: 'improve' } }, d);
+    assert.strictEqual(wrap.calls(), 2, 'a different style is a different analysis');
+    const e = mkRes(); await wrap.route({ body: { locationId: 'L', videoUrl: 'https://x/2', fail: true } }, e);
+    const f = mkRes(); await wrap.route({ body: { locationId: 'L', videoUrl: 'https://x/2', fail: true } }, f);
+    assert.strictEqual(e._s, 500); assert.strictEqual(wrap.calls(), 4, 'errors are never cached — the retry runs again');
+  })();
   assert.ok(/content: \[\.\.\.hookContent, \.\.\.subset, \{ type: 'text', text: userFinal \+ note \}\]/.test(rescue), 'subset, not the 80-frame imageContent');
   assert.ok(/model: 'claude-sonnet-4-6'/.test(rescue) && /'x-api-key': ANTHROPIC_API_KEY/.test(rescue) && /timeout: leftMs/.test(rescue));
 });
@@ -94,7 +130,7 @@ t('the outcome travels: success carries `fallback`, a failed or skipped rescue c
   assert.strictEqual((SRC.match(/\.\.\.\(fallbackInfo \? \{ fallback: fallbackInfo \} : \{\}\)/g) || []).length, 2, 'both success responses (bgswap + clone)');
   assert.ok(/\.\.\.\(err\.fallback \? \{ fallback: err\.fallback \} : \{\}\)/.test(catchBlock), 'the route catch forwards fallback');
 });
-t('the version was bumped for the rescue', () => { assert.ok(/version: '2\.32\.\d+'/.test(SRC)); });
+t('the version was bumped for the rescue', () => { assert.ok(/version: '2\.33\.\d+'/.test(SRC)); });
 t('the handler catch forwards reason so the proxy and worker can tell a stall from a bad link', () => {
   assert.ok(/reason: err\.reason/.test(catchBlock));
 });
