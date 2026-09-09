@@ -290,7 +290,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.31.1', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.31.2', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1027,19 +1027,59 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       // a message that says what happened and what to do: nothing is wrong with the
       // video, the analysis is idempotent, click again. The raw axios text must never
       // travel to a student again.
-      const kieTimeoutMs = kieClaudeTimeoutMs(Date.now() - startedAt);
+      const kieBody = {
+        model: 'claude-sonnet-5', max_tokens: maxTok, system: sysSend,
+        messages: [{ role: 'user', content: [...hookContent, ...subset, { type: 'text', text: userFinal + note }] }]
+      };
+      const kieHeaders = { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' };
+      const kieCall = (timeoutMs) => axios.post('https://api.kie.ai/claude/v1/messages', kieBody, { headers: kieHeaders, timeout: timeoutMs });
+      // 🔁 ONE retry of ONLY the Claude call on a transient gateway answer. A 429 hit a
+      // student live on 2026-09-08 (six minutes before the timeout did): Kie documents
+      // 429 as rate limiting, and its 5xx are the gateway itself — neither is a verdict
+      // on the video. Everything expensive (download, 80 frames, transcript) is already
+      // done at this point, so a second Claude call after a short pause costs seconds,
+      // not the whole analysis — but only when the proxy window still has room for it.
+      // A TIMEOUT is deliberately not retried: it has already spent the budget.
+      const KIE_RETRY_STATUSES = [429, 500, 502, 503, 504];
+      const KIE_RETRY_PAUSE_MS = 8000;
+      let kieTimeoutMs = kieClaudeTimeoutMs(Date.now() - startedAt);
       try {
-        claudeResponse = await axios.post('https://api.kie.ai/claude/v1/messages', {
-          model: 'claude-sonnet-5', max_tokens: maxTok, system: sysSend,
-          messages: [{ role: 'user', content: [...hookContent, ...subset, { type: 'text', text: userFinal + note }] }]
-        }, { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' }, timeout: kieTimeoutMs });
+        try {
+          claudeResponse = await kieCall(kieTimeoutMs);
+        } catch (e1) {
+          const st = e1.response?.status;
+          const leftAfterPause = CLONE_BUDGET_MS - (Date.now() - startedAt) - KIE_RETRY_PAUSE_MS;
+          if (!KIE_RETRY_STATUSES.includes(st) || leftAfterPause < KIE_CLAUDE_TIMEOUT_FLOOR_MS) throw e1;
+          console.warn(`[clone] Kie Claude gateway answered ${st} (${n} frames, ${Math.round((Date.now() - startedAt) / 1000)}s in) — retrying the Claude call once after ${KIE_RETRY_PAUSE_MS / 1000}s`);
+          await new Promise(r => setTimeout(r, KIE_RETRY_PAUSE_MS));
+          kieTimeoutMs = kieClaudeTimeoutMs(Date.now() - startedAt);
+          claudeResponse = await kieCall(kieTimeoutMs);
+        }
       } catch (e) {
-        if (e.code !== 'ECONNABORTED') throw e;
-        console.warn(`[clone] Kie Claude gateway timed out after ${Math.round(kieTimeoutMs / 1000)}s (${n} frames, ${Math.round((Date.now() - startedAt) / 1000)}s into the request)`);
-        const err = new Error(`Kie.ai's Claude gateway did not answer within ${Math.round(kieTimeoutMs / 1000)}s — nothing is wrong with your video. Click Analyse & Clone again; if it keeps happening, Kie.ai is slow right now and it usually clears within a few minutes.`);
-        err.code = 'KIE_CLAUDE_TIMEOUT';
-        err.reason = 'kie_timeout';
-        throw err;
+        // Budgeted, not flat — see kieClaudeTimeoutMs above. A timeout is turned into
+        // a message that says what happened and what to do: nothing is wrong with the
+        // video, the analysis is idempotent, click again. The raw axios text must never
+        // travel to a student again.
+        if (e.code === 'ECONNABORTED') {
+          console.warn(`[clone] Kie Claude gateway timed out after ${Math.round(kieTimeoutMs / 1000)}s (${n} frames, ${Math.round((Date.now() - startedAt) / 1000)}s into the request)`);
+          const err = new Error(`Kie.ai's Claude gateway did not answer within ${Math.round(kieTimeoutMs / 1000)}s — nothing is wrong with your video. Click Analyse & Clone again; if it keeps happening, Kie.ai is slow right now and it usually clears within a few minutes.`);
+          err.code = 'KIE_CLAUDE_TIMEOUT';
+          err.reason = 'kie_timeout';
+          throw err;
+        }
+        // A 429 that survived the retry: say what it is in words. Kie's own sentence is
+        // quoted (it is the only place a "no credits" wording could come from), but the
+        // student is told the two things that matter — not their video, and what to do.
+        if (e.response?.status === 429) {
+          const d = e.response.data || {};
+          const kieMsg = String(d.error?.message || d.msg || d.message || '').trim().slice(0, 200);
+          console.warn(`[clone] Kie Claude gateway 429 twice (${n} frames): ${kieMsg || '(no body)'}`);
+          const err = new Error(`Kie.ai rate-limited the AI call that writes your prompt${kieMsg ? ` (Kie.ai says: "${kieMsg}")` : ''} — nothing is wrong with your video. Wait a minute and click Analyse & Clone again; if it keeps happening, check your Kie.ai credit balance.`);
+          err.code = 'KIE_CLAUDE_RATE_LIMITED';
+          err.reason = 'kie_rate_limited';
+          throw err;
+        }
+        throw e;
       }
     } else {
       claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {

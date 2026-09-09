@@ -20,7 +20,7 @@ const grab = (start, end, label) => {
 };
 
 const budget = grab('const CLONE_PROXY_WINDOW_MS', "app.post('/api/clone'", 'budget helper');
-const kieCall = grab('      const kieTimeoutMs = kieClaudeTimeoutMs(', '    } else {\n      claudeResponse = await axios.post(\'https://api.anthropic.com', 'kie call');
+const kieCall = grab('      const kieBody = {', '    } else {\n      claudeResponse = await axios.post(\'https://api.anthropic.com', 'kie call');
 const catchBlock = grab('    const message = err.response?.data?.error?.message || err.response?.data?.message', '  } finally {', '/api/clone catch');
 
 // the helper, evaluated from the live source
@@ -44,15 +44,29 @@ t('the floor never lets a very slow download starve the call', () => {
   assert.ok(fn.KIE_CLAUDE_TIMEOUT_FLOOR_MS >= 45000, 'a 20-frame Sonnet call needs real time');
 });
 t('the Kie call uses the budget, and the flat 80s is gone from the student path', () => {
-  assert.ok(/timeout: kieTimeoutMs/.test(kieCall));
+  assert.ok(/timeout: timeoutMs \}\)/.test(kieCall) && /kieCall\(kieTimeoutMs\)/.test(kieCall), 'every Kie call goes through kieCall with the clock-derived budget');
   assert.ok(!/timeout: 80000/.test(kieCall));
   assert.ok(!/api\.kie\.ai\/claude[\s\S]{0,400}timeout: 80000/.test(SRC), 'no Kie Claude call may keep a flat 80s');
 });
 t('a timeout becomes a retryable sentence, never the raw axios text', () => {
-  assert.ok(/e\.code !== 'ECONNABORTED'\) throw e/.test(kieCall), 'only the timeout is rewritten; other errors pass through');
+  assert.ok(/if \(e\.code === 'ECONNABORTED'\) \{/.test(kieCall) && /\n        throw e;\n      \}/.test(kieCall), 'the timeout and the 429 are rewritten; every other error passes through untouched');
   assert.ok(/nothing is wrong with your video/.test(kieCall));
   assert.ok(/Click Analyse & Clone again/.test(kieCall));
   assert.ok(/err\.reason = 'kie_timeout'/.test(kieCall));
+});
+t('a 429 or a gateway 5xx from Kie retries the Claude call ONCE, budget permitting, and a timeout never does', () => {
+  assert.ok(/const KIE_RETRY_STATUSES = \[429, 500, 502, 503, 504\];/.test(kieCall), 'the transient statuses are named');
+  assert.strictEqual((kieCall.match(/await kieCall\(kieTimeoutMs\)/g) || []).length, 2, 'exactly one first call and one retry');
+  assert.ok(/if \(!KIE_RETRY_STATUSES\.includes\(st\) \|\| leftAfterPause < KIE_CLAUDE_TIMEOUT_FLOOR_MS\) throw e1;/.test(kieCall), 'the retry is skipped for a non-transient error and when the window has no room');
+  assert.ok(/leftAfterPause = CLONE_BUDGET_MS - \(Date\.now\(\) - startedAt\) - KIE_RETRY_PAUSE_MS/.test(kieCall), 'the room check counts the pause');
+  assert.ok(/kieTimeoutMs = kieClaudeTimeoutMs\(Date\.now\(\) - startedAt\);\n\s+claudeResponse = await kieCall\(kieTimeoutMs\)/.test(kieCall), 'the retry is re-budgeted from the clock');
+  assert.ok(!/ECONNABORTED[\s\S]{0,200}await kieCall/.test(kieCall.slice(0, kieCall.indexOf('} catch (e) {'))), 'no timeout-triggered retry');
+});
+t('a 429 that survives the retry is a plain sentence with Kie\'s own words quoted, tagged kie_rate_limited', () => {
+  assert.ok(/e\.response\?\.status === 429/.test(kieCall));
+  assert.ok(/rate-limited the AI call/.test(kieCall) && /nothing is wrong with your video/.test(kieCall) && /Kie\.ai credit balance/.test(kieCall));
+  assert.ok(/err\.reason = 'kie_rate_limited'/.test(kieCall));
+  assert.ok(/d\.error\?\.message \|\| d\.msg \|\| d\.message/.test(kieCall), 'Kie\'s message is read in every body shape it uses');
 });
 t('the handler catch forwards reason so the proxy and worker can tell a stall from a bad link', () => {
   assert.ok(/reason: err\.reason/.test(catchBlock));
