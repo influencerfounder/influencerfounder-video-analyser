@@ -290,7 +290,7 @@ try {
 } catch(e) { console.log('[startup] yt-dlp check failed:', e.message); }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.31.2', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.32.0', timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -338,6 +338,9 @@ const VIRAL_DRIVERS = [
 const CLONE_PROXY_WINDOW_MS = 270000;   // /api/clone-proxy's axios timeout on Vercel — keep in sync
 const CLONE_BUDGET_MS = CLONE_PROXY_WINDOW_MS - 20000;
 const KIE_CLAUDE_TIMEOUT_FLOOR_MS = 60000;
+// The owner-key rescue needs real time for a 20-frame Sonnet call; below this it is
+// not attempted and the student gets the retryable sentence instead.
+const OWNER_FALLBACK_MIN_MS = 45000;
 const kieClaudeTimeoutMs = (elapsedMs) => Math.max(KIE_CLAUDE_TIMEOUT_FLOOR_MS, CLONE_BUDGET_MS - elapsedMs);
 
 app.post('/api/clone', async (req, res) => {
@@ -1004,6 +1007,9 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     const maxTok = isBgSwap ? 2600 : 1000;
 
     let claudeResponse;
+    // Set when Kie could not answer and the owner's Anthropic key wrote the prompt instead
+    // (2026-09-09). Travels in the response so the tool can raise an owner incident.
+    let fallbackInfo = null;
     if (kieApiKey) {
       // Kie.ai's backend has a real ceiling well under 80 images — verified
       // live: identical requests succeed FAST at 10-20 images but HANG for
@@ -1043,6 +1049,10 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       const KIE_RETRY_STATUSES = [429, 500, 502, 503, 504];
       const KIE_RETRY_PAUSE_MS = 8000;
       let kieTimeoutMs = kieClaudeTimeoutMs(Date.now() - startedAt);
+      // The friendly error Kie's failure became; null when Kie answered. Declared here so
+      // the rescue below can read it after the classifying catch has run.
+      let kieFailure = null;
+      try {
       try {
         try {
           claudeResponse = await kieCall(kieTimeoutMs);
@@ -1077,9 +1087,70 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
           const err = new Error(`Kie.ai rate-limited the AI call that writes your prompt${kieMsg ? ` (Kie.ai says: "${kieMsg}")` : ''} — nothing is wrong with your video. Wait a minute and click Analyse & Clone again; if it keeps happening, check your Kie.ai credit balance.`);
           err.code = 'KIE_CLAUDE_RATE_LIMITED';
           err.reason = 'kie_rate_limited';
+          err.kieStatus = 429;
+          err.kieMessage = kieMsg;
+          throw err;
+        }
+        // Everything else Kie can say, classified so the rescue below and the tool's
+        // incident alert can tell "their gateway broke" from "their key is bad".
+        const st = e.response?.status;
+        const d = (e.response && e.response.data) || {};
+        const kieMsg = String(d.error?.message || d.msg || d.message || '').trim().slice(0, 200);
+        if ([500, 502, 503, 504].includes(st)) {
+          const err = new Error(`Kie.ai's Claude gateway returned a server error (${st}${kieMsg ? `: "${kieMsg}"` : ''}) — nothing is wrong with your video. Click Analyse & Clone again; if it keeps happening, Kie.ai is having trouble right now.`);
+          err.code = 'KIE_CLAUDE_GATEWAY'; err.reason = 'kie_gateway'; err.kieStatus = st; err.kieMessage = kieMsg;
+          throw err;
+        }
+        if ([401, 402, 403].includes(st)) {
+          const err = new Error(`Kie.ai rejected your API key (${st}${kieMsg ? `: "${kieMsg}"` : ''}). Open Settings, check the key and your Kie.ai credit balance, then try again.`);
+          err.code = 'KIE_CLAUDE_KEY'; err.reason = 'kie_key'; err.kieStatus = st; err.kieMessage = kieMsg;
+          throw err;
+        }
+        if (!e.response) {
+          const err = new Error(`Could not reach Kie.ai's Claude gateway (${e.code || e.message}) — nothing is wrong with your video. Click Analyse & Clone again.`);
+          err.code = 'KIE_CLAUDE_NETWORK'; err.reason = 'kie_network'; err.kieMessage = String(e.message || '').slice(0, 200);
           throw err;
         }
         throw e;
+      }
+      } catch (kf) { kieFailure = kf; }
+
+      // 🛟 OWNER-KEY RESCUE (Mike, 2026-09-09: "Yes do this but I need to get notified").
+      // When Kie's gateway — not the student's key, not the video — is what failed, the
+      // owner's Anthropic key writes the prompt instead, on the SAME 20-frame subset the
+      // student would have got (identical output, ≈$0.10, and it fits the window). The
+      // response carries `fallback` so the tool raises an owner incident (push + Telegram
+      // + the Studio's ⚠️ Incidents panel). Not attempted for a rejected key/balance
+      // (that is the student's to fix) or when the proxy window has no room left; in
+      // both cases the friendly sentence above is what the student sees, and the
+      // failure still carries `fallback` so the incident says WHY there was no rescue.
+      if (kieFailure) {
+        const TRANSIENT = new Set(['kie_timeout', 'kie_rate_limited', 'kie_gateway', 'kie_network']);
+        const transient = TRANSIENT.has(kieFailure.reason);
+        const leftMs = CLONE_BUDGET_MS - (Date.now() - startedAt);
+        const kieFacts = {
+          kieReason: kieFailure.reason || null,
+          kieStatus: kieFailure.kieStatus || kieFailure.response?.status || null,
+          kieMessage: kieFailure.kieMessage || String(kieFailure.message || '').slice(0, 200),
+          frames: n,
+          kieElapsedSec: Math.round((Date.now() - startedAt) / 10) / 100,
+        };
+        if (transient && ANTHROPIC_API_KEY && leftMs >= OWNER_FALLBACK_MIN_MS) {
+          try {
+            console.warn(`[clone] Kie failed (${kieFailure.reason}) — rescuing on the owner's Anthropic key with ${n} frames, ${Math.round(leftMs / 1000)}s left`);
+            claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
+              model: 'claude-sonnet-4-6', max_tokens: maxTok, system: sysSend,
+              messages: [{ role: 'user', content: [...hookContent, ...subset, { type: 'text', text: userFinal + note }] }]
+            }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout: leftMs });
+            fallbackInfo = { provider: 'anthropic', model: 'claude-sonnet-4-6', ...kieFacts, usage: claudeResponse.data?.usage || null };
+          } catch (fbErr) {
+            kieFailure.fallback = { attempted: true, provider: 'anthropic', error: String(fbErr.response?.data?.error?.message || fbErr.message || '').slice(0, 200), ...kieFacts };
+            throw kieFailure;
+          }
+        } else {
+          kieFailure.fallback = { attempted: false, why: !transient ? 'not_transient' : (!ANTHROPIC_API_KEY ? 'no_owner_key' : 'no_budget'), leftSec: Math.round(leftMs / 1000), ...kieFacts };
+          throw kieFailure;
+        }
       }
     } else {
       claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
@@ -1116,6 +1187,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         sourceVideoUrl,
         sourceVideoToken,
         metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length },
+        ...(fallbackInfo ? { fallback: fallbackInfo } : {}),
       });
     }
 
@@ -1193,7 +1265,8 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       personaGender: (PRONOUN_RULE && !isBgSwap) ? personaGender : null,
       viralReport,
       viralDrivers: VIRAL_DRIVERS,
-      clonePrompt
+      clonePrompt,
+      ...(fallbackInfo ? { fallback: fallbackInfo } : {}),
     });
 
   } catch (err) {
@@ -1202,7 +1275,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // reason is the machine-readable twin of the message (the Apify branches already
     // set not_found / restricted_page the same way) — kie_timeout tells the Vercel
     // proxy and the worker "retryable, not the video's fault" without parsing prose.
-    res.status(status).json(err.reason ? { success: false, error: message, reason: err.reason } : { success: false, error: message });
+    res.status(status).json({ success: false, error: message, ...(err.reason ? { reason: err.reason } : {}), ...(err.fallback ? { fallback: err.fallback } : {}) });
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
   }

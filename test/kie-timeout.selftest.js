@@ -68,6 +68,28 @@ t('a 429 that survives the retry is a plain sentence with Kie\'s own words quote
   assert.ok(/err\.reason = 'kie_rate_limited'/.test(kieCall));
   assert.ok(/d\.error\?\.message \|\| d\.msg \|\| d\.message/.test(kieCall), 'Kie\'s message is read in every body shape it uses');
 });
+// ── 🛟 owner-key rescue (v2.32.0) ────────────────────────────────────────────
+const rescue = grab('      if (kieFailure) {', '    } else {\n      claudeResponse = await axios.post(\'https://api.anthropic.com/v1/messages\', {\n        model: \'claude-sonnet-4-6\', max_tokens: maxTok', 'rescue block');
+t('every Kie failure is classified with a reason before the rescue reads it', () => {
+  for (const r of ['kie_timeout', 'kie_rate_limited', 'kie_gateway', 'kie_key', 'kie_network']) assert.ok(kieCall.includes(`err.reason = '${r}'`), r);
+  assert.ok(/\[500, 502, 503, 504\]\.includes\(st\)/.test(kieCall) && /\[401, 402, 403\]\.includes\(st\)/.test(kieCall) && /if \(!e\.response\)/.test(kieCall));
+  assert.ok(/\} catch \(kf\) \{ kieFailure = kf; \}/.test(kieCall), 'the friendly error is caught, not thrown past the rescue');
+});
+t('the rescue runs on the owner key only for a TRANSIENT Kie failure with ≥45s left, on the SAME 20-frame subset', () => {
+  assert.ok(/new Set\(\['kie_timeout', 'kie_rate_limited', 'kie_gateway', 'kie_network'\]\)/.test(rescue), 'kie_key is NOT transient — a bad key or balance is the student\'s to fix');
+  assert.ok(/transient && ANTHROPIC_API_KEY && leftMs >= OWNER_FALLBACK_MIN_MS/.test(rescue));
+  assert.ok(/const OWNER_FALLBACK_MIN_MS = 45000;/.test(SRC));
+  assert.ok(/content: \[\.\.\.hookContent, \.\.\.subset, \{ type: 'text', text: userFinal \+ note \}\]/.test(rescue), 'subset, not the 80-frame imageContent');
+  assert.ok(/model: 'claude-sonnet-4-6'/.test(rescue) && /'x-api-key': ANTHROPIC_API_KEY/.test(rescue) && /timeout: leftMs/.test(rescue));
+});
+t('the outcome travels: success carries `fallback`, a failed or skipped rescue carries `fallback` on the error, both responses forward it', () => {
+  assert.ok(/fallbackInfo = \{ provider: 'anthropic', model: 'claude-sonnet-4-6', \.\.\.kieFacts, usage:/.test(rescue));
+  assert.ok(/kieFailure\.fallback = \{ attempted: true, provider: 'anthropic', error:/.test(rescue));
+  assert.ok(/kieFailure\.fallback = \{ attempted: false, why: !transient \? 'not_transient' : \(!ANTHROPIC_API_KEY \? 'no_owner_key' : 'no_budget'\)/.test(rescue));
+  assert.strictEqual((SRC.match(/\.\.\.\(fallbackInfo \? \{ fallback: fallbackInfo \} : \{\}\)/g) || []).length, 2, 'both success responses (bgswap + clone)');
+  assert.ok(/\.\.\.\(err\.fallback \? \{ fallback: err\.fallback \} : \{\}\)/.test(catchBlock), 'the route catch forwards fallback');
+});
+t('the version was bumped for the rescue', () => { assert.ok(/version: '2\.32\.\d+'/.test(SRC)); });
 t('the handler catch forwards reason so the proxy and worker can tell a stall from a bad link', () => {
   assert.ok(/reason: err\.reason/.test(catchBlock));
 });
