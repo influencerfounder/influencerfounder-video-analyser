@@ -295,7 +295,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.33.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.33.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -430,7 +430,8 @@ const cloneHandler = async (req, res) => {
     // 'improve' = the DELIBERATE re-engineering mode (a SEPARATE feature from recreation): it resurrects the
     // scaffolded builder (systemPrompt) — hook-mechanism-first, timestamped shots, full sequence, realism layer —
     // NOT to copy the source but to make a stronger version of it, optionally steered by improveBrief.
-    const promptStyle = ['original','realism','improve'].includes(req.body.promptStyle) ? req.body.promptStyle : 'original';
+    // Realism is the default everywhere since 2026-09-09 (Mike) — a caller that sends nothing gets it.
+    const promptStyle = ['original','realism','improve'].includes(req.body.promptStyle) ? req.body.promptStyle : 'realism';
     const improveBrief = String(req.body.improveBrief || '').slice(0, 600).trim();
     // ✂️ Shot Cuts (opt-in, 2026-09-03) — see SHOT_CUTS_RULE below for why this exists.
     const shotCuts = req.body.shotCuts === true;
