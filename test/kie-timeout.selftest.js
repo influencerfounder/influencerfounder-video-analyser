@@ -130,6 +130,25 @@ t('the outcome travels: success carries `fallback`, a failed or skipped rescue c
   assert.strictEqual((SRC.match(/\.\.\.\(fallbackInfo \? \{ fallback: fallbackInfo \} : \{\}\)/g) || []).length, 2, 'both success responses (bgswap + clone)');
   assert.ok(/\.\.\.\(err\.fallback \? \{ fallback: err\.fallback \} : \{\}\)/.test(catchBlock), 'the route catch forwards fallback');
 });
+// ── the TALKING contract (2026-09-13) ────────────────────────────────────────
+// talkingHead gates the Talking tab's "Get script". The parser is anchored and silent, so a
+// style whose system prompt never ASKS for the line yields false for every video — which is
+// exactly what happened from 2026-09-09 (when 'realism' became the default) until this test
+// existed: 45s of a woman talking to camera, classified as not-a-talking-head, because
+// nothing had asked. Each recreate style must request the line.
+t('every recreate style asks the model for a TALKING: line', () => {
+  assert.ok(/const TALKING_LINE_RULE = /.test(SRC), 'the shared TALKING rule is gone');
+  const realism = SRC.match(/const REALISM_CLONE_SYSTEM = [^;]+;/);
+  assert.ok(realism && /TALKING_LINE_RULE/.test(realism[0]), 'the realism style (the DEFAULT) no longer asks for TALKING');
+  const original = SRC.match(/const ORIGINAL_CLONE_SYSTEM_TAGGED = [^;]+;/);
+  assert.ok(original && /TALKING_LINE_RULE/.test(original[0]), 'the original style no longer asks for TALKING');
+  assert.ok(/: ORIGINAL_CLONE_SYSTEM_TAGGED;/.test(SRC), 'the original style fell back to the untagged system prompt');
+  assert.ok(/TALKING: YES\|NO on the next line/.test(SRC) || /TALKING:\\s\*\(YES\|NO\)/.test(SRC), 'the TALKING parser is gone');
+});
+t('a missing TALKING line is warned about, never silently read as NO', () => {
+  assert.ok(/no TALKING: line in the model output/.test(SRC), 'the silent-default warning is gone — this is what hid the bug for four days');
+});
+
 // Was `/version: '2\.33\.\d+'/` — it pinned the MINOR of the release this suite was written
 // for, so every later bump failed a test about the rescue (2.35.0 did, 2026-09-13). The
 // thing worth asserting is that the version moved PAST the release that added the rescue,
