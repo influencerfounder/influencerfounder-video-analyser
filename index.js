@@ -24,6 +24,20 @@ ffmpeg.setFfprobePath(ffprobeStatic.path);
 // our side at all) and re-hosts the video file (includeDownloadedVideo) so
 // we're not hitting Instagram's CDN directly either.
 // ─────────────────────────────────────────
+// True when the file carries at least one audio stream. Measurement, not assumption:
+// an Instagram DASH rendition can be video-only, and every downstream symptom of that
+// (ffmpeg code 234, an empty transcript, "nobody is talking in it") points somewhere else.
+function hasAudioStream(filePath) {
+  return new Promise((resolve) => {
+    try {
+      ffmpeg.ffprobe(filePath, (err, data) => {
+        if (err || !data) return resolve(false);
+        resolve((data.streams || []).some(st => st.codec_type === 'audio'));
+      });
+    } catch (_) { resolve(false); }
+  });
+}
+
 async function downloadInstagramViaApify(videoUrl, outputPath) {
   const apifyKey = process.env.APIFY_API_KEY;
   if (!apifyKey) throw new Error('APIFY_API_KEY not configured');
@@ -92,7 +106,7 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
     throw err;
   }
 
-  let videoBuf = null, lastErr = null;
+  let videoBuf = null, lastErr = null, usedUrl = null;
   for (const u of candidates) {
     try {
       const videoRes = await axios.get(u, {
@@ -101,12 +115,44 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
         maxContentLength: 200 * 1024 * 1024,
       });
       videoBuf = Buffer.from(videoRes.data);
+      usedUrl = u;
       if (u !== candidates[0]) console.warn('[clone] direct CDN videoUrl failed, fell back to Apify downloadedVideo (lower quality)');
       break;
     } catch (e) { lastErr = e; }
   }
   if (!videoBuf) throw new Error('Instagram video download failed: ' + (lastErr?.message || 'no candidate URL fetched'));
   fs.writeFileSync(outputPath, videoBuf);
+
+  // ── DOES THE FILE WE PICKED ACTUALLY HAVE AUDIO? MEASURE IT. ──────────────────
+  // MEASURED 2026-09-13 on reel DXjvjW4jFjs (licensed track, uses_original_audio=false):
+  // the preferred `videoUrl` returned a 45.2s VP9 1080x1920 file with ONE stream — video.
+  // Instagram serves those renditions as DASH, where audio is a separate adaptation set,
+  // so "prefer videoUrl for quality" (2026-09-03) silently costs the ENTIRE audio track
+  // on such posts. ffmpeg then fails with code 234 on the mp3 extract and the student was
+  // told "nobody is talking in it". The quality preference is right and stays — but it is
+  // a preference about PIXELS, and it must not decide the audio. So: if the picked file
+  // has no audio stream, fetch the other candidate purely as an audio source and keep both.
+  let audioPath = null;
+  try {
+    if (!(await hasAudioStream(outputPath))) {
+      const alt = candidates.find(u => u !== usedUrl);
+      console.warn(`[clone] picked rendition has NO audio stream${alt ? ' — fetching the other candidate as an audio source' : ' and there is no other candidate'}`);
+      if (alt) {
+        try {
+          const altRes = await axios.get(alt, { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 200 * 1024 * 1024 });
+          const altPath = outputPath + '.audiosrc';
+          fs.writeFileSync(altPath, Buffer.from(altRes.data));
+          if (await hasAudioStream(altPath)) {
+            audioPath = altPath;
+            console.log('[clone] audio recovered from the fallback rendition — frames still come from the high-quality one');
+          } else {
+            try { fs.unlinkSync(altPath); } catch (_) {}
+            console.warn('[clone] the fallback rendition has no audio either — this post really is silent to us');
+          }
+        } catch (e) { console.warn('[clone] audio-source fetch failed: ' + e.message); }
+      }
+    }
+  } catch (e) { console.warn('[clone] audio-stream probe failed: ' + e.message); }
 
   // Music metadata — field names PROBED against the live actor 2026-09-01 (the
   // 2026-08-31 lesson: write-ups lie about this actor family's schemas). Items
@@ -116,6 +162,8 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
   // is half of modelling it.
   const mi = item?.musicInfo || null;
   return {
+    // Set only when the picked rendition had no audio and another candidate did.
+    audioPath,
     sourceAudio: mi ? {
       title: String(mi.song_name || ''),
       artist: String(mi.artist_name || ''),
@@ -295,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.34.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.35.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -462,6 +510,9 @@ const cloneHandler = async (req, res) => {
 
     // 1. Download video
     const videoPath = path.join(tmpDir, 'video.mp4');
+    // Separate audio source, set only when the video file we chose turned out to carry no
+    // audio stream at all (Instagram DASH rendition — measured 2026-09-13). Null otherwise.
+    let audioSourcePath = null;
 
     const isInstagram = /instagram\.com\/(p|reel|reels)\//.test(videoUrl);
     const isTikTok = /tiktok\.com\/@[^/]+\/video\/|tiktok\.com\/t\//.test(videoUrl);
@@ -471,6 +522,9 @@ const cloneHandler = async (req, res) => {
       try {
         const igDl = await downloadInstagramViaApify(videoUrl, videoPath);
         sourceAudio = (igDl && igDl.sourceAudio) || null;
+        // The picked rendition had no audio track; this is the other candidate, kept
+        // ONLY so Whisper has something to hear. Frames still come from videoPath.
+        if (igDl && igDl.audioPath) audioSourcePath = igDl.audioPath;
       } catch (e) {
         return res.status(400).json({ success: false, error: e.message, reason: e.reason || null, apifyError: e.apifyError || null });
       }
@@ -715,8 +769,13 @@ const cloneHandler = async (req, res) => {
       console.log(`[transcribe] request from locationId=${locationId || 'unknown'}`);
       try {
         const audioPath = path.join(tmpDir, 'audio.mp3');
+        // audioSourcePath when the chosen rendition is video-only — otherwise ffmpeg exits
+        // 234 ("Error opening output file ... Invalid argument") and every layer above reads
+        // that as "this video is silent" (2026-09-13).
+        const audioInput = audioSourcePath || videoPath;
+        if (audioSourcePath) console.log('[transcribe] using the recovered audio rendition, not the video-only one');
         await new Promise((resolve, reject) => {
-          ffmpeg(videoPath)
+          ffmpeg(audioInput)
             .noVideo()
             .audioCodec('libmp3lame')
             .audioBitrate('64k')
