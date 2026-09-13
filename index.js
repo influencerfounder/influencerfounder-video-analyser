@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.36.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.36.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -499,6 +499,12 @@ const cloneHandler = async (req, res) => {
     const isWan = targetModel === 'wan';
     const isBgSwap = mode === 'bgswap';
     if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+    // ⚠️ LOG WHICH VIDEO. Nothing on this path ever recorded the incoming URL, so when a
+    // student hit three different failures on three different videos (2026-09-13) the logs
+    // held "[transcribe] request from locationId=…" three times and the only way to tell the
+    // clips apart afterwards was matching the remuxed BYTE SIZE against a file downloaded by
+    // hand. Two of the three URLs were unrecoverable. A public post link is not a secret.
+    console.log(`[clone] ${mode || 'clone'} promptStyle=${promptStyle} lid=${locationId || 'unknown'} url=${String(videoUrl).slice(0, 200)}`);
 
     // Cost split (2026-07-17): kieApiKey present = student account, routed to
     // Kie.ai's Claude Sonnet 5 endpoint on their own credits (Vercel's
