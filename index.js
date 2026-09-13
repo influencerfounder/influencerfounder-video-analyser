@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.36.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.36.2', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1194,8 +1194,19 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       // a message that says what happened and what to do: nothing is wrong with the
       // video, the analysis is idempotent, click again. The raw axios text must never
       // travel to a student again.
+      // 🧠 Sonnet 5 THINKS unless told not to, and this prompt's budget was written for a model
+      // that does not (maxTok is 1000, or 2600 on a bgswap). The tool proved the harm on
+      // 2026-09-13: /api/generate-hooks asked for JSON inside max_tokens 500, the thinking ate
+      // the whole allowance and the reply carried no text block — so it fixed it in
+      // modules/claude.js and nothing carried the fix across to this repo, which is the other
+      // place that names claude-sonnet-5. Two ways it bites here: the budget is consumed before
+      // the prompt is written, and `content[0]` becomes a thinking block while line ~1323 reads
+      // `content[0].text` — either way basePrompt is empty and the student gets a 500 reading
+      // "Empty response from Claude". Both are closed below: thinking off, and thinking blocks
+      // filtered before the read. `{type:'disabled'}` is the same value the tool sends.
       const kieBody = {
         model: 'claude-sonnet-5', max_tokens: maxTok, system: sysSend,
+        thinking: { type: 'disabled' },
         messages: [{ role: 'user', content: [...hookContent, ...subset, { type: 'text', text: userFinal + note }] }]
       };
       const kieHeaders = { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' };
@@ -1320,6 +1331,13 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
     }
 
+    // A thinking block can occupy content[0] and has no `.text`, which reads as an empty answer
+    // from a perfectly good response. Dropped here rather than at each read (same fix as the
+    // tool's modules/claude.js, 2026-09-13). A no-op when the model returns no thinking.
+    if (claudeResponse && claudeResponse.data && Array.isArray(claudeResponse.data.content)) {
+      const _txt = claudeResponse.data.content.filter(b => b && b.type !== 'thinking' && b.type !== 'redacted_thinking');
+      if (_txt.length !== claudeResponse.data.content.length) claudeResponse.data.content = _txt;
+    }
     let basePrompt = claudeResponse.data?.content?.[0]?.text?.trim() || '';
     if (!basePrompt) return res.status(500).json({ success: false, error: 'Empty response from Claude' });
 
