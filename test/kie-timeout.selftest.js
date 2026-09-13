@@ -130,7 +130,16 @@ t('the outcome travels: success carries `fallback`, a failed or skipped rescue c
   assert.strictEqual((SRC.match(/\.\.\.\(fallbackInfo \? \{ fallback: fallbackInfo \} : \{\}\)/g) || []).length, 2, 'both success responses (bgswap + clone)');
   assert.ok(/\.\.\.\(err\.fallback \? \{ fallback: err\.fallback \} : \{\}\)/.test(catchBlock), 'the route catch forwards fallback');
 });
-t('the version was bumped for the rescue', () => { assert.ok(/version: '2\.33\.\d+'/.test(SRC)); });
+// Was `/version: '2\.33\.\d+'/` — it pinned the MINOR of the release this suite was written
+// for, so every later bump failed a test about the rescue (2.35.0 did, 2026-09-13). The
+// thing worth asserting is that the version moved PAST the release that added the rescue,
+// not that it equals it.
+t('the version is at or past the release that added the rescue (2.33.0)', () => {
+  const m = SRC.match(/version: '(\d+)\.(\d+)\.(\d+)'/);
+  assert.ok(m, 'no version string in index.js');
+  const [maj, min] = [Number(m[1]), Number(m[2])];
+  assert.ok(maj > 2 || (maj === 2 && min >= 33), `version ${m[0]} is older than the rescue release 2.33.0`);
+});
 t('the handler catch forwards reason so the proxy and worker can tell a stall from a bad link', () => {
   assert.ok(/reason: err\.reason/.test(catchBlock));
 });
