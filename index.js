@@ -295,7 +295,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.33.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.34.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -702,6 +702,12 @@ const cloneHandler = async (req, res) => {
     // traceable to an account if it's ever needed.
     let transcript = '';
     let transcriptError = '';
+    // Set when Whisper DID return text but every segment failed the confidence filter
+    // below. Kept separate from `transcript` so no existing caller changes behaviour,
+    // and so "this video is silent" can finally be told apart from "we threw the words
+    // away" — which is what a student was wrongly told on 2026-09-13.
+    let transcriptLowConfidence = '';
+    let transcriptRejected = 0;
     const GROQ_API_KEY = process.env.GROQ_API_KEY;
     if (!GROQ_API_KEY) {
       transcriptError = 'GROQ_API_KEY not configured on the analyser service';
@@ -738,14 +744,25 @@ const cloneHandler = async (req, res) => {
             // Thresholds follow Whisper's own hallucination heuristics:
             // high no_speech_prob = likely music/silence, very low avg_logprob =
             // low-confidence guess, high compression_ratio = repetitive loop.
-            const speechSegments = segments.filter(s =>
-              (s.no_speech_prob ?? 0) < 0.6 &&
-              (s.avg_logprob ?? 0) > -1.0 &&
-              (s.compression_ratio ?? 1) < 2.4
-            );
+            const failedRules = (s) => [
+              (s.no_speech_prob ?? 0) < 0.6 ? null : `no_speech_prob=${(s.no_speech_prob ?? 0).toFixed(2)}>=0.6`,
+              (s.avg_logprob ?? 0) > -1.0 ? null : `avg_logprob=${(s.avg_logprob ?? 0).toFixed(2)}<=-1.0`,
+              (s.compression_ratio ?? 1) < 2.4 ? null : `compression_ratio=${(s.compression_ratio ?? 1).toFixed(2)}>=2.4`,
+            ].filter(Boolean);
+            const speechSegments = segments.filter(s => failedRules(s).length === 0);
             transcript = speechSegments.map(s => (s.text || '').trim()).filter(Boolean).join(' ').trim();
             if (!transcript && segments.length) {
+              // ⚠️ SAY WHICH RULE FIRED AND WHAT WHISPER HEARD. The old line logged only the
+              // count, so when a student's talking-head reel came back as "nobody is talking
+              // in it" (2026-09-13) there was no way to tell a correct music verdict from a
+              // threshold that is simply too strict for a voice over loud backing music —
+              // and Instagram blocks yt-dlp, so the clip could not be re-measured by hand.
+              transcriptRejected = segments.length;
+              transcriptLowConfidence = segments.map(s => (s.text || '').trim()).filter(Boolean).join(' ').trim();
               console.log(`[transcribe] ${segments.length} segment(s) all rejected as non-speech/hallucination — treating video as having no spoken script`);
+              for (const s of segments.slice(0, 8)) {
+                console.log(`[transcribe]   rejected: ${failedRules(s).join(' ')} | text="${String(s.text || '').trim().slice(0, 80)}"`);
+              }
             }
           } else {
             transcript = whisperRes.data?.text || '';
@@ -1322,6 +1339,11 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       sourceVideoToken,
       transcript,
       transcriptError: transcriptError || undefined,
+      // Empty transcript + transcriptRejected > 0 means WE discarded the words, not that
+      // the video is silent. The tool raises an owner incident on that and offers the text
+      // to the student as low-confidence rather than claiming nobody is talking.
+      transcriptRejected: transcriptRejected || undefined,
+      transcriptLowConfidence: transcriptLowConfidence || undefined,
       talkingHead,
       lane,
       laneLayers: LANE_LAYERS,
