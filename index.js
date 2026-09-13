@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.35.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.36.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1102,7 +1102,17 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // 'realism' = the EXACT May 1:1 prompt (same body/user message as 'original') with the lane realism
     // layer appended — the ONLY difference from 'original'. A LANE line is added so authentic vs high-end
     // is auto-classified per video; the server strips that line and appends LANE_LAYERS[lane].
-    const REALISM_CLONE_SYSTEM = ORIGINAL_CLONE_SYSTEM.replace('Return only the prompt text, no JSON, no explanation.', 'FIRST output a single line — exactly "LANE: AUTHENTIC" if the source looks phone-shot / UGC / handheld, or "LANE: HIGH-END" if it looks cinematic / professionally lit / polished. Then a blank line, then only the prompt text (no JSON, no explanation, and never mention the lane again inside the prompt).');
+    // ⚠️ THE TALKING LINE MUST BE ASKED FOR IN EVERY RECREATE STYLE, NOT JUST 'improve'.
+    // Only the scaffolded 'improve' builder ever instructed the model to emit "TALKING: YES|NO".
+    // The parser below is anchored and simply finds nothing in the other two styles, so
+    // talkingHead defaulted to FALSE — silently, for every video — and since 'realism' became
+    // the DEFAULT style on 2026-09-09 that meant the Talking tab's "Get script" refused every
+    // video it was ever given with "that video is not someone speaking to camera". MEASURED
+    // 2026-09-13 on reel DXjvjW4jFjs: 45s of one woman talking straight to camera with burned-in
+    // captions matching the transcript word for word — classified NO, because nothing had asked.
+    const TALKING_LINE_RULE = 'a line — exactly "TALKING: YES" if a person is on camera actually SPEAKING/narrating to the viewer (a monologue, piece-to-camera, vlog talk, interview answer), or "TALKING: NO" for everything else (music video / lip-syncing to a song / singing, dance, product b-roll, montage, voiceover over visuals with no on-camera speaker, or no speech at all). Judge it from the frames AND the transcript together: a coherent spoken monologue in the transcript with a person facing camera in the frames is YES.';
+    const REALISM_CLONE_SYSTEM = ORIGINAL_CLONE_SYSTEM.replace('Return only the prompt text, no JSON, no explanation.', 'FIRST output a single line — exactly "LANE: AUTHENTIC" if the source looks phone-shot / UGC / handheld, or "LANE: HIGH-END" if it looks cinematic / professionally lit / polished. Then ' + TALKING_LINE_RULE + ' Then a blank line, then only the prompt text (no JSON, no explanation, and never mention the lane again inside the prompt).');
+    const ORIGINAL_CLONE_SYSTEM_TAGGED = ORIGINAL_CLONE_SYSTEM.replace('Return only the prompt text, no JSON, no explanation.', 'FIRST output ' + TALKING_LINE_RULE + ' Then a blank line, then only the prompt text, no JSON, no explanation.');
     const originalUserText = transcript
       ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the video prompt.`
       : `These ${frameBase64s.length} frames were extracted from the viral video (no audio). Create the video prompt.`;
@@ -1112,7 +1122,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     const sysFinal = isBgSwap ? BG_SWAP_SYSTEM
       : promptStyle === 'improve' ? systemPrompt          // the scaffolded/hook-optimised builder, used to IMPROVE (not copy)
       : promptStyle === 'realism' ? REALISM_CLONE_SYSTEM
-      : ORIGINAL_CLONE_SYSTEM;
+      : ORIGINAL_CLONE_SYSTEM_TAGGED;
     // ✂️ SHOT CUTS — a flat-prose 1:1 prompt renders as ONE continuous camera move even when the
     // source cuts between setups: measured 2026-09-03, a source with 4 real cuts produced an output
     // with 0, because the cut structure sat in prose at ~word 370 of a 412-word prompt and Seedance
@@ -1354,6 +1364,10 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     if (talkMatch) {
       talkingHead = talkMatch[1].toUpperCase() === 'YES';
       basePrompt = basePrompt.slice(talkMatch[0].length).trim();
+    } else if (!isBgSwap) {
+      // Never let "the model did not answer" look like "the answer is no". That silence is
+      // what made Get script refuse every video from 2026-09-09 to 2026-09-13, invisibly.
+      console.warn(`[clone] no TALKING: line in the model output (promptStyle=${promptStyle}) — talkingHead defaults to false, which GATES the Get-script feature`);
     }
     // 🧠 WHY-IT-WENT-VIRAL REPORT (improve mode only). Parsed AFTER the LANE and
     // TALKING strips so those two anchored regexes keep matching line 1 / line 2
