@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.36.2', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.37.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -388,13 +388,27 @@ const VIRAL_DRIVERS = [
 // minus a margin so OUR verdict (a clear, retryable message) lands before the proxy's
 // own timeout fires and mislabels it as a slow Instagram link. The floor keeps a slow
 // download from handing Claude a budget too small to answer at all.
-const CLONE_PROXY_WINDOW_MS = 270000;   // /api/clone-proxy's axios timeout on Vercel — keep in sync
+// ⏱ 270s → 420s (2026-09-13). The 270 was chosen when Vercel's function cap was 300s;
+// vercel.json has said maxDuration 800 for a long time, so the proxy was abandoning runs for
+// a limit that no longer existed. Measured on the incident that forced this: a student's
+// analysis of a 16s reel was killed at 270s and FINISHED about twenty seconds later — their
+// own second click returned it, 200. The same reel re-ran in 113s, so that morning was a
+// transient slow patch, not a bad video: the window has to absorb a slow patch, not just a
+// good day. Still far under maxDuration, so our verdict has room to travel.
+// ⚠️ The tool's PROXY_WINDOW_MS must equal this — no longer a promise in a comment; check.sh
+// reads both files and fails if they drift.
+const CLONE_PROXY_WINDOW_MS = 420000;   // = /api/clone-proxy's axios timeout in the tool
 const CLONE_BUDGET_MS = CLONE_PROXY_WINDOW_MS - 20000;
 const KIE_CLAUDE_TIMEOUT_FLOOR_MS = 60000;
+// A bigger window must NOT become a bigger stall. The whole 2026-09-09 saga was Kie's Claude
+// gateway hanging, and "whatever is left of the budget" would now hand ONE call up to 400s.
+// A single Claude call gets at most this; the rest of the budget stays for the retry and the
+// owner-key rescue that follow it.
+const KIE_CLAUDE_MAX_MS = 180000;
 // The owner-key rescue needs real time for a 20-frame Sonnet call; below this it is
 // not attempted and the student gets the retryable sentence instead.
 const OWNER_FALLBACK_MIN_MS = 45000;
-const kieClaudeTimeoutMs = (elapsedMs) => Math.max(KIE_CLAUDE_TIMEOUT_FLOOR_MS, CLONE_BUDGET_MS - elapsedMs);
+const kieClaudeTimeoutMs = (elapsedMs) => Math.min(KIE_CLAUDE_MAX_MS, Math.max(KIE_CLAUDE_TIMEOUT_FLOOR_MS, CLONE_BUDGET_MS - elapsedMs));
 
 // ─────────────────────────────────────────
 // JOIN DUPLICATE ANALYSES + 3-MIN RESULT CACHE (2026-09-09, v2.33.0)
@@ -1325,10 +1339,15 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         }
       }
     } else {
+      // ⏱ BUDGETED like the Kie path (2026-09-13). This call had NO timeout at all, so on the
+      // direct-Anthropic path — which every owner-key request takes, including the student
+      // rescues — the analyser could not guarantee answering before the proxy's window closed.
+      // That is how a healthy run reached a student as "took too long": nothing here could cut
+      // it short, so the proxy's timeout spoke first and mislabelled it as a slow Instagram link.
       claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
         model: 'claude-sonnet-4-6', max_tokens: maxTok, system: sysSend,
         messages: [{ role: 'user', content: [...hookContent, ...imageContent, { type: 'text', text: userFinal }] }]
-      }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
+      }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout: kieClaudeTimeoutMs(Date.now() - startedAt) });
     }
 
     // A thinking block can occupy content[0] and has no `.text`, which reads as an empty answer

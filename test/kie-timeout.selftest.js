@@ -20,28 +20,47 @@ const grab = (start, end, label) => {
 };
 
 const budget = grab('const CLONE_PROXY_WINDOW_MS', "app.post('/api/clone'", 'budget helper');
-const kieCall = grab('      const kieBody = {', '    } else {\n      claudeResponse = await axios.post(\'https://api.anthropic.com', 'kie call');
+const kieCall = grab('      const kieBody = {', '    } else {\n      // ⏱ BUDGETED like the Kie path', 'kie call');
 const catchBlock = grab('    const message = err.response?.data?.error?.message || err.response?.data?.message', '  } finally {', '/api/clone catch');
 
 // the helper, evaluated from the live source
-const fn = new Function(budget + '\nreturn { kieClaudeTimeoutMs, CLONE_PROXY_WINDOW_MS, CLONE_BUDGET_MS, KIE_CLAUDE_TIMEOUT_FLOOR_MS };')();
+const fn = new Function(budget + '\nreturn { kieClaudeTimeoutMs, CLONE_PROXY_WINDOW_MS, CLONE_BUDGET_MS, KIE_CLAUDE_TIMEOUT_FLOOR_MS, KIE_CLAUDE_MAX_MS };')();
 
-t('window matches the Vercel proxy (270s) and the budget sits inside it', () => {
-  assert.strictEqual(fn.CLONE_PROXY_WINDOW_MS, 270000);
+t('window matches the tool proxy (420s) and the budget sits inside it', () => {
+  // 270 → 420 on 2026-09-13: 270 dated from a 300s Vercel cap, but vercel.json says
+  // maxDuration 800, so healthy runs were being abandoned for a limit that had gone. The
+  // tool's PROXY_WINDOW_MS must equal this; the tool's check.sh reads both files.
+  assert.strictEqual(fn.CLONE_PROXY_WINDOW_MS, 420000);
   assert.ok(fn.CLONE_BUDGET_MS < fn.CLONE_PROXY_WINDOW_MS, 'budget must leave a margin for our own verdict to travel');
 });
 t('a fast download hands Claude far more than the old 80s', () => {
   assert.ok(fn.kieClaudeTimeoutMs(30000) > 80000, 'got ' + fn.kieClaudeTimeoutMs(30000));
-  assert.strictEqual(fn.kieClaudeTimeoutMs(0), fn.CLONE_BUDGET_MS);
+  assert.strictEqual(fn.kieClaudeTimeoutMs(0), fn.KIE_CLAUDE_MAX_MS, 'a fast download gets the per-call ceiling, not the whole budget');
+});
+t('a bigger window is not a bigger stall: ONE Claude call never gets the whole budget', () => {
+  // The 2026-09-09 saga was Kie hanging. With a 400s budget, "whatever is left" would hand a
+  // single hung call 400s and leave nothing for the retry and the owner-key rescue after it.
+  assert.ok(fn.KIE_CLAUDE_MAX_MS < fn.CLONE_BUDGET_MS, 'the per-call ceiling must be below the whole-run budget');
+  for (const elapsed of [0, 30000, 150000, 200000]) {
+    assert.ok(fn.kieClaudeTimeoutMs(elapsed) <= fn.KIE_CLAUDE_MAX_MS, 'call at ' + elapsed + 'ms exceeded the ceiling');
+  }
 });
 t('a slow download shrinks the budget so the answer still beats the proxy timeout', () => {
-  assert.strictEqual(fn.kieClaudeTimeoutMs(150000), fn.CLONE_BUDGET_MS - 150000);
-  assert.ok(150000 + fn.kieClaudeTimeoutMs(150000) < fn.CLONE_PROXY_WINDOW_MS);
+  assert.strictEqual(fn.kieClaudeTimeoutMs(300000), fn.CLONE_BUDGET_MS - 300000);
+  assert.ok(300000 + fn.kieClaudeTimeoutMs(300000) < fn.CLONE_PROXY_WINDOW_MS);
 });
 t('the floor never lets a very slow download starve the call', () => {
-  assert.strictEqual(fn.kieClaudeTimeoutMs(240000), fn.KIE_CLAUDE_TIMEOUT_FLOOR_MS);
+  assert.strictEqual(fn.kieClaudeTimeoutMs(390000), fn.KIE_CLAUDE_TIMEOUT_FLOOR_MS);
   assert.strictEqual(fn.kieClaudeTimeoutMs(10 * 60 * 1000), fn.KIE_CLAUDE_TIMEOUT_FLOOR_MS);
   assert.ok(fn.KIE_CLAUDE_TIMEOUT_FLOOR_MS >= 45000, 'a 20-frame Sonnet call needs real time');
+});
+t('the DIRECT Anthropic call is budgeted too — it had no timeout at all', () => {
+  // Every owner-key request takes this path, including the student rescues. With no timeout
+  // nothing here could cut the call short, so the proxy's own window closed first and a
+  // healthy run reached the student as "took too long" (incident mtzmjckc84502, 2026-09-13).
+  const direct = SRC.slice(SRC.indexOf("    } else {\n      // ⏱ BUDGETED like the Kie path"), SRC.indexOf('// A thinking block can occupy content[0]'));
+  assert.ok(direct.length > 200, 'the direct-Anthropic branch was located');
+  assert.ok(/timeout: kieClaudeTimeoutMs\(Date\.now\(\) - startedAt\)/.test(direct), 'the direct Anthropic call carries the same budget as the Kie path');
 });
 t('the Kie call uses the budget, and the flat 80s is gone from the student path', () => {
   assert.ok(/timeout: timeoutMs \}\)/.test(kieCall) && /kieCall\(kieTimeoutMs\)/.test(kieCall), 'every Kie call goes through kieCall with the clock-derived budget');
@@ -69,7 +88,7 @@ t('a 429 that survives the retry is a plain sentence with Kie\'s own words quote
   assert.ok(/d\.error\?\.message \|\| d\.msg \|\| d\.message/.test(kieCall), 'Kie\'s message is read in every body shape it uses');
 });
 // ── 🛟 owner-key rescue (v2.32.0) ────────────────────────────────────────────
-const rescue = grab('      if (kieFailure) {', '    } else {\n      claudeResponse = await axios.post(\'https://api.anthropic.com/v1/messages\', {\n        model: \'claude-sonnet-4-6\', max_tokens: maxTok', 'rescue block');
+const rescue = grab('      if (kieFailure) {', '    } else {\n      // ⏱ BUDGETED like the Kie path', 'rescue block');
 t('every Kie failure is classified with a reason before the rescue reads it', () => {
   for (const r of ['kie_timeout', 'kie_rate_limited', 'kie_gateway', 'kie_key', 'kie_network']) assert.ok(kieCall.includes(`err.reason = '${r}'`), r);
   assert.ok(/\[500, 502, 503, 504\]\.includes\(st\)/.test(kieCall) && /\[401, 402, 403\]\.includes\(st\)/.test(kieCall) && /if \(!e\.response\)/.test(kieCall));
@@ -162,9 +181,15 @@ t('the version is at or past the release that added the rescue (2.33.0)', () => 
 t('the handler catch forwards reason so the proxy and worker can tell a stall from a bad link', () => {
   assert.ok(/reason: err\.reason/.test(catchBlock));
 });
-t('the Anthropic (owner) path is untouched — no timeout added there', () => {
+t('the Anthropic (owner) path IS budgeted — the 2026-09-09 "leave it untouched" is reversed', () => {
   const owner = grab("      claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {\n        model: 'claude-sonnet-4-6', max_tokens: maxTok", '    let basePrompt', 'owner call');
-  assert.ok(!/timeout:/.test(owner));
+  // REVERSED on evidence, 2026-09-13 (incident mtzmjckc84502). Unbounded was defensible while
+  // only Mike used this path, but EVERY owner-key request takes it — the student rescues
+  // included — and an unbounded call means the analyser cannot promise to answer before the
+  // proxy's window closes. A student's healthy 16s-reel analysis was cut at 270s and finished
+  // ~20s later: their own second click returned it 200 while the first was reported to them
+  // as "took too long". Same budget as the Kie path, same guarantee.
+  assert.ok(/timeout: kieClaudeTimeoutMs\(Date\.now\(\) - startedAt\)/.test(owner), 'the owner path must carry the budgeted timeout');
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);
