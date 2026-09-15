@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.37.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.38.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1765,7 +1765,9 @@ app.get('/api/temp-video/:token', (req, res) => {
   const v = tempVideos.get(req.params.token);
   if (!v || !fs.existsSync(v.filePath)) return res.status(404).json({ error: 'Video not found or expired' });
   const size = fs.statSync(v.filePath).size;
-  res.setHeader('Content-Type', 'video/mp4');
+  // Audio chunks from /api/audio-split ride this same store (contentType set on the entry);
+  // everything older is a video and keeps the default.
+  res.setHeader('Content-Type', v.contentType || 'video/mp4');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Accept-Ranges', 'bytes');
   const range = req.headers.range;
@@ -2193,8 +2195,146 @@ app.post('/api/burn-captions', async (req, res) => {
 // Re-encode-then-copy is the reliable path: the concat demuxer breaks on clips
 // with differing codec/fps/SAR, which generated clips often have. (2026-07-11)
 // ─────────────────────────────────────────
+// ─────────────────────────────────────────
+// AUDIO SPLIT — one continuous voice track → ≤ maxChunks pieces cut on silences.
+// Built 2026-09-15 for the long-form talking head (docs/prds/2026-09-15-long-form-talking-head.md).
+// WHY IT EXISTS: every lip-sync model drifts past ~8-11s and Wan 3.0 caps reference audio at
+// 15s per request, so a 60s script is spoken in ≤10s shots. The voice is generated ONCE as a
+// single natural take and split here — never TTS'd per chunk — so the original file can be laid
+// back over the stitched video and the soundtrack has no seam.
+// Cuts land in detected silences nearest to k×targetSec. A chunk is never longer than maxSec
+// (Wan's wall is 15s; 14 leaves headroom) and a tail is never shorter than minSec, so no shot
+// asks Wan for a 1-second clip. When no silence sits in the window the cut is forced and the
+// chunk is flagged `forced:true` — the caller can warn that a word may be clipped there.
+//
+// pickAudioCuts is a PURE function of the silence list so test/audio-cuts.selftest.js can pin it.
+function pickAudioCuts(silences, totalSec, opts = {}) {
+  const target = Number(opts.targetSec) || 10;
+  const minSec = Number(opts.minSec) || 3;
+  const maxSec = Number(opts.maxSec) || 14;
+  const maxChunks = Number(opts.maxChunks) || 6;
+  const total = Number(totalSec) || 0;
+  if (!(total > 0)) return { error: 'audio has no duration', chunks: [] };
+  const sil = (Array.isArray(silences) ? silences : [])
+    .filter(x => Number.isFinite(x.start) && Number.isFinite(x.end) && x.end > x.start)
+    .map(x => ({ start: x.start, end: x.end, mid: (x.start + x.end) / 2 }))
+    .sort((a, b) => a.mid - b.mid);
+  const chunks = [];
+  let start = 0;
+  // Keep cutting while what is left cannot be one shot.
+  while (total - start > maxSec) {
+    const lo = start + minSec, hi = start + maxSec, ideal = start + target;
+    let best = null;
+    for (const x of sil) {
+      if (x.mid < lo || x.mid > hi) continue;
+      const tail = total - x.mid;
+      // A cut that leaves a tail shorter than minSec (but not zero) would make the LAST shot
+      // too short for the model — skip it; a later candidate or the forced rule handles it.
+      if (tail > 0 && tail < minSec) continue;
+      if (best === null || Math.abs(x.mid - ideal) < Math.abs(best.mid - ideal)) best = x;
+    }
+    let cut, forced = false;
+    if (best) cut = best.mid;
+    else {
+      forced = true;
+      cut = hi;
+      if (total - cut < minSec) cut = total - minSec;   // never strand a sub-minSec tail
+    }
+    // Guard against a non-advancing cut (degenerate inputs) — force progress.
+    if (!(cut > start + 0.5)) { cut = Math.min(hi, total); forced = true; }
+    chunks.push({ start: r3(start), end: r3(cut), sec: r3(cut - start), forced });
+    start = cut;
+  }
+  chunks.push({ start: r3(start), end: r3(total), sec: r3(total - start), forced: false });
+  if (chunks.length > maxChunks) {
+    return { error: `this script needs ${chunks.length} shots and the limit is ${maxChunks} (about ${Math.round(maxChunks * target)}s of speech) — shorten it`, chunks };
+  }
+  return { chunks };
+}
+function r3(n) { return Math.round(n * 1000) / 1000; }
+
+// Parse ffmpeg's silencedetect stderr into [{start,end}] pairs. Lines look like
+//   [silencedetect @ 0x…] silence_start: 3.512
+//   [silencedetect @ 0x…] silence_end: 3.901 | silence_duration: 0.389
+function parseSilencedetect(stderr) {
+  const out = []; let open = null;
+  for (const line of String(stderr || '').split('\n')) {
+    let m = /silence_start:\s*(-?[\d.]+)/.exec(line);
+    if (m) { open = Number(m[1]); continue; }
+    m = /silence_end:\s*(-?[\d.]+)/.exec(line);
+    if (m && open !== null) { out.push({ start: Math.max(0, open), end: Number(m[1]) }); open = null; }
+  }
+  return out;
+}
+
+app.post('/api/audio-split', async (req, res) => {
+  const { audioUrl } = req.body || {};
+  if (typeof audioUrl !== 'string' || !/^https?:\/\//.test(audioUrl)) {
+    return res.status(400).json({ success: false, error: 'audioUrl (https) is required' });
+  }
+  const targetSec = Math.min(14, Math.max(4, Number(req.body.targetSec) || 10));
+  const maxSec    = Math.min(15, Math.max(targetSec, Number(req.body.maxSec) || 14));
+  const minSec    = Math.min(targetSec, Math.max(2, Number(req.body.minSec) || 3));
+  const maxChunks = Math.min(12, Math.max(1, Number(req.body.maxChunks) || 6));
+  // TTS is studio-clean, so the sentence gaps are near-digital silence — a low floor and a
+  // short minimum find them without splitting inside a held vowel.
+  const noiseDb = Number.isFinite(Number(req.body.noiseDb)) ? Number(req.body.noiseDb) : -40;
+  const minGap  = Number.isFinite(Number(req.body.minGapSec)) ? Number(req.body.minGapSec) : 0.2;
+
+  const id = `aud_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'asplit-'));
+  const src = path.join(tmpDir, 'voice.bin');
+  try {
+    const dl = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 60 * 1024 * 1024 });
+    fs.writeFileSync(src, Buffer.from(dl.data));
+    const totalSec = await new Promise((resolve, reject) =>
+      ffmpeg.ffprobe(src, (err, meta) => err ? reject(err) : resolve(Number(meta?.format?.duration) || 0)));
+    if (!(totalSec > 0)) throw new Error('could not read the audio duration');
+
+    const { execFile } = require('child_process');
+    const stderr = await new Promise((resolve) => {
+      execFile(ffmpegStatic, ['-hide_banner', '-nostats', '-i', src, '-af', `silencedetect=noise=${noiseDb}dB:d=${minGap}`, '-f', 'null', '-'],
+        { timeout: 60000, maxBuffer: 8 * 1024 * 1024 }, (err, _out, se) => resolve(String(se || '')));
+    });
+    const silences = parseSilencedetect(stderr);
+    const plan = pickAudioCuts(silences, totalSec, { targetSec, minSec, maxSec, maxChunks });
+    if (plan.error) return res.status(422).json({ success: false, error: plan.error, totalSec: r3(totalSec), chunkCount: plan.chunks.length });
+
+    // Cut each chunk as WAV: sample-exact boundaries, no codec risk, ~2.5MB per 14s — under
+    // Wan's 15MB cap. (mp3 -c copy cuts on frame boundaries and drifts by up to 26ms per cut.)
+    const chunks = [];
+    for (let i = 0; i < plan.chunks.length; i++) {
+      const c = plan.chunks[i];
+      const token = `${id}_${i + 1}`;
+      const outPath = path.join(os.tmpdir(), `tempvid_${token}.wav`);
+      await new Promise((resolve, reject) => {
+        ffmpeg(src).setStartTime(c.start).duration(c.sec)
+          .outputOptions(['-vn', '-ac 2', '-ar 44100', '-c:a pcm_s16le', '-threads 1'])
+          .output(outPath).on('end', resolve).on('error', reject).run();
+      });
+      tempVideos.set(token, { filePath: outPath, createdAt: Date.now(), contentType: 'audio/wav' });
+      chunks.push({ ...c, index: i + 1, token, url: `${req.protocol}://${req.get('host')}/api/temp-video/${token}` });
+    }
+    console.log(`[audio-split:${id}] ${r3(totalSec)}s -> ${chunks.length} chunks (${chunks.filter(c => c.forced).length} forced), ${silences.length} silences found`);
+    res.json({ success: true, totalSec: r3(totalSec), silences: silences.length, chunks });
+  } catch (err) {
+    console.error(`[audio-split:${id}] error:`, err.message);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
 app.post('/api/stitch', async (req, res) => {
   const { videoUrls, width, height } = req.body;
+  // 2026-09-15 (long-form talking head): `trimTo[i]` cuts clip i to that many seconds before
+  // concat, and `audioUrl` replaces the clips' own sound with ONE continuous track afterwards.
+  // Together they make the cut invisible: each shot was lip-synced to its own chunk of the voice
+  // from t=0, Wan pads the video to a whole second, so trimming each clip to its chunk length
+  // keeps Σvideo = Σaudio and the original voice lines up shot after shot. The soundtrack is the
+  // untouched original file — no per-shot re-encode, no level jump, no seam.
+  const trimTo = Array.isArray(req.body.trimTo) ? req.body.trimTo.map(Number) : null;
+  const audioUrl = (typeof req.body.audioUrl === 'string' && /^https?:\/\//.test(req.body.audioUrl)) ? req.body.audioUrl : null;
   if (!Array.isArray(videoUrls) || videoUrls.length < 2) {
     return res.status(400).json({ success: false, error: 'Need at least 2 video URLs to stitch' });
   }
@@ -2227,26 +2367,43 @@ app.post('/api/stitch', async (req, res) => {
       const norm = path.join(tmpDir, `norm_${i}.mp4`);
       const dl = await axios.get(urls[i], { responseType: 'arraybuffer', timeout: 60000 });
       fs.writeFileSync(raw, Buffer.from(dl.data));
+      const t = trimTo && Number.isFinite(trimTo[i]) && trimTo[i] > 0.5 ? trimTo[i] : null;
       await new Promise((resolve, reject) => {
-        ffmpeg(raw)
+        const cmd = ffmpeg(raw)
           .videoFilters(`scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2,setsar=1`)
-          .outputOptions(['-r 24', '-c:v libx264', '-crf', '18', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1'])
-          .output(norm).on('end', resolve).on('error', reject).run();
+          .outputOptions(['-r 24', '-c:v libx264', '-crf', '18', '-preset veryfast', '-pix_fmt yuv420p', '-an', '-threads 1']);
+        if (t) cmd.outputOptions(['-t', String(t)]);
+        cmd.output(norm).on('end', resolve).on('error', reject).run();
       });
       normPaths.push(norm);
     }
     // 2. Concat the normalized clips (all identical specs now → safe -c copy)
     const listPath = path.join(tmpDir, 'list.txt');
     fs.writeFileSync(listPath, normPaths.map(p => `file '${p}'`).join('\n'));
+    const concatPath = audioUrl ? path.join(tmpDir, 'concat.mp4') : outputPath;
     await new Promise((resolve, reject) => {
       ffmpeg().input(listPath).inputOptions(['-f concat', '-safe 0'])
         .outputOptions(['-c copy', '-threads 1'])
-        .output(outputPath).on('end', resolve).on('error', reject).run();
+        .output(concatPath).on('end', resolve).on('error', reject).run();
     });
+    let audioLaid = false;
+    if (audioUrl) {
+      // 3. Lay the one continuous voice track over the silent concat. -shortest so a video that
+      // outruns the voice by a frame ends with the voice rather than trailing silence.
+      const voice = path.join(tmpDir, 'voice.bin');
+      const adl = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 60 * 1024 * 1024 });
+      fs.writeFileSync(voice, Buffer.from(adl.data));
+      await new Promise((resolve, reject) => {
+        ffmpeg().input(concatPath).input(voice)
+          .outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest', '-movflags +faststart', '-threads 1'])
+          .output(outputPath).on('end', resolve).on('error', reject).run();
+      });
+      audioLaid = true;
+    }
     tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
     const publicUrl = `${req.protocol}://${req.get('host')}/api/temp-video/${token}`;
-    console.log(`[stitch:${token}] stitched ${normPaths.length} clips at ${outW}x${outH}`);
-    res.json({ success: true, videoUrl: publicUrl, token, clipCount: normPaths.length, width: outW, height: outH });
+    console.log(`[stitch:${token}] stitched ${normPaths.length} clips at ${outW}x${outH}${trimTo ? ' (trimmed)' : ''}${audioLaid ? ' + voice track laid over' : ''}`);
+    res.json({ success: true, videoUrl: publicUrl, token, clipCount: normPaths.length, width: outW, height: outH, trimmed: !!trimTo, audioLaid });
   } catch (err) {
     console.error(`[stitch:${token}] error:`, err.message);
     res.status(500).json({ success: false, error: err.message });
