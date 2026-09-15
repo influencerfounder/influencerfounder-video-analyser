@@ -14,8 +14,8 @@ const grab = (start, end, label) => {
   const j = SRC.indexOf(end, i); if (j === -1) throw new Error('anchor drifted, end not found: ' + label);
   return SRC.slice(i, j);
 };
-const code = grab('function pickAudioCuts(silences, totalSec, opts = {}) {', "app.post('/api/audio-split'", 'pickAudioCuts + parseSilencedetect');
-const { pickAudioCuts, parseSilencedetect } = new Function(code + '\nreturn { pickAudioCuts, parseSilencedetect };')();
+const code = grab('function pickAudioCuts(silences, totalSec, opts = {}) {', "app.post('/api/audio-split'", 'pickAudioCuts + envelopeSilences');
+const { pickAudioCuts, envelopeSilences } = new Function(code + '\nreturn { pickAudioCuts, envelopeSilences };')();
 
 // A silence every ~9.8s, the way MiniMax leaves gaps between sentences.
 const every = (step, total, w = 0.35) => { const out = []; for (let x = step; x < total; x += step) out.push({ start: x - w / 2, end: x + w / 2 }); return out; };
@@ -61,12 +61,34 @@ t('84s at maxChunks 6 → a plain error naming the count, no throw', () => {
 t('zero / missing duration → error, empty chunks', () => {
   assert(pickAudioCuts([], 0).error); assert.deepStrictEqual(pickAudioCuts([], 0).chunks, []);
 });
-t('parseSilencedetect pairs start/end lines and ignores noise', () => {
-  const se = `[silencedetect @ 0x1] silence_start: 3.512\nframe= 12\n[silencedetect @ 0x1] silence_end: 3.901 | silence_duration: 0.389\n[silencedetect @ 0x1] silence_start: 9.7\n[silencedetect @ 0x1] silence_end: 10.05 | silence_duration: 0.35\n`;
-  assert.deepStrictEqual(parseSilencedetect(se), [{ start: 3.512, end: 3.901 }, { start: 9.7, end: 10.05 }]);
+t('a 400ms sentence pause 1s off the mark beats a 100ms word dip sitting exactly on it', () => {
+  const r = pickAudioCuts([{ start: 9.95, end: 10.05 }, { start: 10.8, end: 11.2 }], 20, { targetSec: 10, minSec: 3, maxSec: 14 });
+  assert(Math.abs(r.chunks[0].end - 11.0) < 0.01, 'cut at ' + r.chunks[0].end + ' (expected the long pause at 11.0)');
 });
-t('an unterminated silence_start (file ends in silence) is dropped, not paired with nothing', () => {
-  assert.deepStrictEqual(parseSilencedetect('silence_start: 58.9\n'), []);
+// envelopeSilences: synthesise 8kHz mono — speech-like noise at -20dB with gaps at the file's own floor
+const synth = (segments, sr = 8000, floorDb = -34) => {
+  const out = []; let seed = 7; const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff * 2 - 1;
+  for (const [sec, loud] of segments) { const amp = Math.pow(10, (loud ? -20 : floorDb) / 20); for (let i = 0; i < sec * sr; i++) out.push(rnd() * amp * 1.7); }
+  return Float64Array.from(out);
+};
+t('envelopeSilences finds the gaps in a file whose floor is -34dB (where a fixed -40dB finds none)', () => {
+  const s = synth([[3, true], [0.4, false], [4, true], [0.3, false], [3, true]]);
+  const d = envelopeSilences(s, 8000, { minGapSec: 0.12 });
+  assert.strictEqual(d.silences.length, 2, JSON.stringify(d));
+  assert(Math.abs(d.silences[0].start - 3.0) < 0.06 && Math.abs(d.silences[0].end - 3.4) < 0.06, 'first gap ' + JSON.stringify(d.silences[0]));
+  assert(d.thresholdDb > d.floorDb && d.thresholdDb <= -25, 'threshold sits just above the file floor: ' + d.thresholdDb + ' vs ' + d.floorDb);
+});
+t('a 90ms dip is NOT a gap at minGap 120ms (inter-word dips must not split a sentence)', () => {
+  const s = synth([[3, true], [0.09, false], [3, true]]);
+  assert.strictEqual(envelopeSilences(s, 8000, { minGapSec: 0.12 }).silences.length, 0);
+});
+t('digital silence (a padded WAV) still yields a sane threshold, never below -55dB', () => {
+  const s = synth([[2, true], [0.5, false], [2, true]], 8000, -120);
+  const d = envelopeSilences(s, 8000);
+  assert(d.thresholdDb >= -55 && d.silences.length === 1, JSON.stringify(d));
+});
+t('too few samples → no silences, no throw', () => {
+  assert.deepStrictEqual(envelopeSilences(new Float64Array(10), 8000).silences, []);
 });
 
 console.log(fail ? `FAIL ${fail} failed, ${pass} passed` : `OK ${pass} passed, 0 failed`);

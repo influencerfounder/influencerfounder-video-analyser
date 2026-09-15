@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.38.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.38.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -2224,14 +2224,20 @@ function pickAudioCuts(silences, totalSec, opts = {}) {
   // Keep cutting while what is left cannot be one shot.
   while (total - start > maxSec) {
     const lo = start + minSec, hi = start + maxSec, ideal = start + target;
-    let best = null;
+    let best = null, bestScore = Infinity;
     for (const x of sil) {
       if (x.mid < lo || x.mid > hi) continue;
       const tail = total - x.mid;
       // A cut that leaves a tail shorter than minSec (but not zero) would make the LAST shot
       // too short for the model — skip it; a later candidate or the forced rule handles it.
       if (tail > 0 && tail < minSec) continue;
-      if (best === null || Math.abs(x.mid - ideal) < Math.abs(best.mid - ideal)) best = x;
+      // Distance to the ideal, discounted by gap LENGTH: a 400ms sentence pause a second away
+      // must beat a 100ms inter-word dip sitting exactly on the mark, because a cut inside a
+      // word dip clips the word (MiniMax takes have both — measured 2026-09-15: sentence gaps
+      // 250-750ms, word gaps 100-150ms). λ=5 → a 300ms pause wins up to 1.0s away, 400ms up to
+      // 1.5s away; the selftest pins the 400ms-vs-100ms case.
+      const score = Math.abs(x.mid - ideal) - 5 * (x.end - x.start);
+      if (score < bestScore) { bestScore = score; best = x; }
     }
     let cut, forced = false;
     if (best) cut = best.mid;
@@ -2253,18 +2259,42 @@ function pickAudioCuts(silences, totalSec, opts = {}) {
 }
 function r3(n) { return Math.round(n * 1000) / 1000; }
 
-// Parse ffmpeg's silencedetect stderr into [{start,end}] pairs. Lines look like
-//   [silencedetect @ 0x…] silence_start: 3.512
-//   [silencedetect @ 0x…] silence_end: 3.901 | silence_duration: 0.389
-function parseSilencedetect(stderr) {
-  const out = []; let open = null;
-  for (const line of String(stderr || '').split('\n')) {
-    let m = /silence_start:\s*(-?[\d.]+)/.exec(line);
-    if (m) { open = Number(m[1]); continue; }
-    m = /silence_end:\s*(-?[\d.]+)/.exec(line);
-    if (m && open !== null) { out.push({ start: Math.max(0, open), end: Number(m[1]) }); open = null; }
+// Silence detection, ADAPTIVE to the file. ffmpeg's silencedetect with a fixed floor found ZERO
+// gaps in real MiniMax takes (measured 2026-09-15: the mp3 noise floor sits at ~-34dB, sentence
+// gaps at -30…-38dB, the very quietest 25ms at ~-41dB — a fixed -40dB never fires and -30dB
+// fires on every inter-word dip). So: decode to mono PCM, take the RMS per 25ms window, set the
+// threshold a few dB above THIS file's 5th percentile (its own floor), and call a run of ≥minGap
+// below it a silence. Pure function of the samples → pinned by test/audio-cuts.selftest.js.
+function envelopeSilences(samples, sampleRate, opts = {}) {
+  const winMs = Number(opts.winMs) || 25;
+  const minGap = Number(opts.minGapSec) || 0.12;
+  const marginDb = Number.isFinite(Number(opts.marginDb)) ? Number(opts.marginDb) : 5;
+  const win = Math.max(1, Math.round(sampleRate * winMs / 1000));
+  const k = Math.floor(samples.length / win);
+  if (k < 4) return { silences: [], thresholdDb: null, floorDb: null };
+  const db = new Float64Array(k);
+  for (let i = 0; i < k; i++) {
+    let acc = 0;
+    for (let j = i * win; j < (i + 1) * win; j++) acc += samples[j] * samples[j];
+    db[i] = 20 * Math.log10(Math.sqrt(acc / win) + 1e-9);
   }
-  return out;
+  const sorted = Float64Array.from(db).sort();
+  const floorDb = sorted[Math.floor(sorted.length * 0.05)];
+  // Above the floor by the margin, but never so high that speech itself counts as silence
+  // (a quiet consonant sits around -25dB), and never below -55dB (digital silence + dither).
+  const thresholdDb = Math.min(-25, Math.max(-55, floorDb + marginDb));
+  const step = win / sampleRate;
+  const silences = [];
+  let i = 0;
+  while (i < k) {
+    if (db[i] < thresholdDb) {
+      let j = i; while (j < k && db[j] < thresholdDb) j++;
+      const start = i * step, end = j * step;
+      if (end - start >= minGap) silences.push({ start: r3(start), end: r3(end) });
+      i = j;
+    } else i++;
+  }
+  return { silences, thresholdDb: r3(thresholdDb), floorDb: r3(floorDb) };
 }
 
 app.post('/api/audio-split', async (req, res) => {
@@ -2276,10 +2306,11 @@ app.post('/api/audio-split', async (req, res) => {
   const maxSec    = Math.min(15, Math.max(targetSec, Number(req.body.maxSec) || 14));
   const minSec    = Math.min(targetSec, Math.max(2, Number(req.body.minSec) || 3));
   const maxChunks = Math.min(12, Math.max(1, Number(req.body.maxChunks) || 6));
-  // TTS is studio-clean, so the sentence gaps are near-digital silence — a low floor and a
-  // short minimum find them without splitting inside a held vowel.
-  const noiseDb = Number.isFinite(Number(req.body.noiseDb)) ? Number(req.body.noiseDb) : -40;
-  const minGap  = Number.isFinite(Number(req.body.minGapSec)) ? Number(req.body.minGapSec) : 0.2;
+  // Gap detection is adaptive to the file's own floor (see envelopeSilences); these two only
+  // shape it. 120ms is below the shortest real sentence pause measured (225ms) and above the
+  // inter-word dips it must not split on.
+  const marginDb = Number.isFinite(Number(req.body.marginDb)) ? Number(req.body.marginDb) : 5;
+  const minGap   = Number.isFinite(Number(req.body.minGapSec)) ? Number(req.body.minGapSec) : 0.12;
 
   const id = `aud_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'asplit-'));
@@ -2291,12 +2322,17 @@ app.post('/api/audio-split', async (req, res) => {
       ffmpeg.ffprobe(src, (err, meta) => err ? reject(err) : resolve(Number(meta?.format?.duration) || 0)));
     if (!(totalSec > 0)) throw new Error('could not read the audio duration');
 
+    // Decode to 8kHz mono s16le on stdout — 60s ≈ 960KB — and detect gaps in Node.
     const { execFile } = require('child_process');
-    const stderr = await new Promise((resolve) => {
-      execFile(ffmpegStatic, ['-hide_banner', '-nostats', '-i', src, '-af', `silencedetect=noise=${noiseDb}dB:d=${minGap}`, '-f', 'null', '-'],
-        { timeout: 60000, maxBuffer: 8 * 1024 * 1024 }, (err, _out, se) => resolve(String(se || '')));
+    const PCM_RATE = 8000;
+    const pcm = await new Promise((resolve, reject) => {
+      execFile(ffmpegStatic, ['-hide_banner', '-nostats', '-loglevel', 'error', '-i', src, '-vn', '-ac', '1', '-ar', String(PCM_RATE), '-f', 's16le', 'pipe:1'],
+        { timeout: 60000, maxBuffer: 64 * 1024 * 1024, encoding: 'buffer' }, (err, out) => err ? reject(err) : resolve(out));
     });
-    const silences = parseSilencedetect(stderr);
+    const samples = new Float64Array(pcm.length >> 1);
+    for (let i = 0; i < samples.length; i++) samples[i] = pcm.readInt16LE(i * 2) / 32768;
+    const det = envelopeSilences(samples, PCM_RATE, { minGapSec: minGap, marginDb });
+    const silences = det.silences;
     const plan = pickAudioCuts(silences, totalSec, { targetSec, minSec, maxSec, maxChunks });
     if (plan.error) return res.status(422).json({ success: false, error: plan.error, totalSec: r3(totalSec), chunkCount: plan.chunks.length });
 
@@ -2315,8 +2351,8 @@ app.post('/api/audio-split', async (req, res) => {
       tempVideos.set(token, { filePath: outPath, createdAt: Date.now(), contentType: 'audio/wav' });
       chunks.push({ ...c, index: i + 1, token, url: `${req.protocol}://${req.get('host')}/api/temp-video/${token}` });
     }
-    console.log(`[audio-split:${id}] ${r3(totalSec)}s -> ${chunks.length} chunks (${chunks.filter(c => c.forced).length} forced), ${silences.length} silences found`);
-    res.json({ success: true, totalSec: r3(totalSec), silences: silences.length, chunks });
+    console.log(`[audio-split:${id}] ${r3(totalSec)}s -> ${chunks.length} chunks (${chunks.filter(c => c.forced).length} forced), ${silences.length} gaps below ${det.thresholdDb}dB (floor ${det.floorDb}dB)`);
+    res.json({ success: true, totalSec: r3(totalSec), silences: silences.length, thresholdDb: det.thresholdDb, floorDb: det.floorDb, chunks });
   } catch (err) {
     console.error(`[audio-split:${id}] error:`, err.message);
     res.status(500).json({ success: false, error: err.message });
