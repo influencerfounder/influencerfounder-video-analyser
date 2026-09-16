@@ -197,13 +197,13 @@ module.exports = {
 // allowed only a fixed list (second/other/older/younger/third) and missed "a young man with
 // short tousled sandy-blond hair" — the exact description the new rule asks for — which then
 // read as an appearance leak about the influencer. Over-stripping is the safe direction here.
-module.exports.OTHER_PERSON = /\b(?:a|the|another|one)\s+(?:[a-z]+(?:-[a-z]+)?\s+){0,3}(?:man|woman|guy|girl|boy|person|friend|companion|bystander|passer-?by|onlooker|pedestrian|stranger|child|kid|barista|waiter|waitress)\b/i;
+module.exports.OTHER_PERSON = /\b(?:a|the|another|one|that|this)\s+(?:[a-z]+(?:-[a-z]+)?\s+){0,3}(?:man|woman|guy|girl|boy|person|friend|companion|bystander|passer-?by|onlooker|pedestrian|stranger|child|kid|barista|waiter|waitress)\b/i;
 
 // A second person given real presence, as opposed to incidental background traffic. Kept
 // deliberately narrow: this is how the analyser phrases a genuine two-hander, and a crowd
 // scene (charliewelham) must NOT trip it — background people are required to stay incidental
 // by a different rule, so demanding their hair colour would fight that rule.
-module.exports.SECOND_PERSON = /\b(?:a|the)\s+second\s+(?:man|woman|guy|girl|person|figure)\b|\bthe\s+other\s+(?:man|woman|guy|girl)\b|\bboth\s+(?:men|women)\b|\bthe\s+two\s+(?:men|women)\b/i;
+module.exports.SECOND_PERSON = /\b(?:a|the|that|this)\s+second\s+(?:man|woman|guy|girl|person|figure)\b|\bthe\s+other\s+(?:man|woman|guy|girl)\b|\bboth\s+(?:men|women)\b|\bthe\s+two\s+(?:men|women)\b/i;
 
 // At least one of these must attach to that second person, or the model has nothing to draw
 // them from but the reference images. Clothing is deliberately absent from this list — it is
@@ -239,7 +239,31 @@ module.exports.stripOtherPeople = function (sentence) {
   return out;
 };
 
-/* Appearance leak, scoped to the influencer. */
+/* Appearance leak, scoped to the influencer.
+
+   ⚠️ SUBJECT-CARRYING, and this is the load-bearing part. The first version scoped per
+   SENTENCE, which silently assumed every sentence names who it is about. Prose does not work
+   that way: the model introduces the second man in one sentence and then continues about him
+   with a pronoun — "Beside him walks a second man. His bare arms show no tattoos." The second
+   sentence has no other-person marker, so it was scanned as though it were about the
+   influencer and reported the word the new rule had just ASKED for.
+
+   MEASURED 2026-09-16 on the checker itself, no model calls: the same fact written as a noun
+   phrase ("a second man — bare arms showing no tattoos") came back clean while the pronoun
+   follow-up flagged "tattoos". That difference is pure phrasing, which is exactly the shape of
+   an intermittent flag — and a peer session hit it live while three saved samples of the same
+   fixture were clean. §7.7 rule 3: a pattern that fires on a healthy prompt is the broken part.
+
+   So the subject is carried forward: a sentence naming [INFLUENCER] sets the subject to the
+   influencer, a sentence with an other-person marker sets it to someone else, and a
+   pronoun-only sentence INHERITS the previous subject — the nearest-antecedent reading, which
+   is how the sentence reads to a human too.
+
+   ⚠️ What it deliberately still flags: a leak written about the influencer in a pronoun
+   sentence that follows an influencer sentence (the common real shape — the subject is still
+   the influencer), and a claim about BOTH men ("neither man has visible tattoos"), which
+   contradicts the references of a tattooed persona and is a genuine problem, not a false
+   positive. */
 module.exports.findAppearanceLeak = function (prompt) {
   const M = module.exports;
   const hits = [];
@@ -247,8 +271,17 @@ module.exports.findAppearanceLeak = function (prompt) {
   // description is written as an em-dash aside ("a second man — sandy-blond hair, no facial
   // hair, bare arms — drops his hand"), so splitting on the dash tears the marker off its own
   // description and the aside reads as a leak about the influencer. Measured 2026-09-16.
+  let aboutInfluencer = true;   // the prompt opens on the subject unless it says otherwise
   for (const raw of String(prompt || '').split(/(?<=[.!?])\s+/)) {
-    const sent = M.stripOtherPeople(raw.trim());
+    const whole = raw.trim();
+    if (!whole) continue;
+    const namesInfluencer = /\[INFLUENCER\]/.test(whole);
+    const namesOther = M.OTHER_PERSON.test(whole) || M.SECOND_PERSON.test(whole);
+    if (namesInfluencer) aboutInfluencer = true;
+    else if (namesOther) aboutInfluencer = false;
+    // else: no person named — the subject carries over from the previous sentence.
+    if (!aboutInfluencer && !namesInfluencer) continue;
+    const sent = M.stripOtherPeople(whole);
     if (!sent.trim()) continue;
     for (const r of M.appearance) {
       const m = sent.match(r);
