@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.39.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.40.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1900,7 +1900,10 @@ const CAPTION_FONTS = {
 };
 // Height ratios measured against a 1920-tall frame: 0.0175 -> ~34px, which is the size Mike
 // settled on after "way too big" (the first burn used 0.07 -> 134px and ran off both edges).
-const CAPTION_SIZES = { small: 0.014, medium: 0.0175, large: 0.022, xlarge: 0.028 };
+// xxlarge (2026-09-16) exists ONLY for the Trial Reel Lab's text-hook overlay — a title hook is
+// meant to be read at arm's length in the first second, where a 3-word caption is not. The First
+// Week chips do not offer it, so no existing reel can pick it up.
+const CAPTION_SIZES = { small: 0.014, medium: 0.0175, large: 0.022, xlarge: 0.028, xxlarge: 0.038 };
 
 function captionFontPath(name) {
   const f = CAPTION_FONTS[String(name || '').toLowerCase()];
@@ -2687,7 +2690,12 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
   const cy = okY ? clamp(Math.round((sh - H) / 2 + shiftY * H), wedge, sh - H - wedge)
                  : Math.round((sh - H) / 2);
 
-  const vf = [
+  // ⭐ SPLIT AT THE RETIME (2026-09-16). A caller that wants to draw ON the picture — the
+  // Trial Reel Lab's text-hook burn — must insert its filters BEFORE setpts: drawtext's
+  // enable='between(t,…)' window is read off the timestamps of the frames reaching it, so
+  // burning after a 1.05x setpts would slide the text off the seconds it was written for.
+  // `vf` below is vfPre+vfPost joined, i.e. byte-identical to what every existing caller got.
+  const vfPre = [
     `scale=${sw}:${sh}`,
     `rotate=${(rotDeg * Math.PI / 180).toFixed(6)}:ow=${sw}:oh=${sh}`,
     `crop=${W}:${H}:${cx}:${cy}`,
@@ -2698,15 +2706,16 @@ function buildVariant(rng, W, H, intensity, opts = {}) {
     ...(opts.flip ? ['hflip'] : []),
     `eq=saturation=${sat.toFixed(3)}:contrast=${con.toFixed(3)}:brightness=${bri.toFixed(3)}:gamma=${gam.toFixed(3)}`,
     `vignette=a=${vig.toFixed(4)}`,
-    `setpts=${(1 / speed).toFixed(5)}*PTS`,
-  ].join(',');
+  ];
+  const vfPost = [`setpts=${(1 / speed).toFixed(5)}*PTS`];
+  const vf = vfPre.concat(vfPost).join(',');
 
   // atempo is only valid in [0.5, 2.0]; our range is well inside it.
   const af = `atempo=${speed.toFixed(5)},volume=${lerp(0.97, 1.03).toFixed(3)}`;
 
   const shiftPx = `${Math.round(shiftX * W)},${Math.round(shiftY * H)}px`;
   return {
-    vf, af,
+    vf, vfPre, vfPost, af,
     label: `zoom ${((zoom - 1) * 100).toFixed(1)}% · rot ${rotDeg.toFixed(2)}° · shift ${shiftPx}${opts.flip ? ' · mirrored' : ''}${opts.speedUp ? ' · +5% speed' : ''} · sat ${sat.toFixed(2)} · ${speed.toFixed(3)}x`,
     tier: tierName,
     params: {
@@ -2882,6 +2891,55 @@ function captionEdgeArgs(fontSize, edge) {
   return `:shadowcolor=black@0.55:shadowx=${off}:shadowy=${off}`;
 }
 
+// WHERE the text sits. Extracted from burnCueList (2026-09-16) so the caption burn and the
+// Trial Reel Lab's text-hook burn cannot drift apart. 'upper' was added for the Lab: a viral
+// title overlay sits in the top third, above the subject's face — the three original values
+// are byte-unchanged, so every First Week reel renders exactly as before.
+function captionYExpr(position) {
+  const pos = String(position || 'lower').toLowerCase();
+  if (pos === 'upper')  return 'h*0.16';
+  if (pos === 'middle') return '(h-text_h)/2';
+  if (pos === 'bottom') return 'h-text_h-(h*0.14)';
+  return 'h-text_h-(h*0.26)';
+}
+
+// ONE drawtext string, built in one place. textfile= (never text=) is what removes filter-string
+// escaping — apostrophes, colons, % and backslashes — as a failure mode.
+function drawtextCue({ file, fontPath, fontSize, color, edge, y, start, end }) {
+  return `drawtext=fontfile='${fontPath}':textfile='${file}':expansion=none:fontsize=${fontSize}` +
+         `:fontcolor=${color || 'white'}${captionEdgeArgs(fontSize, edge)}` +
+         `:x=(w-text_w)/2:y=${y}:enable='between(t,${Number(start).toFixed(3)},${Number(end).toFixed(3)})'`;
+}
+
+// drawtext cannot wrap, so a long line is either shrunk until it fits (what burnCueList does —
+// right for a 3-word caption) or BROKEN across lines (right for a title overlay, where shrinking
+// a 9-word hook to fit one line would make it unreadable). Greedy fill, balanced-ish: the line
+// count is chosen first so the lines come out near-equal instead of "eight words / one word".
+function wrapHookText(text, maxCharsPerLine) {
+  const words = String(text).trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return '';
+  const max = Math.max(8, Number(maxCharsPerLine) || 22);
+  const total = words.join(' ').length;
+  const lineCount = Math.max(1, Math.min(3, Math.ceil(total / max)));
+  const target = Math.ceil(total / lineCount);
+  const lines = [];
+  let cur = '';
+  for (const w of words) {
+    const next = cur ? cur + ' ' + w : w;
+    if (!cur) { cur = next; continue; }
+    // Break where the line lands CLOSEST to its share, not the first time it passes it —
+    // plain "break when over target" put the whole remainder on the last line (measured:
+    // "they said it was" / "impossible: here is the proof", 16 vs 29). `max` is the hard
+    // width the chosen font allows and always breaks, whatever the balance says.
+    const balanced = lines.length < lineCount - 1
+      && next.length > target && (next.length - target) >= (target - cur.length);
+    if (balanced || next.length > max) { lines.push(cur); cur = w; }
+    else cur = next;
+  }
+  if (cur) lines.push(cur);
+  return lines.join('\n');
+}
+
 // One drawtext per cue, each visible only in its own window. Text goes through a FILE
 // (textfile=) not inline, which removes filter-string escaping — apostrophes, colons, %
 // and backslashes — as a failure mode entirely.
@@ -2904,20 +2962,13 @@ async function burnCueList(inPath, outPath, cues, opts = {}) {
   if (!Number.isFinite(fontSize) || fontSize < 12) fontSize = Math.round(safeH * ratio) || 34;
 
   // Reels captions sit low-centre by default so they clear the face and the UI chrome.
-  const pos = String(opts.position || 'lower').toLowerCase();
-  const y = pos === 'middle' ? '(h-text_h)/2'
-          : pos === 'bottom' ? 'h-text_h-(h*0.14)'
-          : 'h-text_h-(h*0.26)';
+  const y = captionYExpr(opts.position);
 
   const filters = [`scale=${safeW}:${safeH}`, 'format=yuv420p'];
   usable.forEach((c, i) => {
     const f = path.join(path.dirname(outPath), `cue_${i}.txt`);
     fs.writeFileSync(f, c.text, 'utf8');
-    filters.push(
-      `drawtext=fontfile='${fontPath}':textfile='${f}':expansion=none:fontsize=${fontSize}` +
-      `:fontcolor=${opts.color || 'white'}${captionEdgeArgs(fontSize, opts.edge)}` +
-      `:x=(w-text_w)/2:y=${y}:enable='between(t,${c.start.toFixed(3)},${c.end.toFixed(3)})'`
-    );
+    filters.push(drawtextCue({ file: f, fontPath, fontSize, color: opts.color, edge: opts.edge, y, start: c.start, end: c.end }));
   });
 
   // ⚠️ MUST use the SYSTEM ffmpeg, never ffmpeg-static. The static build ships WITHOUT libfreetype,
@@ -3795,6 +3846,164 @@ app.post('/api/variants', async (req, res) => {
   } catch (err) {
     const message = err.response?.data?.error?.message || err.message;
     console.error(`[variants:${runSeed}] error:`, message);
+    res.status(500).json({ success: false, error: message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
+// ─────────────────────────────────────────
+// TEXT-HOOK A/B — one video, N burned-in on-screen hooks.
+//
+// The Trial Reel Lab's other modes change the PICTURE (a spoof re-encode, a new opening clip,
+// a new background). This one changes only the words on top of it, which is the cheapest
+// high-leverage variable on a reel: same proven body, different text hook, and a win is
+// attributable to the text because nothing else moved.
+//
+// Deliberately NOT an extension of /api/variants: that route makes N mechanically different
+// copies of ONE video from a seed, this one makes N differently-WORDED copies, and the count
+// is the number of hooks, not a number. It reuses buildVariant so a text variant can carry the
+// spoof displacement too — which it should, because N copies differing only in a few hundred
+// text pixels are still near-duplicates to a perceptual hash.
+//
+// ⚠️ ONE ffmpeg pass, not two. Burning and then spoofing would re-encode twice for no reason;
+// the drawtext is spliced into the variant chain instead (before setpts — see buildVariant).
+// ⚠️ Audio is KEPT here, unlike burnCueList's -an. First Week reels are silent by design and
+// mux their voiceover afterwards; a Trial Reel copy that lost its sound would be unpostable.
+// ─────────────────────────────────────────
+
+const HOOK_TEXT_MAX = 10;        // same ceiling as VARIANT_MAX — a bigger A/B than that is not a test
+const HOOK_DEFAULT_SEC = 2.5;    // a title overlay is the first beat; 2.5s reads without rushing
+
+// ONE ffprobe for everything this route needs. The file already has probeDims (dimensions),
+// hasAudioStream (audio) and getVideoDimensions (dimensions again, throwing) — calling three of
+// them would run three probes over the same downloaded file to answer one question each.
+async function probeMedia(file) {
+  return new Promise(resolve => {
+    ffmpeg.ffprobe(file, (err, data) => {
+      if (err) return resolve({ width: 0, height: 0, duration: 0, hasAudio: false });
+      const streams = data.streams || [];
+      const v = streams.find(x => x.codec_type === 'video') || {};
+      resolve({
+        width: Number(v.width) || 0,
+        height: Number(v.height) || 0,
+        duration: Number(data.format && data.format.duration) || 0,
+        hasAudio: streams.some(x => x.codec_type === 'audio'),
+      });
+    });
+  });
+}
+
+app.post('/api/text-hooks', async (req, res) => {
+  const { videoUrl, seed, intensity, flip, speedUp } = req.body || {};
+  const style = req.body?.style || {};
+  const hooks = (Array.isArray(req.body?.hooks) ? req.body.hooks : [])
+    .map(h => (typeof h === 'string' ? { text: h } : (h || {})))
+    .map(h => ({ text: String(h.text || '').trim(), start: Number(h.start), end: Number(h.end) }))
+    .filter(h => h.text)
+    .slice(0, HOOK_TEXT_MAX);
+  if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+  if (!hooks.length) return res.status(400).json({ success: false, error: 'No hook text to burn' });
+  // Fail LOUDLY on the one environment fault that makes every burn silently impossible — the
+  // static ffmpeg build ships without libfreetype, so drawtext simply does not exist in it.
+  if (!SYSTEM_FFMPEG) return res.status(500).json({ success: false, error: 'no system ffmpeg with drawtext available (captions cannot be burned)' });
+
+  const runSeed = String(seed || Date.now());
+  const tier = intensity ? resolveTier(intensity) : null;   // '' / undefined = burn only, no spoof
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'texthook-'));
+  const inputPath = path.join(tmpDir, 'input.mp4');
+
+  try {
+    const dl = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 120000 });
+    fs.writeFileSync(inputPath, Buffer.from(dl.data));
+    const { width: W, height: H, duration, hasAudio } = await probeMedia(inputPath);
+    if (!W || !H) throw new Error('Could not read video dimensions');
+
+    const fontPath = captionFontPath(style.font);
+    const ratio = CAPTION_SIZES[String(style.size || 'xlarge').toLowerCase()] || CAPTION_SIZES.xlarge;
+    // Wrap to the width the REQUESTED size allows, then shrink only if a line still overruns.
+    // Wrapping first is what keeps a 9-word hook legible: shrinking it to one line would take
+    // the font under half the chosen size. 0.62em is the average advance used by burnCueList.
+    const nominal = Math.max(16, Math.round(H * ratio));
+    const maxChars = Math.max(10, Math.floor((W * 0.90) / (nominal * 0.62)));
+
+    const out = [];
+    for (let i = 0; i < hooks.length; i++) {
+      const h = hooks[i];
+      const start = Number.isFinite(h.start) && h.start >= 0 ? h.start : 0;
+      const end = Number.isFinite(h.end) && h.end > start
+        ? h.end
+        : (duration ? Math.min(duration, start + HOOK_DEFAULT_SEC) : start + HOOK_DEFAULT_SEC);
+      const lines = wrapHookText(h.text, maxChars).split('\n');
+      const longest = Math.max(...lines.map(l => l.length));
+      const widthLimited = Math.floor((W * 0.92) / (longest * 0.62));
+      let fontSize = Math.max(16, Math.min(nominal, widthLimited));
+      if (!Number.isFinite(fontSize) || fontSize < 12) fontSize = nominal;
+
+      // ⭐ ONE drawtext PER LINE, not one for the whole block. A single drawtext centres the
+      // BLOCK and left-aligns the lines inside it (measured 2026-09-16 on a real render: a
+      // 2-line hook came out ragged-right with both lines flush left) — ffmpeg's own
+      // text_align exists but only on newer builds, and the burn must not depend on the
+      // container's ffmpeg version. Placing each line puts x=(w-text_w)/2 on every line, so
+      // every line is centred on its own width.
+      // The y offsets are NUMBERS here, not the h-relative expressions burnCueList uses: those
+      // are written for one line and there is no way to express "this line, of N" in them.
+      const lineH = Math.round(fontSize * 1.28);
+      const blockH = lineH * lines.length;
+      const posName = String(style.position || 'upper').toLowerCase();
+      const top = posName === 'middle' ? Math.round((H - blockH) / 2)
+                : posName === 'bottom' ? Math.round(H - H * 0.14 - blockH)
+                : posName === 'lower'  ? Math.round(H - H * 0.26 - blockH)
+                : Math.round(H * 0.16);
+      const draws = lines.map((line, k) => {
+        const textFile = path.join(tmpDir, `hook_${i}_${k}.txt`);
+        fs.writeFileSync(textFile, line, 'utf8');
+        return drawtextCue({ file: textFile, fontPath, fontSize, color: style.color, edge: style.edge,
+                             y: String(Math.max(0, top + k * lineH)), start, end });
+      });
+
+      const v = tier ? buildVariant(variantRng(runSeed, i), W, H, tier, { flip: !!flip, speedUp: !!speedUp }) : null;
+      const vf = v ? [...v.vfPre, ...draws, ...v.vfPost] : [`scale=${W}:${H}`, 'format=yuv420p', ...draws];
+
+      const token = `txt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const outPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+      await new Promise((resolve, reject) => {
+        const cmd = ffmpeg(inputPath);
+        cmd.setFfmpegPath(SYSTEM_FFMPEG);   // drawtext lives only in the system build
+        const opts = ['-vf', vf.join(','), '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast', '-pix_fmt', 'yuv420p'];
+        // Keep the sound. With a spoof tier the audio is retimed with the picture (atempo),
+        // so it has to be re-encoded; without one it is copied untouched.
+        if (!hasAudio) opts.push('-an');
+        else if (v) opts.push('-af', v.af, '-c:a', 'aac', '-b:a', '128k');
+        else opts.push('-c:a', 'copy');
+        cmd.outputOptions(opts).output(outPath)
+          .on('error', err => {
+            console.error('[texthook] ffmpeg failed. chain:', vf.join(',').slice(0, 1200));
+            reject(err);
+          })
+          .on('end', resolve).run();
+      });
+      if (!fs.existsSync(outPath)) throw new Error(`Hook ${i + 1} produced no file`);
+      tempVideos.set(token, { filePath: outPath, createdAt: Date.now() });
+      out.push({
+        index: i + 1,
+        text: h.text,
+        lines,
+        fontSize,
+        start: +start.toFixed(2),
+        end: +end.toFixed(2),
+        url: `${req.protocol}://${req.get('host')}/api/temp-video/${token}`,
+        label: v ? v.label : 'text only · no re-framing',
+        params: v ? v.params : null,
+        bytes: fs.statSync(outPath).size,
+      });
+      console.log(`[texthook:${runSeed}] ${i + 1}/${hooks.length} "${h.text.slice(0, 40)}"`);
+    }
+
+    res.json({ success: true, seed: runSeed, count: out.length, dimensions: { width: W, height: H }, hasAudio, tier, variants: out });
+  } catch (err) {
+    const message = err.response?.data?.error?.message || err.message;
+    console.error(`[texthook:${runSeed}] error:`, message);
     res.status(500).json({ success: false, error: message });
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
