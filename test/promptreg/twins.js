@@ -53,6 +53,12 @@ const RULES = [
   ['crowd accuracy guard', /crowd staring/i],
   ['parameters-not-prose rule', /PARAMETERS ARE NOT PROSE/],
   ['tempo-word ban (real-time even on a slowed source)', /NEVER attach a tempo word to a person/],
+  // 2026-09-16 — the second-person copy class. The appearance ban and the multi-person rule
+  // used to contradict each other inside this one prompt (one forbade hair colour, the next
+  // demanded "an older man with grey hair"), and the model resolved it differently run to run.
+  ['appearance ban scoped to the influencer', /THIS BAN COVERS \[INFLUENCER\] ALONE/],
+  ['clothing is not a distinguishing description', /CLOTHING ALONE IS NOT A DISTINGUISHING DESCRIPTION/],
+  ['no-resemblance sentence must sit in the first third', /in the FIRST THIRD of the prompt and before any wardrobe description/],
 ];
 for (const [name, re] of RULES) {
   t(`ORIGINAL carries the ${name}`, re.test(ORIG || ''), 'rule missing from ORIGINAL');

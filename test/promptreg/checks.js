@@ -184,6 +184,115 @@ module.exports = {
   ],
 };
 
+// ── OTHER PEOPLE IN THE SCENE (2026-09-16) ────────────────────────────────────
+// The appearance ban protects the INFLUENCER: their look comes from reference photos,
+// so describing the source person can only fight those references. It never applied to
+// anyone ELSE in the scene — nobody else has reference images behind them, and a second
+// person described only by clothing is drawn FROM the references, i.e. as a copy of the
+// influencer (measured 2026-09-15: two men walking, the second came back with the
+// influencer's tattoos). The system prompt now requires a physical description of every
+// other person, so a whole-prompt appearance scan would fail a prompt for obeying its own
+// rule — the same shape as findMovement/findStillness, and fixed the same way.
+// Up to three adjectives may sit between the article and the noun. CALIBRATED: the first draft
+// allowed only a fixed list (second/other/older/younger/third) and missed "a young man with
+// short tousled sandy-blond hair" — the exact description the new rule asks for — which then
+// read as an appearance leak about the influencer. Over-stripping is the safe direction here.
+module.exports.OTHER_PERSON = /\b(?:a|the|another|one)\s+(?:[a-z]+(?:-[a-z]+)?\s+){0,3}(?:man|woman|guy|girl|boy|person|friend|companion|bystander|passer-?by|onlooker|pedestrian|stranger|child|kid|barista|waiter|waitress)\b/i;
+
+// A second person given real presence, as opposed to incidental background traffic. Kept
+// deliberately narrow: this is how the analyser phrases a genuine two-hander, and a crowd
+// scene (charliewelham) must NOT trip it — background people are required to stay incidental
+// by a different rule, so demanding their hair colour would fight that rule.
+module.exports.SECOND_PERSON = /\b(?:a|the)\s+second\s+(?:man|woman|guy|girl|person|figure)\b|\bthe\s+other\s+(?:man|woman|guy|girl)\b|\bboth\s+(?:men|women)\b|\bthe\s+two\s+(?:men|women)\b/i;
+
+// At least one of these must attach to that second person, or the model has nothing to draw
+// them from but the reference images. Clothing is deliberately absent from this list — it is
+// what the failing prompt DID supply, and it is not enough.
+// ⚠️ CALIBRATED, not guessed. The first draft included `frame` and it matched "keeping them
+// centered in the frame" and "chest-to-knee in frame" — the CAMERA, not a body — which passed
+// the 2026-09-15 good take for a physical description it does not contain. Same class as the
+// documented "olive" in "olive-toned walls". Body words that double as camera or scene words
+// (frame, figure, form) are therefore out; `build` survives only because \b keeps it out of
+// "building". Anything added here gets re-run against results/ first.
+module.exports.PHYSICAL_FEATURE = /\b(?:hair|hairline|beard|moustache|mustache|stubble|clean-shaven|bald|balding|build|physique|broad-shouldered|broader-shouldered|broader|taller|shorter|heavier|older|younger|grey-haired|gray-haired|tattoos?|tattooed|untattooed|unmarked|bare arms|clear skin|skin is)\b/i;
+
+// The "nobody else looks like the influencer" sentence the system prompt asks for.
+module.exports.NO_RESEMBLANCE = /\b(?:does not resemble|do not resemble|does not look like|nobody else|no one else|a different person|a completely different person|is not \[INFLUENCER\])\b/i;
+
+/* Remove the spans that describe SOMEONE ELSE, so the appearance patterns see only the text
+   that is about the influencer. A span runs from the other-person marker to the next
+   [INFLUENCER] mention, or to the end of the sentence — whichever comes first. Erring toward
+   removing slightly too much is deliberate: a pattern that fires on a healthy prompt gets the
+   RULE loosened to satisfy it, which is the one failure this suite exists to prevent (§7.7 #3). */
+module.exports.stripOtherPeople = function (sentence) {
+  const M = module.exports;
+  let out = String(sentence || '');
+  for (let guard = 0; guard < 6; guard++) {
+    const m = out.match(M.OTHER_PERSON);
+    if (!m) break;
+    const start = m.index;
+    const after = out.slice(start + m[0].length);
+    const nextInf = after.indexOf('[INFLUENCER]');
+    const end = nextInf < 0 ? out.length : start + m[0].length + nextInf;
+    out = out.slice(0, start) + ' ' + out.slice(end);
+  }
+  return out;
+};
+
+/* Appearance leak, scoped to the influencer. */
+module.exports.findAppearanceLeak = function (prompt) {
+  const M = module.exports;
+  const hits = [];
+  // ⚠️ Sentence enders ONLY — no em-dash split here, unlike findMovement. The other person's
+  // description is written as an em-dash aside ("a second man — sandy-blond hair, no facial
+  // hair, bare arms — drops his hand"), so splitting on the dash tears the marker off its own
+  // description and the aside reads as a leak about the influencer. Measured 2026-09-16.
+  for (const raw of String(prompt || '').split(/(?<=[.!?])\s+/)) {
+    const sent = M.stripOtherPeople(raw.trim());
+    if (!sent.trim()) continue;
+    for (const r of M.appearance) {
+      const m = sent.match(r);
+      if (m) hits.push(m[0]);
+    }
+  }
+  return hits;
+};
+
+/* The two-hander check. Returns the gaps, empty when the prompt has no prominent second
+   person (which is every single-subject source in the set — the check is inert there). */
+module.exports.findSecondPersonGaps = function (prompt) {
+  const M = module.exports;
+  const text = String(prompt || '');
+  if (!M.SECOND_PERSON.test(text)) return [];
+  const gaps = [];
+  // The physical feature has to sit in a sentence that is ABOUT that person, not anywhere
+  // in the prompt — the influencer's own wardrobe sentence would otherwise satisfy it.
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const theirs = sentences.filter(s => M.OTHER_PERSON.test(s) || M.SECOND_PERSON.test(s));
+  if (!theirs.some(s => M.PHYSICAL_FEATURE.test(s))) {
+    gaps.push('the second person is described by clothing only — no hair, build, age or skin, so the model draws them from the reference images');
+  }
+  const m = text.match(M.NO_RESEMBLANCE);
+  if (!m) {
+    gaps.push('no sentence says the second person is not the influencer');
+  } else {
+    // ⚠️ PLACEMENT, and why the threshold is a THIRD rather than a number fitted to one pair.
+    // MEASURED on the 2026-09-15 pair (same source, same model, 13 minutes apart): the take
+    // that came back correct carried this sentence 22% in, standing alone; the take that came
+    // back as a twin buried it 41% in, at the tail of a wardrobe sentence. Both carried it, so
+    // its PRESENCE is not the discriminator and a check asserting only presence passes the real
+    // failure — which this one originally did. n=1 pair cannot prove placement is the cause, so
+    // the bar is the FIRST THIRD idiom the system prompt already uses for the bystander-reaction
+    // rule, not 40% chosen to sit between two samples.
+    const at = text.slice(0, m.index).split(/\s+/).filter(Boolean).length;
+    const total = text.split(/\s+/).filter(Boolean).length || 1;
+    if (at / total > 1 / 3) {
+      gaps.push(`the no-resemblance sentence is ${Math.round(100 * at / total)}% into the prompt — the rule asks for the first third`);
+    }
+  }
+  return gaps;
+};
+
 // Movement attributed to the PERSON. Returns the genuine hits only.
 // Verified against the three real baselines (2026-09-04): the freeze case drops
 // 5 → 0 while the two healthy sources keep 6 and 3. That separation is the whole

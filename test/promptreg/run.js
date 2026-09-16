@@ -202,8 +202,15 @@ function check(prompt, fx) {
   const t = (name, ok, detail) => out.push({ name, ok, detail: ok ? '' : detail });
 
   t('uses the [INFLUENCER] placeholder', prompt.includes('[INFLUENCER]'), 'placeholder missing — the name swap cannot happen');
-  const app = hit(RX.appearance);
-  t('no appearance leak', !app.length, `describes the source person: ${app.join(', ')}`);
+  // Scoped to the INFLUENCER (2026-09-16). Other people in the scene are now REQUIRED to be
+  // described physically — a second person known only by their clothing gets drawn from the
+  // reference images, which is how a two-hander came back with two of the same man.
+  const app = RX.findAppearanceLeak(prompt);
+  t('no appearance leak (influencer)', !app.length, `describes the source person: ${app.join(', ')}`);
+  // Inert unless the prompt gives a second person real presence; background extras must stay
+  // incidental and are deliberately not covered.
+  const twoHander = RX.findSecondPersonGaps(prompt);
+  t('second person is a different person', !twoHander.length, twoHander.join('; '));
   const par = hit(RX.params);
   t('no parameters in prose', !par.length, `states a generation parameter: ${par.join(', ')}`);
   // Sentence-scoped, negation-aware: "paparazzi-style framing even though NO CROWD EXISTS"

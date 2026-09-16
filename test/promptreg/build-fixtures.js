@@ -91,7 +91,11 @@ function probeDuration(mp4) {
   const sources = manifest.sources.filter(s => !ONLY || s.slug === ONLY);
   if (!sources.length) { console.error('no sources matched --only=' + ONLY); process.exit(1); }
 
-  const tok = (await j(await fetch(`${STUDIO}/api/auth/token?lid=${LID}`))).token;
+  // 🔐 The OWNER lid is login-only since 2026-09-08 (Blocked #56): a bare /api/auth/token
+  // returns 403 login_required, which used to surface here as 'could not mint a studio token'.
+  // Same escape hatch the MCP server and the CLI use — the secret, never a plain lid.
+  const _authHeaders = process.env.IF_OWNER_SECRET ? { 'X-IF-Owner-Secret': process.env.IF_OWNER_SECRET, Origin: STUDIO } : {};
+  const tok = (await j(await fetch(`${STUDIO}/api/auth/token?lid=${LID}`, { headers: _authHeaders }))).token;
   if (!tok) throw new Error('could not mint a studio token');
 
   for (const s of sources) {
