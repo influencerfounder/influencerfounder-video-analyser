@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.39.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.39.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -439,6 +439,9 @@ function cloneJoinKey(b) {
     String(b.locationId || ''), String(b.videoUrl || ''), b.mode || '', b.promptStyle || '', b.targetModel || '',
     String(b.improveBrief || ''), b.shotCuts === true, b.personaGender || '', b.bgBrief || '',
     b.hookReport || null, b.driverPriors || null,
+    // elementTypes changes the SYSTEM prompt, so a cached answer built without it is the wrong
+    // answer — the 3-minute join/cache would otherwise serve a prompt that still names the breed.
+    Array.isArray(b.elementTypes) ? b.elementTypes.slice().sort().join(',') : '',
   ]);
 }
 function runRecorded(handler, req) {
@@ -502,6 +505,15 @@ const cloneHandler = async (req, res) => {
     // Seedance's ~150-word attention window. Whitelisted, and absent/unknown stays they/them
     // (the standing rule: never guess a gender, never fall back to a default one).
     const personaGender = ['male', 'female'].includes(req.body.personaGender) ? req.body.personaGender : null;
+    // 🐕 WHICH KINDS OF SUBJECT THE USER HAS THEIR OWN REFERENCE FOR (2026-09-16). The caller
+    // sends the element TYPES its influencer has saved — no names, no images. Scoped to 'pet' and
+    // 'vehicle' on purpose: 'outfit' is already covered by the wardrobe clause, and 'person'
+    // collides with the multi-person rule, which has its own measured shape.
+    const OWN_SUBJECT_KINDS = { pet: { label: 'animal', noun: 'the dog / the cat', eg: 'a wet, sandy golden retriever' },
+                                vehicle: { label: 'vehicle', noun: 'the car / the bike', eg: 'a matte black Porsche 911' } };
+    const elementTypes = Array.isArray(req.body.elementTypes)
+      ? [...new Set(req.body.elementTypes.filter(t => Object.prototype.hasOwnProperty.call(OWN_SUBJECT_KINDS, t)))]
+      : [];
     // 🎬 TARGET VIDEO MODEL (2026-09-07). Wan 3.0 reads long structured prompts (20,000-char cap;
     // vendor guides: "past a few hundred well-chosen words attention narrows and softer clauses
     // drop out") and cuts ONLY where a transition is named, otherwise it keeps one shot going.
@@ -1166,10 +1178,29 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       : personaGender === 'female'
       ? 'PRONOUNS: refer to [INFLUENCER] with she/her/hers throughout — never they/them. This is a GRAMMAR instruction only and does NOT license describing how she looks: the ban on hair, build, skin tone, age, ethnicity and tattoos still applies in full.'
       : '';
+    // 🐕 THE APPEARANCE BAN, ONE LEVEL OUT (2026-09-16). Rule (b) already forbids describing the
+    // SOURCE person because the user swaps in their own, whose look is set by reference photos —
+    // "references beat prompt text on anything they depict, so a description of the SOURCE person
+    // can only fight those references". That is word-for-word true of the user's own dog or car
+    // the moment they have a saved reference for it: MEASURED 2026-09-15, a recreate prompt said
+    // "a golden retriever" twice while a Cane Corso reference was attached, and the breed had to
+    // be deleted by hand before the tag would win. The user's saved element TYPES are the trigger,
+    // so nothing changes for anyone who has no such reference — they still get the full, faithful
+    // description. This makes the OUTPUT prompt shorter, never longer.
+    const OWN_SUBJECT_RULE = elementTypes.length ? (
+      'THE USER HAS THEIR OWN REFERENCE PHOTO FOR: ' + elementTypes.map(t => OWN_SUBJECT_KINDS[t].label).join(' and ') + '. '
+      + 'Rule (b) applies to ' + (elementTypes.length > 1 ? 'these' : 'this') + ' exactly as it applies to [INFLUENCER]: they swap in their own, its look is set by a reference photo, and references beat prompt text on anything they depict — so describing the SOURCE\'s '
+      + elementTypes.map(t => OWN_SUBJECT_KINDS[t].label).join(' or ') + ' can only fight that reference. '
+      + 'Name it with a PLAIN NOUN only (' + elementTypes.map(t => OWN_SUBJECT_KINDS[t].noun).join(', ') + ') and never its breed, model, colour, markings or size — '
+      + 'write "the dog", not "' + OWN_SUBJECT_KINDS[elementTypes[0]].eg + '". '
+      + 'Describe what it DOES and where it is, exactly as you do for [INFLUENCER]. '
+      + 'This frees words rather than spending them. It covers ONLY the kinds listed here — every other subject in the scene is described in full as usual.'
+    ) : '';
     const sysSend = [
       sysFinal,
       (shotCuts && !isBgSwap && promptStyle !== 'improve') ? SHOT_CUTS_RULE : '',
       (PRONOUN_RULE && !isBgSwap) ? PRONOUN_RULE : '',
+      (OWN_SUBJECT_RULE && !isBgSwap) ? OWN_SUBJECT_RULE : '',
     ].filter(Boolean).join('\n\n');
     const userFinal = isBgSwap
       ? `These ${frameBase64s.length} frames were extracted from my own source video. `
@@ -1470,6 +1501,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       targetModel,
       shotCuts: !!(shotCuts && !isBgSwap && promptStyle !== 'improve'),
       personaGender: (PRONOUN_RULE && !isBgSwap) ? personaGender : null,
+      elementTypes: (OWN_SUBJECT_RULE && !isBgSwap) ? elementTypes : [],
       viralReport,
       viralDrivers: VIRAL_DRIVERS,
       clonePrompt,
