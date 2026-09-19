@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.41.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.42.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -3062,6 +3062,14 @@ app.post('/api/assemble-reel', async (req, res) => {
   // or every spoken noun lands on the wrong picture — "eleven followers" would play over the
   // bed shot instead of the profile screenshot, and the whole reel runs offset from there.
   const audioDelaySec = Math.max(0, Math.min(15, Number(req.body?.audioDelaySec) || 0));
+  // audioStartSec: start the soundtrack this far IN, for a track whose music does not
+  // begin at 0:00. The Beat Edit needs it because beat detection drops every beat before
+  // the first two consecutive real onsets, so a song with a soft intro has nothing to cut
+  // on for several seconds — measured on a real report: 66.3 BPM, first beat ~6.4s, so a
+  // 10s edit spent 6.4s of it on one held shot. Distinct from audioDelaySec, which pushes
+  // the audio LATER for a silent cold open; this pulls the music EARLIER by dropping its
+  // intro. They compose: trim first, then delay.
+  const audioStartSec = Math.max(0, Math.min(600, Number(req.body?.audioStartSec) || 0));
   // Captions come from the plan's OWN text and timecodes — already written, already timed, and
   // already chunked to <=3 words by the caller. No transcription step, so nothing to mis-hear.
   const cues = Array.isArray(req.body?.captions) ? req.body.captions.slice(0, 200) : [];
@@ -3221,6 +3229,11 @@ app.post('/api/assemble-reel', async (req, res) => {
       const picSecs = await probeDuration(pictPath);
       await new Promise((resolve, reject) => {
         // -c:v copy: the picture is already correct, so muxing must never re-encode it.
+        // atrim on the DECODED stream rather than an input-level `-ss`: sample-accurate on
+        // a VBR mp3, and it keeps the whole chain in the one filter string that is already
+        // measured. asetpts is not optional — without it the trimmed audio keeps its
+        // original timestamps and lands audioStartSec late instead of at 0.
+        const trim = audioStartSec > 0 ? `atrim=start=${audioStartSec.toFixed(3)},asetpts=PTS-STARTPTS,` : '';
         const delay = audioDelaySec > 0 ? `adelay=${Math.round(audioDelaySec * 1000)}:all=1,` : '';
         // Optional fade-out over the last audioFadeOutSec so a soundtrack longer than the
         // picture ends musically instead of the hard -shortest chop. After apad on purpose:
@@ -3228,7 +3241,7 @@ app.post('/api/assemble-reel', async (req, res) => {
         // end of the PICTURE either way.
         const fadeSec = audioFadeOutSec > 0 && Number(picSecs) > 0 ? Math.min(audioFadeOutSec, Number(picSecs) / 2) : 0;
         const fade = fadeSec > 0 ? `,afade=t=out:st=${Math.max(0, Number(picSecs) - fadeSec).toFixed(3)}:d=${fadeSec.toFixed(3)}` : '';
-        const pad = delay + (Number(picSecs) > 0 ? `apad=whole_dur=${Number(picSecs).toFixed(3)}` : 'apad=whole_dur=600') + fade;
+        const pad = trim + delay + (Number(picSecs) > 0 ? `apad=whole_dur=${Number(picSecs).toFixed(3)}` : 'apad=whole_dur=600') + fade;
         ffmpeg().input(pictPath).input(aPath)
           .outputOptions(['-c:v copy', '-c:a aac', '-b:a 192k', '-map 0:v:0', '-map 1:a:0', '-af', pad, '-shortest'])
           .output(outputPath).on('end', resolve).on('error', reject).run();
