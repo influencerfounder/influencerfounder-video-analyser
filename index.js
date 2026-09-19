@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.40.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.41.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1196,11 +1196,42 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       + 'Describe what it DOES and where it is, exactly as you do for [INFLUENCER]. '
       + 'This frees words rather than spending them. It covers ONLY the kinds listed here — every other subject in the scene is described in full as usual.'
     ) : '';
+    /* 🫦 SPEECH IS NOT CHOREOGRAPHY (2026-09-19). A recreate is generated with audio:false and
+       two suppression clauses, so NOTHING the subject says can ever be heard — but the builder
+       had no rule about it, so when the frames showed someone talking it wrote the talking as
+       physical action. MEASURED on a red-carpet reel (@chaadhewitt, Wan 3.0, 12s): the prompt
+       said "mouth moving and expression animated", "mouth dropping fully open in a theatrical
+       gasp" and "mouth wide open in shock", and Kryfex came back opening and closing his mouth
+       on silence — which reads as a broken generation, not as talking.
+
+       ⚠️ THE TRIGGER HAS TO BE THE VISION MODEL, NOT A CODE TEST. The obvious code-side gate is
+       the transcript — and it is exactly backwards: on the video that produced this bug Whisper
+       returned nothing usable (red-carpet crowd noise), so an audio gate would have suppressed
+       the rule precisely when it was needed. The only thing that knows a mouth is moving is the
+       model looking at the frames, so this is written as an IF-rule, the sanctioned analyser-side
+       triggered form (CLAUDE.md: "IF the video shows X ... if not, do NOT invent it").
+       It lives in the SYSTEM prompt, so it costs the GENERATED prompt zero words and usually
+       REMOVES some — a suppression trigger, whose false positive loses one clause rather than
+       evicting a real rule from the 150-word attention window (PROMPT-HANDBOOK §7.6).
+
+       CALIBRATED on the 100 shipped recreate prompts, reading the sentence around every match
+       rather than counting hits: 9 carry the real defect (mouth/lips moving, mid-word,
+       mid-sentence, delivers a line, speaks into the lens, quoted dialogue) and 12 carry a HELD
+       expression — a gasp, a grin, a pout, lips parting into a smile — which is NOT speech,
+       renders correctly in silence, and must stay legal. Banning the mouth outright would have
+       cost those 12 their content, which is why the rule names the distinction instead.
+
+       Naming the banned phrases is safe HERE and only here: this text is read by the prompt
+       WRITER and never reaches the video model, so the 2026-09-13 naming-a-feature-draws-it
+       lesson does not apply to it. */
+    const SPEECH_MOTION_RULE = "🫦 TALKING IS NOT AN ACTION YOU CAN WRITE. IF the frames show anyone speaking — to camera, to an interviewer, or to someone off-frame — do NOT write that speech as movement. Never write \"mouth moving\", \"lips moving\", \"mouth open mid-word\", \"mid-sentence\", \"delivers a line\" or \"speaks directly into the camera\", and never put a spoken line in quotation marks. The clip is generated with no dialogue and no voice, so a mouth written as talking comes back opening and closing on silence, which reads as a broken generation rather than as speech. A single HELD expression is NOT speech and is still required: a grin, a laugh, an open-mouthed gasp, a pout, lips parting into a smile — describe those exactly as you always would. It is the continuous talking motion, and only that, which must never be written. Carry the same moment with everything else the frames show — the eye line, the head turns and tilts, the brow, the chin, the shoulders and the hands — and let the expression do the work. This rule costs nothing on a video where nobody is speaking.";
+
     const sysSend = [
       sysFinal,
       (shotCuts && !isBgSwap && promptStyle !== 'improve') ? SHOT_CUTS_RULE : '',
       (PRONOUN_RULE && !isBgSwap) ? PRONOUN_RULE : '',
       (OWN_SUBJECT_RULE && !isBgSwap) ? OWN_SUBJECT_RULE : '',
+      !isBgSwap ? SPEECH_MOTION_RULE : '',
     ].filter(Boolean).join('\n\n');
     const userFinal = isBgSwap
       ? `These ${frameBase64s.length} frames were extracted from my own source video. `
