@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.42.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.43.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1048,11 +1048,12 @@ ALSO BANNED ANYWHERE IN THE PROMPT, not just the opening clause:
 OUTPUT FORMAT — exactly this, nothing else:
 Line 1: "LANE: AUTHENTIC" or "LANE: HIGH-END" (stripped by the server and shown to the user as a switchable choice — it is the ONLY place the lane may appear).
 Line 2: "TALKING: YES" or "TALKING: NO" — YES only if the video is a TALKING-HEAD: a person on camera actually SPEAKING/narrating to the viewer with lip-synced spoken words (a monologue, piece-to-camera, vlog talk, interview answer). NO for everything else — music videos / lip-syncing to a song / singing, dance, product b-roll, montage, voiceover-over-visuals with no on-camera speaker, or no speech at all. When unsure, answer NO.
-Line 3: "DRIVER: <token>" — the single Step 0 token, exactly as written in the list.
-Line 4: "WHY: <one sentence>" — why THAT mechanism made this specific video travel, citing what you actually see (a moment, a timestamp, a reaction). No hedging, no generic praise.
-Line 5: "BEAT: <one sentence>" — the exact moment in the source that delivers the driver (e.g. "the head-turn from the woman passing at ~4s").
-Line 6: "PLAN: <one or two sentences>" — how the prompt you are about to write makes that mechanism hit HARDER than the original. Be concrete and specific to this video.
-Line 7: "LIMIT: <one sentence or 'none'>" — what will NOT transfer to an AI recreate (audio-dependent punchline, a real location, a named person, on-screen text) and what you substituted instead.
+Line 3: "LEGS: BARE" or "LEGS: COVERED" — BARE only if the prompt you write leaves [INFLUENCER]'s OWN legs bare and on screen (shorts, swimwear, a short skirt, a towel). COVERED for trousers, jeans, a suit, a long coat or dress, for legs out of frame or hidden, and whenever you cannot tell. Judge [INFLUENCER] alone, never another person in the scene. When unsure, answer COVERED.
+Line 4: "DRIVER: <token>" — the single Step 0 token, exactly as written in the list.
+Line 5: "WHY: <one sentence>" — why THAT mechanism made this specific video travel, citing what you actually see (a moment, a timestamp, a reaction). No hedging, no generic praise.
+Line 6: "BEAT: <one sentence>" — the exact moment in the source that delivers the driver (e.g. "the head-turn from the woman passing at ~4s").
+Line 7: "PLAN: <one or two sentences>" — how the prompt you are about to write makes that mechanism hit HARDER than the original. Be concrete and specific to this video.
+Line 8: "LIMIT: <one sentence or 'none'>" — what will NOT transfer to an AI recreate (audio-dependent punchline, a real location, a named person, on-screen text) and what you substituted instead.
 Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanation, no markdown, and never a lane word or a driver token inside the prompt itself.`;
 
     // Lane realism layers + negative suffix are appended in CODE (not by Claude) so
@@ -1143,8 +1144,29 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // 2026-09-13 on reel DXjvjW4jFjs: 45s of one woman talking straight to camera with burned-in
     // captions matching the transcript word for word — classified NO, because nothing had asked.
     const TALKING_LINE_RULE = 'a line — exactly "TALKING: YES" if a person is on camera actually SPEAKING/narrating to the viewer (a monologue, piece-to-camera, vlog talk, interview answer), or "TALKING: NO" for everything else (music video / lip-syncing to a song / singing, dance, product b-roll, montage, voiceover over visuals with no on-camera speaker, or no speech at all). Judge it from the frames AND the transcript together: a coherent spoken monologue in the transcript with a person facing camera in the frames is YES.';
-    const REALISM_CLONE_SYSTEM = ORIGINAL_CLONE_SYSTEM.replace('Return only the prompt text, no JSON, no explanation.', 'FIRST output a single line — exactly "LANE: AUTHENTIC" if the source looks phone-shot / UGC / handheld, or "LANE: HIGH-END" if it looks cinematic / professionally lit / polished. Then ' + TALKING_LINE_RULE + ' Then a blank line, then only the prompt text (no JSON, no explanation, and never mention the lane again inside the prompt).');
-    const ORIGINAL_CLONE_SYSTEM_TAGGED = ORIGINAL_CLONE_SYSTEM.replace('Return only the prompt text, no JSON, no explanation.', 'FIRST output ' + TALKING_LINE_RULE + ' Then a blank line, then only the prompt text, no JSON, no explanation.');
+    /* 🩳 LEGS: BARE|COVERED (2026-09-19). Which identity REFERENCES we send depends on this:
+       fullBody and back are the only two portraits that show legs, and on an ink persona they
+       are deliberately shot in athletic shorts so leg ink is visible. Sent on a clothed scene
+       they fight the wardrobe and win — MEASURED twice in one day, most clearly on a Peaky
+       Blinders recreate whose prompt said "a long overcoat falling to mid-shin over a dark
+       pinstripe three-piece suit" and which came back in shorts, bare legs and the reference's
+       own black trainers. A photograph of bare legs beats an implication of trousers.
+
+       ⚠️ WHY A LINE AND NOT A REGEX OVER THE PROMPT. The wardrobe is described accurately in
+       the prose — perception was never the problem — but free text does not say WHOSE legs.
+       Measured over the 100 shipped recreate prompts: 59 bare-leg mentions, and by hand-reading
+       the sentence around each one, roughly a quarter belong to somebody ELSE in the scene (a
+       man passing in shorts, a woman in a bikini, a background dancer). Same wrong-person class
+       as TOOL-CLEANUP I23. The model knows which person is [INFLUENCER]; a regex never can.
+
+       It is asked about the OUTFIT BEING WRITTEN, not about the source person's anatomy, so it
+       needs no new looking — it is a restatement of a wardrobe decision already made. Default
+       when the line is missing or unsure: COVERED, i.e. withhold the leg portraits. That
+       direction is deliberate — a wrong BARE reproduces the bug above, a wrong COVERED only
+       costs some leg-ink fidelity on a scene that never showed legs anyway. */
+    const LEGS_LINE_RULE = 'a line — exactly "LEGS: BARE" if the prompt you are about to write leaves [INFLUENCER]\'s OWN legs bare and on screen (shorts, swim shorts, boardshorts, a bikini, a short skirt or dress, a towel, underwear — any outfit in which their bare leg skin is visible), or "LEGS: COVERED" for everything else, INCLUDING trousers, jeans, a suit, a long coat or dress, and including when their legs are out of frame, hidden behind people or objects, or you simply cannot tell. Judge [INFLUENCER] ALONE — never anyone else in the scene, however they are dressed. When unsure, answer COVERED.';
+    const REALISM_CLONE_SYSTEM = ORIGINAL_CLONE_SYSTEM.replace('Return only the prompt text, no JSON, no explanation.', 'FIRST output a single line — exactly "LANE: AUTHENTIC" if the source looks phone-shot / UGC / handheld, or "LANE: HIGH-END" if it looks cinematic / professionally lit / polished. Then ' + TALKING_LINE_RULE + ' Then ' + LEGS_LINE_RULE + ' Then a blank line, then only the prompt text (no JSON, no explanation, and never mention the lane again inside the prompt).');
+    const ORIGINAL_CLONE_SYSTEM_TAGGED = ORIGINAL_CLONE_SYSTEM.replace('Return only the prompt text, no JSON, no explanation.', 'FIRST output ' + TALKING_LINE_RULE + ' Then ' + LEGS_LINE_RULE + ' Then a blank line, then only the prompt text, no JSON, no explanation.');
     const originalUserText = transcript
       ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the video prompt.`
       : `These ${frameBase64s.length} frames were extracted from the viral video (no audio). Create the video prompt.`;
@@ -1474,6 +1496,20 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       // what made Get script refuse every video from 2026-09-09 to 2026-09-13, invisibly.
       console.warn(`[clone] no TALKING: line in the model output (promptStyle=${promptStyle}) — talkingHead defaults to false, which GATES the Get-script feature`);
     }
+    // 🩳 LEGS: BARE|COVERED — read BY NAME rather than by position, because LANE and TALKING
+    // are the only two lines whose position is load-bearing (their regexes are anchored at the
+    // start of the remaining string) and this must not become a third thing that can break them.
+    // Absent => COVERED. See LEGS_LINE_RULE above for why that is the safe direction.
+    let legsBare = false;
+    {
+      const m = basePrompt.match(/^LEGS:\s*(BARE|COVERED)\s*$/im);
+      if (m) {
+        legsBare = m[1].toUpperCase() === 'BARE';
+        basePrompt = (basePrompt.slice(0, m.index) + basePrompt.slice(m.index + m[0].length)).replace(/^\n+/, '').trim();
+      } else if (!isBgSwap) {
+        console.warn(`[clone] no LEGS: line in the model output (promptStyle=${promptStyle}) — legsBare defaults to false, so the leg portraits are withheld`);
+      }
+    }
     // 🧠 WHY-IT-WENT-VIRAL REPORT (improve mode only). Parsed AFTER the LANE and
     // TALKING strips so those two anchored regexes keep matching line 1 / line 2
     // exactly as before — the report lines are appended below them, never above.
@@ -1523,6 +1559,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       transcriptRejected: transcriptRejected || undefined,
       transcriptLowConfidence: transcriptLowConfidence || undefined,
       talkingHead,
+      legsBare,
       lane,
       laneLayers: LANE_LAYERS,
       ...recommendRecreateSpec(duration),
