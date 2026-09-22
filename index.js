@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.43.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.44.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1939,6 +1939,94 @@ app.post('/api/faststart', async (req, res) => {
     res.json({ success: true, videoUrl: `${req.protocol}://${req.get('host')}/api/temp-video/${token}`, token, bytes });
   } catch (err) {
     console.error(`[faststart:${token}] error:`, err.message);
+    try { fs.unlinkSync(outputPath); } catch (_) {}
+    res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
+  } finally {
+    try { fs.unlinkSync(inputPath); } catch (_) {}
+  }
+});
+
+// POST /api/preview — a SMALL playback copy of an mp4. The master is untouched.
+//
+// WHY. MEASURED 2026-09-22, on Mike's report that phone-app videos "load really
+// slow again, need to wait a minute or so": the old causes were all still fixed
+// (moov at byte 32, both hosts range-serve, posters present since 09-16). What
+// had changed was the BYTES. Kie/Wan emits enormous bitrates — a 24s 720x1280
+// recreate measured 30.2 MB at 10.06 Mbps, and an 18s one 31.3 MB at 14.4 Mbps.
+// Instagram's own 720x1280 h264 is 1,033 kb/s [measured, see CLAUDE.md], so we
+// were shipping ~10x the bitrate Instagram itself uses at the same resolution.
+//
+// When the encoded bitrate exceeds the connection, a phone cannot stream at all —
+// it buffers most of the file before it will start. On a 3 Mbps link that master
+// needs 81s. That IS the "minute or so".
+//
+// ⚠️ THIS NEVER TOUCHES A MASTER. The never-degrade rule (CLAUDE.md, absolute,
+// widened 2026-09-20 to generated masters) is why this is a SECOND file and not a
+// re-encode in place: the master stays byte-identical and remains what Save, Post,
+// Drive and every download hand over. This output exists only to be the `src` of a
+// <video> on a phone — it is a viewing copy, never a deliverable.
+//
+// Same resolution on purpose. The size comes from the bitrate, not the pixels, so
+// downscaling would cost visible detail for a saving CRF already gives for free:
+// measured on that 30.2 MB master, CRF 23 at the SAME 720x1280 gave 5.0 MB at
+// 1.53 Mbps — 6.1x smaller, still 60% above Instagram's own bitrate, and 13s
+// rather than 81s to buffer on a 3 Mbps link.
+//
+// -movflags +faststart because a viewing copy that needs a tail-seek would undo
+// half the point. Audio is copied, not re-encoded: it is a rounding error in the
+// size and re-encoding it is pure loss.
+const PREVIEW_CRF = 23;
+app.post('/api/preview', async (req, res) => {
+  cleanOldTempVideos();
+  const { videoUrl } = req.body || {};
+  if (!videoUrl || !/^https?:\/\//i.test(String(videoUrl))) {
+    return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+  }
+  const token = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const inputPath = path.join(os.tmpdir(), `previn_${token}.mp4`);
+  const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+  try {
+    const dl = await axios.get(videoUrl, {
+      responseType: 'arraybuffer', timeout: 180000,
+      maxContentLength: 300 * 1024 * 1024,
+    });
+    fs.writeFileSync(inputPath, Buffer.from(dl.data));
+    const srcBytes = fs.existsSync(inputPath) ? fs.statSync(inputPath).size : 0;
+    if (srcBytes < 1000) {
+      return res.status(400).json({ success: false, error: 'Could not download that video — the link may have expired.' });
+    }
+    await new Promise((resolve, reject) => {
+      ffmpeg(inputPath)
+        .outputOptions([
+          '-c:v', 'libx264', '-crf', String(PREVIEW_CRF), '-preset', 'veryfast',
+          '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart',
+        ])
+        .output(outputPath)
+        .on('end', resolve)
+        .on('error', reject)
+        .run();
+    });
+    if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 1000) {
+      return res.status(500).json({ success: false, error: 'Preview transcode produced no output' });
+    }
+    const bytes = fs.statSync(outputPath).size;
+    // A preview that is not meaningfully smaller is not worth serving: it would
+    // cost a second file and a second fetch to save nothing. Say so honestly and
+    // let the caller keep pointing at the master.
+    if (bytes >= srcBytes * 0.8) {
+      try { fs.unlinkSync(outputPath); } catch (_) {}
+      console.log(`[preview:${token}] not worth it — ${Math.round(bytes / 1024)}KB vs ${Math.round(srcBytes / 1024)}KB source`);
+      return res.json({ success: true, worthwhile: false, bytes, srcBytes });
+    }
+    tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
+    console.log(`[preview:${token}] ${Math.round(srcBytes / 1024)}KB -> ${Math.round(bytes / 1024)}KB (${(srcBytes / bytes).toFixed(1)}x)`);
+    res.json({
+      success: true, worthwhile: true,
+      videoUrl: `${req.protocol}://${req.get('host')}/api/temp-video/${token}`,
+      token, bytes, srcBytes,
+    });
+  } catch (err) {
+    console.error(`[preview:${token}] error:`, err.message);
     try { fs.unlinkSync(outputPath); } catch (_) {}
     res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
   } finally {
