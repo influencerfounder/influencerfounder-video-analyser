@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.44.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.44.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1976,11 +1976,33 @@ app.post('/api/faststart', async (req, res) => {
 // half the point. Audio is copied, not re-encoded: it is a rounding error in the
 // size and re-encoding it is pure loss.
 const PREVIEW_CRF = 23;
+// 🔒 ONLY OUR OWN MASTERS (2026-09-25, /toolscan F1, Mike: "Go with A now"). This route has no
+// credential — like every analyser route (TOOL-CLEANUP I19) — and it downloads up to 300 MB
+// and runs a full libx264 encode, so it would transcode ANY link for ANYONE who found the URL.
+// Its only caller is the tool's previewRenditions.previewFor(), and a master only ever lives
+// in two places: our Vercel Blob store (students, and every preview) and GHL's media CDN
+// (the owner's archive). So this is a host allowlist, not auth: https only, and the hostname
+// compared EXACTLY after URL parsing — a suffix/regex test lets `…vercel-storage.com.evil.io`
+// or another customer's Blob store through (the portrait-top lesson, I24). The Blob hostname
+// IS the store id and never changes (CLAUDE.md: transfer, never re-create). The real fix for
+// the analyser as a whole is still a shared secret on every route — I19, its own planned job.
+const PREVIEW_HOSTS = new Set([
+  'awn0zbclt6wlzynd.public.blob.vercel-storage.com',
+  'assets.cdn.filesafe.space',
+]);
+function previewSourceAllowed(raw) {
+  let u;
+  try { u = new URL(String(raw || '')); } catch (_) { return false; }
+  return u.protocol === 'https:' && !u.username && !u.password && !u.port && PREVIEW_HOSTS.has(u.hostname);
+}
 app.post('/api/preview', async (req, res) => {
   cleanOldTempVideos();
   const { videoUrl } = req.body || {};
-  if (!videoUrl || !/^https?:\/\//i.test(String(videoUrl))) {
+  if (!videoUrl) {
     return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+  }
+  if (!previewSourceAllowed(videoUrl)) {
+    return res.status(403).json({ success: false, error: 'Previews are made only from the tool\'s own stored videos.' });
   }
   const token = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const inputPath = path.join(os.tmpdir(), `previn_${token}.mp4`);
@@ -1989,6 +2011,7 @@ app.post('/api/preview', async (req, res) => {
     const dl = await axios.get(videoUrl, {
       responseType: 'arraybuffer', timeout: 180000,
       maxContentLength: 300 * 1024 * 1024,
+      maxRedirects: 0,   // the allowlist judges THIS host; a redirect would fetch another
     });
     fs.writeFileSync(inputPath, Buffer.from(dl.data));
     const srcBytes = fs.existsSync(inputPath) ? fs.statSync(inputPath).size : 0;
