@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.44.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.45.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1248,12 +1248,29 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
        lesson does not apply to it. */
     const SPEECH_MOTION_RULE = "🫦 TALKING IS NOT AN ACTION YOU CAN WRITE. IF the frames show anyone speaking — to camera, to an interviewer, or to someone off-frame — do NOT write that speech as movement. Never write \"mouth moving\", \"lips moving\", \"mouth open mid-word\", \"mid-sentence\", \"delivers a line\" or \"speaks directly into the camera\", and never put a spoken line in quotation marks. The clip is generated with no dialogue and no voice, so a mouth written as talking comes back opening and closing on silence, which reads as a broken generation rather than as speech. A single HELD expression is NOT speech and is still required: a grin, a laugh, an open-mouthed gasp, a pout, lips parting into a smile — describe those exactly as you always would. It is the continuous talking motion, and only that, which must never be written. Carry the same moment with everything else the frames show — the eye line, the head turns and tilts, the brow, the chin, the shoulders and the hands — and let the expression do the work. This rule costs nothing on a video where nobody is speaking.";
 
+    /* ✂️ EVERY CUT IS A HARD CUT (Mike, 2026-09-29: "When a recreate video uses cuts it creates a
+       fade instead of a hard cut. I prefer a hard cut"). MEASURED on the last 22 Wan recreates
+       (a blend-detector over every frame + frame strips): one ~0.5s cross-dissolve, in a clip
+       whose prompt said "The sequence cuts to black, then opens on a second location" — while
+       a clip whose prompt said "A hard cut brings a third setup … All cuts are clean" rendered
+       three clean single-frame cuts. With Shot Cuts OFF this writer was free to phrase a change
+       of setup any way it liked ("cuts to black", "fades", "gives way to", "then opens on"), and
+       the vague ones read as a soft transition. Content-triggered: a single-take source writes
+       no cut at all, so this costs the video prompt 0 words there. The literal words "hard cut"
+       are also what the tool keys on to NOT append Wan's single-shot clause (which says "no hard
+       cut") — so this keeps the two layers from contradicting each other. Read by the prompt
+       WRITER only; the banned phrases never reach the video model. */
+    const HARD_CUT_RULE = "✂️ CUTS ARE HARD CUTS. IF the source changes camera setup, framing or location, write each change as a hard cut — "
+      + (isWan ? "start that shot with the words \"Hard cut transition,\" and then its content" : "start that shot with \"Hard cut to\" and then its content")
+      + ". Never write a fade, a dissolve, a cross-fade, \"cuts to black\", \"fades in/out\", \"transitions to\", \"gives way to\" or \"then opens on\" for a change of shot, and never end the clip on a fade or dim to black. IF the source is one continuous take, write no cut at all.";
+
     const sysSend = [
       sysFinal,
       (shotCuts && !isBgSwap && promptStyle !== 'improve') ? SHOT_CUTS_RULE : '',
       (PRONOUN_RULE && !isBgSwap) ? PRONOUN_RULE : '',
       (OWN_SUBJECT_RULE && !isBgSwap) ? OWN_SUBJECT_RULE : '',
       !isBgSwap ? SPEECH_MOTION_RULE : '',
+      !isBgSwap ? HARD_CUT_RULE : '',
     ].filter(Boolean).join('\n\n');
     const userFinal = isBgSwap
       ? `These ${frameBase64s.length} frames were extracted from my own source video. `

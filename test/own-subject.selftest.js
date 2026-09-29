@@ -21,7 +21,7 @@ const grab = (start, end, label) => {
 // Compile the real declarations + the real rule builder, with req.body as the only free variable.
 const kinds = grab('const OWN_SUBJECT_KINDS = {', '    const elementTypes', 'OWN_SUBJECT_KINDS');
 const read  = grab('    const elementTypes = Array.isArray(req.body.elementTypes)', '      : [];', 'elementTypes read') + '      : [];';
-const rule  = grab('    const OWN_SUBJECT_RULE = elementTypes.length ? (', '\n    const sysSend', 'OWN_SUBJECT_RULE');
+const rule  = grab('    const OWN_SUBJECT_RULE = elementTypes.length ? (', "\n    ) : '';", 'OWN_SUBJECT_RULE') + "\n    ) : '';";
 const build = new Function('req', `${kinds}\n${read}\n${rule}\nreturn { elementTypes, OWN_SUBJECT_RULE };`);
 const run = (elementTypes) => build({ body: elementTypes === undefined ? {} : { elementTypes } });
 
