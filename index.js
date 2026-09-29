@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.45.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.45.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1260,9 +1260,15 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
        are also what the tool keys on to NOT append Wan's single-shot clause (which says "no hard
        cut") — so this keeps the two layers from contradicting each other. Read by the prompt
        WRITER only; the banned phrases never reach the video model. */
-    const HARD_CUT_RULE = "✂️ CUTS ARE HARD CUTS. IF the source changes camera setup, framing or location, write each change as a hard cut — "
+    // 1:1 WITH THE SOURCE (Mike, 2026-09-29: "if there is a cut we need to model that cut 1 on 1 with
+    // the video we model … and don't make cuts yourself"). The dissolve's source (@exog_edit) turned out
+    // to cut HARD into a split-second BLACK frame between setups — so "cuts to black" was accurate and
+    // must stay writable; what failed was the render. A black flash is written as two hard cuts.
+    const HARD_CUT_RULE = "✂️ CUTS ARE HARD CUTS, MIRRORED 1:1 FROM THE SOURCE. IF the source changes camera setup, framing or location, write each change as a hard cut at that moment — "
       + (isWan ? "start that shot with the words \"Hard cut transition,\" and then its content" : "start that shot with \"Hard cut to\" and then its content")
-      + ". Never write a fade, a dissolve, a cross-fade, \"cuts to black\", \"fades in/out\", \"transitions to\", \"gives way to\" or \"then opens on\" for a change of shot, and never end the clip on a fade or dim to black. IF the source is one continuous take, write no cut at all.";
+      + ". IF the source flashes to a black frame between two shots, write that as hard cuts too: "
+      + (isWan ? "\"Hard cut transition, a black frame for a split second. Hard cut transition, …\"" : "\"Hard cut to a black frame for a split second. Hard cut to …\"")
+      + ". Never describe a change of shot as a fade, a dissolve, a cross-fade, \"fades to black\", \"transitions to\", \"gives way to\" or \"then opens on\". Never invent a cut the source does not have: IF the source is one continuous take, write no cut at all.";
 
     const sysSend = [
       sysFinal,

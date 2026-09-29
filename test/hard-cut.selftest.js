@@ -37,8 +37,16 @@ t('both wordings contain the literal "hard cut" the tool\'s multi-shot detector 
   for (const phrase of ['Hard cut transition, close on her eyes.', 'Hard cut to a wide shot.']) assert.ok(RE.test(phrase));
 });
 t('the soft-transition forms that produced the dissolve are each named', () => {
-  for (const form of ['fade', 'dissolve', 'cuts to black', 'transitions to', 'gives way to', 'then opens on', 'dim to black'])
+  for (const form of ['fade', 'dissolve', 'fades to black', 'transitions to', 'gives way to', 'then opens on'])
     assert.ok(WAN.includes(form) && SEED.includes(form), 'no longer names: ' + form);
+});
+t('a black flash between shots is mirrored as hard cuts, not banned (the @exog_edit source has one)', () => {
+  assert.ok(WAN.includes('"Hard cut transition, a black frame for a split second. Hard cut transition,'), 'Wan black-frame form missing');
+  assert.ok(SEED.includes('"Hard cut to a black frame for a split second. Hard cut to'), 'Seedance black-frame form missing');
+  assert.ok(!/Never[^.]*cuts to black/.test(WAN), 'a genuine cut to black must stay writable');
+});
+t('it forbids inventing cuts — 1:1 with the source', () => {
+  assert.ok(/MIRRORED 1:1 FROM THE SOURCE/.test(WAN) && /Never invent a cut the source does not have/.test(WAN));
 });
 console.log(fail ? `FAIL ${fail} failed, ${pass} passed` : `OK ${pass} passed, 0 failed`);
 process.exit(fail ? 1 : 0);
