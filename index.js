@@ -7,6 +7,10 @@ const ffmpeg = require('fluent-ffmpeg');
 const FormData = require('form-data');
 const ffmpegStatic = require('ffmpeg-static');
 const ffprobeStatic = require('ffprobe-static');
+// One version constant, read by /health AND returned with every recreate prompt, so the
+// tool can record on each video which analyser build wrote its prompt (2026-09-30 —
+// the attribution work: "which prompt change moved virality" needs the version per video).
+const ANALYSER_VERSION = '2.47.0';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 // drawtext (used by caption burn-in) needs libfreetype, which the ffmpeg-static
@@ -343,7 +347,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.46.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: ANALYSER_VERSION, uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1598,6 +1602,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       legsBare,
       lane,
       laneLayers: LANE_LAYERS,
+      analyserVersion: ANALYSER_VERSION,
       ...recommendRecreateSpec(duration),
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
       sourceAudio,
@@ -2087,6 +2092,68 @@ app.post('/api/preview', async (req, res) => {
   } catch (err) {
     console.error(`[preview:${token}] error:`, err.message);
     try { fs.unlinkSync(outputPath); } catch (_) {}
+    res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
+  } finally {
+    try { fs.unlinkSync(inputPath); } catch (_) {}
+  }
+});
+
+// POST /api/fingerprint — a tiny picture fingerprint of a video or an image (2026-09-30).
+//
+// WHY. The tool links an Instagram post to the video it came from by matching the post's
+// COVER against every frame of every video we generated (Mike picks his own cover, never
+// the first frame). The ✓ Posted time-window matcher it replaces linked 5 of 9 Kryfex
+// posts to the wrong video; picture matching got 17/17 right in the 2026-09-30 test
+// (personas/kryfex/KRYFEX-VIRAL-DECLINE-RAPPORT.md §8.5).
+//
+// WHAT. ffmpeg, the SAME filter chain for both sides so the two are comparable: every
+// frame at 2 fps (a video) or the single frame (an image) → area-downscaled to 9×16 →
+// 8-bit grey. 144 bytes a frame — measured to give the same 17 answers as a 45×80 colour
+// fingerprint. Returned as base64 of the raw bytes; the tool normalises and scores.
+//
+// 🔒 Same host allowlist as /api/preview (TOOL-CLEANUP I19 still owed for the whole
+// service): only our own Blob store and GHL's media CDN, https, no redirects.
+const FP_W = 9, FP_H = 16, FP_FPS = 2, FP_MAX_FRAMES = 360;   // 360 frames = 3 minutes
+app.post('/api/fingerprint', async (req, res) => {
+  const { url } = req.body || {};
+  if (!url) return res.status(400).json({ success: false, error: 'Missing url' });
+  if (!previewSourceAllowed(url)) {
+    return res.status(403).json({ success: false, error: 'Fingerprints are made only from the tool\'s own stored media.' });
+  }
+  const token = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const inputPath = path.join(os.tmpdir(), `fpin_${token}`);
+  try {
+    const dl = await axios.get(url, {
+      responseType: 'arraybuffer', timeout: 180000,
+      maxContentLength: 300 * 1024 * 1024, maxRedirects: 0,
+    });
+    const ctype = String(dl.headers['content-type'] || '').toLowerCase();
+    fs.writeFileSync(inputPath, Buffer.from(dl.data));
+    if (fs.statSync(inputPath).size < 200) {
+      return res.status(400).json({ success: false, error: 'Could not download that file — the link may have expired.' });
+    }
+    const isImage = ctype.startsWith('image/') || /\.(jpe?g|png|webp)(\?|$)/i.test(url);
+    const bin = SYSTEM_FFMPEG || process.env.FFMPEG_BIN || ffmpegStatic;   // FFMPEG_BIN: local runs only
+    const vf = `${isImage ? '' : `fps=${FP_FPS},`}scale=${FP_W}:${FP_H}:flags=area,format=gray`;
+    const args = ['-v', 'error', '-i', inputPath, '-vf', vf, '-frames:v', String(isImage ? 1 : FP_MAX_FRAMES), '-f', 'rawvideo', 'pipe:1'];
+    const raw = await new Promise((resolve, reject) => {
+      const { spawn } = require('child_process');
+      const p = spawn(bin, args);
+      const chunks = []; let err = '';
+      p.stdout.on('data', (d) => chunks.push(d));
+      p.stderr.on('data', (d) => { err += d.toString(); });
+      p.on('error', reject);
+      p.on('close', (code) => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`ffmpeg exited ${code}: ${err.slice(0, 160)}`)));
+    });
+    const frame = FP_W * FP_H;
+    const n = Math.floor(raw.length / frame);
+    if (!n) return res.status(422).json({ success: false, error: 'No frames could be read from that file.' });
+    res.json({
+      success: true, kind: isImage ? 'image' : 'video', w: FP_W, h: FP_H, fps: isImage ? null : FP_FPS,
+      frames: n, data: raw.subarray(0, n * frame).toString('base64'), version: ANALYSER_VERSION,
+    });
+  } catch (err) {
+    console.error(`[fingerprint:${token}] error:`, err.message);
     res.status(500).json({ success: false, error: String(err.message || err).slice(0, 200) });
   } finally {
     try { fs.unlinkSync(inputPath); } catch (_) {}
