@@ -343,7 +343,7 @@ try {
 // blinked. It is also Railway's healthcheck path (railway.json) so a redeploy only takes
 // traffic once the new container answers.
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.45.1', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', service: 'InfluencerFounder Video Analyser', version: '2.46.0', uptimeSec: Math.round(process.uptime()), rssMb: Math.round(process.memoryUsage().rss / 1048576), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────
@@ -1270,6 +1270,18 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       + (isWan ? "\"Hard cut transition, a black frame for a split second. Hard cut transition, …\"" : "\"Hard cut to a black frame for a split second. Hard cut to …\"")
       + ". Never describe a change of shot as a fade, a dissolve, a cross-fade, \"fades to black\", \"transitions to\", \"gives way to\" or \"then opens on\". Never invent a cut the source does not have: IF the source is one continuous take, write no cut at all.";
 
+    /* 👟 GETTING OUT OF A CAR INTO SHOES (Mike, 2026-09-30: "stepping out of a car putting on shoes …
+       I use this a lot"). MEASURED on one source (@vladbykovbrand, green Urus: he pulls his mules off,
+       tosses them onto the tile, then hops out and lands straight in them). Three analyses of that SAME
+       clip wrote three DIFFERENT wrong sequences — shoes set down + "planted back on mid-exit"; hotel
+       slippers off + a SECOND pair of loafers on; out barefoot + slipped on standing, one foot at a time
+       — and Wan drew each one faithfully. Not a frame shortage (the owner path samples ~4 fps): the
+       writer fell back on how people USUALLY put shoes on. The tool's car_shoes scene clause fired on
+       take 3 and lost, because the detailed wrong description outweighs a one-line outcome; only the
+       writer can see which it is, so the fix lives here (trigger-must-be-the-observer). IF-rule, so any
+       video without this moment pays nothing. Writer-only text: the video model never reads it. */
+    const CAR_SHOES_RULE = "👟 IF the frames show someone getting out of a vehicle while their shoes come off or go on, watch that moment frame by frame before writing it: where the shoes are (on the feet, in a hand, tossed or placed onto the ground — and where they land), and whether the feet go straight into them on the way out. Write that moment in ONE sentence, in the order the source shows it, naming where the shoes end up and how the feet meet them. Never add a step the frames do not clearly show — no extra barefoot pause or walk, no putting shoes on while standing, and no second pair of shoes.";
+
     const sysSend = [
       sysFinal,
       (shotCuts && !isBgSwap && promptStyle !== 'improve') ? SHOT_CUTS_RULE : '',
@@ -1277,6 +1289,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       (OWN_SUBJECT_RULE && !isBgSwap) ? OWN_SUBJECT_RULE : '',
       !isBgSwap ? SPEECH_MOTION_RULE : '',
       !isBgSwap ? HARD_CUT_RULE : '',
+      !isBgSwap ? CAR_SHOES_RULE : '',
     ].filter(Boolean).join('\n\n');
     const userFinal = isBgSwap
       ? `These ${frameBase64s.length} frames were extracted from my own source video. `
