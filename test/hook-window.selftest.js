@@ -141,7 +141,8 @@ t('STEP 3 no longer promises a "negative suffix" it does not append', () => {
   assert(/deliberately NO avoid-list/.test(SRC), 'Claude is not told to skip avoid-lines of its own');
 });
 t('the version marker was bumped (the free deploy signal)', () => {
-  const m = SRC.match(/version: '(\d+\.\d+\.\d+)'/);
+  // Since 2.47.0 the version lives in ONE constant (ANALYSER_VERSION) that /health returns.
+  const m = SRC.match(/(?:version: |const ANALYSER_VERSION = )'(\d+\.\d+\.\d+)'/);
   assert(m, 'version field missing');
   // Assert the marker exists and is at/past the version this feature shipped in —
   // never pin an exact value. The point of the field is that it gets BUMPED on every

@@ -173,7 +173,8 @@ t('a missing TALKING line is warned about, never silently read as NO', () => {
 // thing worth asserting is that the version moved PAST the release that added the rescue,
 // not that it equals it.
 t('the version is at or past the release that added the rescue (2.33.0)', () => {
-  const m = SRC.match(/version: '(\d+)\.(\d+)\.(\d+)'/);
+  // Since 2.47.0 the version lives in ONE constant (ANALYSER_VERSION) that /health returns.
+  const m = SRC.match(/(?:version: |const ANALYSER_VERSION = )'(\d+)\.(\d+)\.(\d+)'/);
   assert.ok(m, 'no version string in index.js');
   const [maj, min] = [Number(m[1]), Number(m[2])];
   assert.ok(maj > 2 || (maj === 2 && min >= 33), `version ${m[0]} is older than the rescue release 2.33.0`);
