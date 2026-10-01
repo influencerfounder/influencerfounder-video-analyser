@@ -31,7 +31,9 @@ t('no cut found → an EMPTY list (a measured "none"), not null', () => assert.d
 // (2) hook frames inside the first shot
 const hookTsCode = grab('    const hookEnd = Math.min(', '    for (const ts of hookTs) {', 'hookTs');
 const hookTs = new Function('promptStyle', 'duration', 'measuredCuts', `${hookTsCode}\nreturn hookTs;`);
-t('hookfirst: five hook frames, all before the first cut (1.21 s)', () => { const h = hookTs('hookfirst', 9.17, [1.21, 2.92]); assert.strictEqual(h.length, 5); assert.ok(h.every(x => x > 0 && x < 1.21), JSON.stringify(h)); });
+t('hookfirst: all hook frames before the first cut (1.21 s), dense in the first second', () => { const h = hookTs('hookfirst', 9.17, [1.21, 2.92]); assert.ok(h.length >= 6 && h.every(x => x > 0 && x < 1.21), JSON.stringify(h)); });
+t('hookfirst: at least 4 frames inside the first 0.6 s, so a short leg/hand movement spans several frames', () => { const h = hookTs('hookfirst', 9, []); assert.ok(h.filter(x => x <= 0.6).length >= 4, JSON.stringify(h)); });
+t('hookfirst: frames sorted and never closer than 0.1 s', () => { const h = hookTs('hookfirst', 9, []); for (let i = 1; i < h.length; i++) assert.ok(h[i] - h[i-1] >= 0.1, JSON.stringify(h)); });
 t('hookfirst with no cut: frames spread over the first 3 s', () => { const h = hookTs('hookfirst', 9, []); assert.ok(h[h.length - 1] > 2.5 && h[h.length - 1] < 3, JSON.stringify(h)); });
 t('every other style keeps the fixed 0.3/1/2/3 s window', () => assert.deepStrictEqual(hookTs('realism', 9, [1.21]), [0.3, 1.0, 2.0, 3.0]));
 

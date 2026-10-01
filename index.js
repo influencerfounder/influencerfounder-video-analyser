@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.57.0';
+const ANALYSER_VERSION = '2.58.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -802,8 +802,16 @@ const cloneHandler = async (req, res) => {
     // the FIRST SHOT itself (0 → first measured cut, max 3 s), so a 1.2 s hook is seen five times
     // instead of once. Every other style keeps the fixed 0.3/1/2/3 s window.
     const hookEnd = Math.min(3, duration, (measuredCuts && measuredCuts.length) ? measuredCuts[0] : 3);
+    // 🦵 DENSE FIRST SECOND (v2.58.0, 2026-10-01). The 5 frames used to be spread over the hook
+    // (0.15/0.75/1.5/2.25/2.85 s on a 3 s hook), so a movement that lives in the first ~0.6 s — the
+    // FIFA source's knees shifting before the push-in crops them — fell in ONE frame, and a movement
+    // cannot be seen in one frame (Mike: "I didn't see the leg wiggle"). Now 0.15 s apart through the
+    // first second, then the spread frames for the rest of the hook.
     const hookTs = promptStyle === 'hookfirst'
-      ? [0.05, 0.25, 0.5, 0.75, 0.95].map(f => Math.round(Math.max(0.05, f * hookEnd - (f === 0.95 ? 0.02 : 0)) * 100) / 100)
+      ? [
+          ...[0.05, 0.2, 0.35, 0.5, 0.7, 0.9].filter(t => t < hookEnd - 0.02),
+          ...(hookEnd > 1.2 ? [0.5, 0.75, 0.95].map(f => Math.round((f * hookEnd - (f === 0.95 ? 0.02 : 0)) * 100) / 100).filter(t => t > 1.0) : []),
+        ]
       : [0.3, 1.0, 2.0, 3.0];
     for (const ts of hookTs) {
       if (ts >= duration) break;
@@ -933,7 +941,7 @@ const cloneHandler = async (req, res) => {
     // stay under the gateway's image ceiling, and sampling a mixed text/image array would
     // both drop hook frames and splice stray labels into the subset.
     const hookContent = (hookFrames.length && !isBgSwap) ? [
-      { type: 'text', text: `HOOK WINDOW — the source's opening ${hookFrames.length} frames in order (${hookFrames.map(h => h.ts + 's').join(', ')})${promptStyle === 'hookfirst' && measuredCuts && measuredCuts.length ? `, all inside the first shot, which ends at the measured cut at ${measuredCuts[0]}s` : ''}. This is the scroll-stopping moment you must preserve.` },
+      { type: 'text', text: `HOOK WINDOW — the source's opening ${hookFrames.length} frames in order${promptStyle === 'hookfirst' ? ' (the first ones only 0.15 s apart: compare each frame with the next to catch small movements — a knee or leg shifting, a foot, fingers, a shoulder)' : ''} (${hookFrames.map(h => h.ts + 's').join(', ')})${promptStyle === 'hookfirst' && measuredCuts && measuredCuts.length ? `, all inside the first shot, which ends at the measured cut at ${measuredCuts[0]}s` : ''}. This is the scroll-stopping moment you must preserve.` },
       ...hookFrames.map(h => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: h.dataUrl.split(',')[1] } })),
       { type: 'text', text: 'FULL CLIP — evenly sampled frames covering the whole video:' },
     ] : [];
