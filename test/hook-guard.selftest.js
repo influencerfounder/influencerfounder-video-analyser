@@ -30,6 +30,7 @@ const MOVING = '[INFLUENCER] sits in a stadium stand. [INFLUENCER] wears this sa
   await t('…but a camera TAIL does not hide the influencer\'s own move before it', () => assert.ok(g.hookMoves('[INFLUENCER] gestures with both hands, wrists rolling as the camera pushes in').length >= 2));
   await t('another person as the OBJECT does not hide the move ("gestures toward the other men")', () => assert.ok(g.hookMoves('his right hand lifts to gesture toward the other men, head turning across the circle of men').length >= 2));
   await t('the persona NAME counts as the influencer (stored prompts carry the name, not the placeholder)', () => assert.ok(g.hookMoves('Kryfex turns and glances at the phone', 'Kryfex').length >= 2));
+  await t('a plural lead is the other people ("Both shift their weight and glance toward the pitch")', () => assert.deepStrictEqual(g.hookMoves('Both shift their weight and glance toward the pitch throughout the clip. The two spectators nod.'), []));
   await t('one hand move alone is still a pose', () => assert.ok(g.isPosed('[0-3s] [INFLUENCER] lifts the phone. ')));
   await t('walking is whole-body movement — never a pose', () => assert.ok(!g.isPosed('[INFLUENCER] walks forward mid-stride through the lobby. ')));
   await t('"looks focused" is an expression, "looks up" is a move', () => { assert.deepStrictEqual(g.hookMoves('[INFLUENCER] looks focused'), []); assert.ok(g.hookMoves('[INFLUENCER] looks up').length === 1); });

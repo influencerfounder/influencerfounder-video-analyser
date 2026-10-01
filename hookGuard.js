@@ -35,6 +35,10 @@ function hookSegment(prompt) {
 const MOVE = /\b(turn(?:s|ing)?|glanc(?:e|es|ing)|look(?:s|ing)?\s+(?:up|down|around|over|across|away|back|left|right|toward|towards|to|at|off|sideways)|shift(?:s|ing)?|lift(?:s|ing)?|rais(?:e|es|ing)|lower(?:s|ing)?|tilt(?:s|ing)?|nod(?:s|ding)?|shak(?:e|es|ing)|adjust(?:s|ing)?|scroll(?:s|ing)?|tap(?:s|ping)?|lean(?:s|ing)?|swivel(?:s|ling|ing)?|flick(?:s|ing)?|roll(?:s|ing)?|bring(?:s|ing)?|mov(?:e|es|ing)|pull(?:s|ing)?|rub(?:s|bing)?|scratch(?:es|ing)?|gestur(?:e|es|ing)|reach(?:es|ing)?|wip(?:e|es|ing)|blink(?:s|ing)?|dart(?:s|ing)?|scan(?:s|ning)?|sweep(?:s|ing)?|swing(?:s|ing)?|twist(?:s|ing)?|rotat(?:e|es|ing)|check(?:s|ing)?|smirk(?:s|ing)?|smil(?:e|es|ing)|squint(?:s|ing)?|drop(?:s|ping)?|pivot(?:s|ing)?|shrug(?:s|ging)?|point(?:s|ing)?|wav(?:e|es|ing)|touch(?:es|ing)?|swip(?:e|es|ing)|typ(?:e|es|ing)|thumb(?:s|ing)?|bit(?:e|es|ing)|lick(?:s|ing)?|exhal(?:e|es|ing)|inhal(?:e|es|ing)|walk(?:s|ing)?|strid(?:e|es|ing)|step(?:s|ping)?|run(?:s|ning)?|jump(?:s|ing)?|danc(?:e|es|ing)|climb(?:s|ing)?|stand(?:s|ing)?\s+up|sit(?:s|ting)?\s+down|bounc(?:e|es|ing)|sway(?:s|ing)?|spin(?:s|ning)?|hop(?:s|ping)?|slid(?:e|es|ing)|kick(?:s|ing)?|kneel(?:s|ing)?|crouch(?:es|ing)?|push(?:es|ing)?(?!-in))\b/gi;
 // A clause about OTHER people or the CAMERA never counts as the influencer moving.
 const OTHER = /\b(?:woman|women|man|men|girl|boy|people|person|crowd|fans?|spectators?|bystanders?|audience|someone|neighbou?r|stranger|guard|bodyguard|driver|waiter)\b/i;
+// The influencer is ONE person: a clause led by a plural/collective subject is about the others —
+// measured 2026-10-01, "Both shift their weight and glance toward the pitch" (the two spectators)
+// passed a seated, posed hook as moving.
+const PLURAL_LEAD = /^(?:both|each|all|everyone|everybody|others?|the\s+(?:two|pair|others|rest|figures|spectators|fans)|two\s+\w+|several|some)\b/i;
 const CAMERA = /\b(?:camera|lens|push-in|pull-out|pans?|tilt(?:s|ing)?\s+(?:up|down)\s+(?:to|from)|zoom|dolly|framing|frame)\b/i;
 const PERSON = /\[INFLUENCER\]|\b(?:eyes?|gaze|head|chin|jaw|brows?|lips|mouth|face|hands?|fingers?|thumbs?|wrists?|arms?|shoulders?|body|torso|feet|foot|legs?|knees?|hips?|he|she|they|his|her|their)\b/i;
 
@@ -58,7 +62,7 @@ function hookMoves(segment, name) {
       .trim();
     if (!c) continue;
     const named = (who && who.test(c)) || /\[INFLUENCER\]/.test(c);
-    if (!named && (OTHER.test(c) || CAMERA.test(c))) continue;
+    if (!named && (OTHER.test(c) || CAMERA.test(c) || PLURAL_LEAD.test(c))) continue;
     if (!named && !PERSON.test(c)) continue;
     const re = new RegExp(MOVE.source, 'gi');
     let m;
