@@ -10,7 +10,10 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.53.0';
+const ANALYSER_VERSION = '2.54.0';
+const hookGuardLib = require('./hookGuard');
+// Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
+const HOOK_REVISE_MIN_MS = 45000;
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 // drawtext (used by caption burn-in) needs libfreetype, which the ffmpeg-static
@@ -1669,6 +1672,51 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         .trim();
     }
 
+    // 🪝 HOOK GUARD (hookfirst only, v2.54.0, 2026-10-01) — checks on the prompt the writer
+    // RETURNED, because the instruction did not reach it: the FIFA retest still came back with a
+    // posed hook ("faces the lens … phone resting in both hands", Kryfex motion 5.7 vs the source's
+    // 16.2) and with "eyes shift slowly right", a tempo word the system prompt already bans.
+    //   • a hook naming fewer than 2 head/eye/hand movements (and no walking/dancing) is a POSE:
+    //     ONE revision call rewrites only the hook from the hook frames — trigger-based, so it costs
+    //     nothing when the hook already moves. Only when the writer said the influencer IS in the
+    //     opening (OPENING: SHOWN); a video that opens on a bodyguard has no influencer movement to
+    //     find. The revision is kept only if the tail is untouched and the hook names more moves.
+    //   • tempo words on a person are deleted from the whole prompt (lens tempo stays).
+    // Detail: hookGuard.js; calibrated on the 31 stored hook-first prompts (8 flagged: the 5 seated
+    // stadium/arena hooks + 3 bodyguard openings, the latter skipped by the OPENING gate).
+    let hookGuard = null;
+    if (promptStyle === 'hookfirst' && !isBgSwap) {
+      hookGuard = { posed: false, revised: false, tempoRemoved: [] };
+      if (influencerInOpening === true && hookContent.length && hookGuardLib.isPosed(hookGuardLib.hookSegment(basePrompt))) {
+        hookGuard.posed = true;
+        const leftMs = CLONE_BUDGET_MS - (Date.now() - startedAt);
+        if (leftMs < HOOK_REVISE_MIN_MS) hookGuard.skipped = 'no_budget';
+        else {
+          try {
+            // The hook frames exactly as the writer saw them, minus the trailing "FULL CLIP" label.
+            const content = [...hookContent.slice(0, -1), { type: 'text', text: hookGuardLib.reviseHookInstruction(basePrompt) }];
+            const timeout = Math.min(leftMs - 10000, 90000);
+            const body = { max_tokens: 1500, system: 'You edit video-generation prompts. Return only the edited prompt text.', messages: [{ role: 'user', content }] };
+            const r = kieApiKey
+              ? await axios.post('https://api.kie.ai/claude/v1/messages', { model: 'claude-sonnet-5', thinking: { type: 'disabled' }, ...body },
+                  { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' }, timeout })
+              : await axios.post('https://api.anthropic.com/v1/messages', { model: 'claude-sonnet-4-6', ...body },
+                  { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout });
+            // Kie can answer 200 with the error in the body — an empty text is simply not accepted.
+            const revised = (r.data?.content || []).filter(b => b && b.type === 'text').map(b => b.text).join('').trim();
+            if (hookGuardLib.acceptRevision(basePrompt, revised)) { basePrompt = revised; hookGuard.revised = true; }
+            else hookGuard.rejected = true;
+          } catch (e) {
+            hookGuard.error = String(e.response?.status || e.code || e.message || 'error').slice(0, 120);
+          }
+        }
+      }
+      const scrub = hookGuardLib.scrubPersonTempo(basePrompt);
+      basePrompt = scrub.text;
+      hookGuard.tempoRemoved = scrub.removed;
+      console.log(`[clone] hookfirst guard: posed=${hookGuard.posed} revised=${hookGuard.revised}${hookGuard.rejected ? ' (revision rejected)' : ''}${hookGuard.error ? ' error=' + hookGuard.error : ''}${hookGuard.skipped ? ' skipped=' + hookGuard.skipped : ''} tempoRemoved=${JSON.stringify(scrub.removed)}`);
+    }
+
     const clonePrompt = (promptStyle === 'realism' || promptStyle === 'improve' || promptStyle === 'hookfirst') ? `${basePrompt} ${LANE_LAYERS[lane]}` : basePrompt;
 
     res.json({
@@ -1690,6 +1738,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       talkingHead,
       legsBare,
       influencerInOpening,
+      hookGuard: hookGuard || undefined,
       lane,
       laneLayers: LANE_LAYERS,
       analyserVersion: ANALYSER_VERSION,
