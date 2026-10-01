@@ -57,6 +57,14 @@ t('every other style: the rule is EMPTY (byte-identical prompts)', () => { asser
 t('bgswap: the rule is empty', () => assert.strictEqual(rule('hookfirst', true, [1.2], 9), ''));
 t('hookfirst never also gets SHOT_CUTS_RULE', () => assert.ok(SRC.includes("(shotCuts && !isBgSwap && promptStyle !== 'improve' && promptStyle !== 'hookfirst') ? SHOT_CUTS_RULE : ''")));
 t('a wardrobe override reaches the system prompt and the cache key', () => { assert.ok(/\(wardrobe && !isBgSwap\) \? `👕 WARDROBE OVERRIDE — \[INFLUENCER\] does NOT wear the source person's top/.test(SRC)); assert.ok(/String\(b\.wardrobe \|\| ''\),\n  \]\);/.test(SRC)); });
+t('hookfirst asks the writer whether the influencer is in the opening frame', () => assert.ok(/\(promptStyle === 'hookfirst' && !isBgSwap\) \? 'Also output, on its own line directly after the LEGS line, exactly "OPENING: SHOWN"/.test(SRC)));
+{ // the parser, executed on real-shaped output
+  const pc = grab('    let influencerInOpening = null;', '    // 🧠 WHY-IT-WENT-VIRAL REPORT', 'opening parse');
+  const run = (txt) => new Function('basePrompt', pc + '\nreturn { influencerInOpening, basePrompt };')(txt);
+  t('OPENING: ABSENT is read and stripped from the prompt', () => { const r = run('OPENING: ABSENT\nThe video opens on a bald man.'); assert.strictEqual(r.influencerInOpening, false); assert.ok(!/OPENING/.test(r.basePrompt)); });
+  t('OPENING: SHOWN is read', () => assert.strictEqual(run('LEGS: COVERED\nOPENING: SHOWN\nx').influencerInOpening, true));
+  t('no OPENING line → null (unknown), never "shown"', () => assert.strictEqual(run('The video opens.').influencerInOpening, null));
+}
 t('hookfirst is accepted by the whitelist and gets the realism layer', () => { assert.ok(SRC.includes("['original','realism','improve','hookfirst'].includes(req.body.promptStyle)")); assert.ok(SRC.includes("promptStyle === 'improve' || promptStyle === 'hookfirst') ? `${basePrompt} ${LANE_LAYERS[lane]}`")); });
 
 console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);

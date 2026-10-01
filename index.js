@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.49.0';
+const ANALYSER_VERSION = '2.50.0';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 // drawtext (used by caption burn-in) needs libfreetype, which the ffmpeg-static
@@ -1352,6 +1352,12 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       sysFinal,
       (shotCuts && !isBgSwap && promptStyle !== 'improve' && promptStyle !== 'hookfirst') ? SHOT_CUTS_RULE : '',
       HOOK_FIRST_RULE,
+      // 🧭 OPENING: SHOWN|ABSENT (hookfirst only, 2026-10-01). The tool anchors the video on the
+      // influencer swapped into the source's FIRST frame; when the source opens on someone else
+      // (measured: a Rolls-Royce clip opens on the BODYGUARD while the main character is still in
+      // the car) that swap turns the bystander into the influencer. Only this writer watches the
+      // whole video, so it decides (trigger-must-be-the-observer). Read by name like LEGS.
+      (promptStyle === 'hookfirst' && !isBgSwap) ? 'Also output, on its own line directly after the LEGS line, exactly "OPENING: SHOWN" if [INFLUENCER] — the main character you are writing as [INFLUENCER] — is clearly visible in the very FIRST frame of the source, or "OPENING: ABSENT" if the video opens on anyone or anything else (a bodyguard, driver, waiter, bystander, a product, scenery, a black frame).' : '',
       (wardrobe && !isBgSwap) ? `👕 WARDROBE OVERRIDE — [INFLUENCER] does NOT wear the source person's top. [INFLUENCER] wears: ${wardrobe}. Write [INFLUENCER]'s top exactly like that everywhere clothing is mentioned (the garment's own reference images travel with the generation, so name it and its visible print or logo plainly, never a different top). Keep the rest of the source outfit — trousers, shoes, jacket, accessories — unless the line above names it. Other people's clothing is unchanged.` : '',
       (PRONOUN_RULE && !isBgSwap) ? PRONOUN_RULE : '',
       (OWN_SUBJECT_RULE && !isBgSwap) ? OWN_SUBJECT_RULE : '',
@@ -1614,6 +1620,15 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         console.warn(`[clone] no LEGS: line in the model output (promptStyle=${promptStyle}) — legsBare defaults to false, so the leg portraits are withheld`);
       }
     }
+    // 🧭 OPENING: SHOWN|ABSENT — by name, like LEGS. Absent line => null (unknown), never "shown".
+    let influencerInOpening = null;
+    {
+      const m = basePrompt.match(/^OPENING:\s*(SHOWN|ABSENT)\s*$/im);
+      if (m) {
+        influencerInOpening = m[1].toUpperCase() === 'SHOWN';
+        basePrompt = (basePrompt.slice(0, m.index) + basePrompt.slice(m.index + m[0].length)).replace(/^\n+/, '').trim();
+      }
+    }
     // 🧠 WHY-IT-WENT-VIRAL REPORT (improve mode only). Parsed AFTER the LANE and
     // TALKING strips so those two anchored regexes keep matching line 1 / line 2
     // exactly as before — the report lines are appended below them, never above.
@@ -1664,6 +1679,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       transcriptLowConfidence: transcriptLowConfidence || undefined,
       talkingHead,
       legsBare,
+      influencerInOpening,
       lane,
       laneLayers: LANE_LAYERS,
       analyserVersion: ANALYSER_VERSION,
