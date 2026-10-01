@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.48.0';
+const ANALYSER_VERSION = '2.49.0';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 // drawtext (used by caption burn-in) needs libfreetype, which the ffmpeg-static
@@ -446,6 +446,8 @@ function cloneJoinKey(b) {
     // elementTypes changes the SYSTEM prompt, so a cached answer built without it is the wrong
     // answer — the 3-minute join/cache would otherwise serve a prompt that still names the breed.
     Array.isArray(b.elementTypes) ? b.elementTypes.slice().sort().join(',') : '',
+    // The wardrobe override changes the SYSTEM prompt too (2026-10-01).
+    String(b.wardrobe || ''),
   ]);
 }
 function runRecorded(handler, req) {
@@ -491,6 +493,9 @@ const cloneHandler = async (req, res) => {
     // have duplicated all of that — the duplication class this codebase keeps paying
     // for. Default '' keeps every existing caller byte-identical.
     const { videoUrl, locationId, kieApiKey, mode, bgBrief, hookReport, driverPriors } = req.body;
+    // 👕 WARDROBE OVERRIDE (2026-10-01): a garment the influencer wears INSTEAD of the source's top
+    // (Mike's own brand pieces). Plain text from the tool's garment set; capped, never required.
+    const wardrobe = String(req.body.wardrobe || '').replace(/\s+/g, ' ').trim().slice(0, 500);
     // Recreate prompt style (Mike's A/B, 2026-09-02). 'original' = the exact
     // May 2026 director method (recreate the video 1:1, swap the person; NO realism
     // layer) — the DEFAULT, exactly the May 1:1 method that predates the reach decline. 'realism' =
@@ -1335,11 +1340,11 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         ? `The source's cut points were MEASURED from the video file: ${cutList.filter(t => t < shotTarget).map(t => t + 's').join(', ')}. Use these EXACT decimal times as the shot boundaries — never estimate your own, never round them, never add or drop a cut. Shots after ${shotTarget}s do not exist in this clip.`
         : (measuredCuts ? 'Scene detection found NO cut: the source is ONE continuous take.' : 'Read the cuts from the frames yourself; the measurement was unavailable.'),
       'Write the prompt in this order:',
-      '(1) ONE overall sentence: the setting, the light, and what [INFLUENCER] wears (exact garments, colours and any visible print or logo text, quoted).',
+      '(1) ONE overall sentence: the setting, the light, and what [INFLUENCER] wears (exact garments, colours and any visible print or logo text, quoted). Follow it with the sentence "[INFLUENCER] wears this same outfit, fully dressed, in every shot."',
       `(2) THE HOOK — the first shot (0s to the first cut${cutList ? '' : ', or the first 1-3 s'}) — is the MOST PRECISE part of the prompt, 40-90 words. It decides whether anyone watches the rest, so study every HOOK WINDOW frame and state: the camera distance (full body / medium / close-up), its height and angle, which way [INFLUENCER] faces relative to the lens and where they are in the frame, what is in the foreground and the background, the camera's state (fixed, or the exact move), and the action already in progress in the very first frame.`,
       cutList
-        ? `(3) EVERY later shot as ONE line of 15-35 words: "Shot N [a-bs] Hard cut transition, <framing>, <camera state>: <one action>. Ends with <end state>." Write Shot 1 as "Shot 1 [0-${cutList[0]}s]" with no transition words. Write "camera fixed" whenever the framing does not change.`
-        : '(3) The rest of the take as timed PHASES, split at the moments the movement or the camera state changes (a turn, sitting down, a door opening), read from the evenly spaced frames: "[a-bs] <one action>, <camera state>." One line each, 15-35 words. Do NOT write "Shot" labels and do NOT write any transition word — it is one continuous take. End the prompt with the sentence "Generate single shot."',
+        ? `(3) EVERY later shot as ONE line of 15-35 words: "Shot N [a-bs] Hard cut transition, <framing>, <camera state>: <one action>. Ends with <end state>." Write Shot 1 as "Shot 1 [0-${cutList[0]}s]" with no transition words. Write "camera fixed" whenever the framing does not change. Whenever [INFLUENCER] is in a later shot, name the outfit again inside that line in 2-4 words (for example "in the same black tee") — measured 2026-10-01: lines that never restated it lost the outfit in 3 of 10 takes.`
+        : '(3) The rest of the take as timed PHASES, split at the moments the movement or the camera state changes (a turn, sitting down, a door opening), read from the evenly spaced frames: "[a-bs] <one action>, <camera state>." One line each, 15-35 words, naming the outfit again in 2-4 words whenever [INFLUENCER] is in it. Do NOT write "Shot" labels and do NOT write any transition word — it is one continuous take. End the prompt with the sentence "Generate single shot."',
       '(4) The LAST shot or phase ends with what [INFLUENCER] is doing when the clip ends, followed by "no new action".',
       'The full-clip frames are evenly spaced across the source in time order. Keep the whole prompt between 200 and 350 words. This structure overrides the instruction to put the opening framing in the first two sentences: the overall sentence comes first, the hook second.',
     ].filter(Boolean).join(' ');
@@ -1347,6 +1352,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       sysFinal,
       (shotCuts && !isBgSwap && promptStyle !== 'improve' && promptStyle !== 'hookfirst') ? SHOT_CUTS_RULE : '',
       HOOK_FIRST_RULE,
+      (wardrobe && !isBgSwap) ? `👕 WARDROBE OVERRIDE — [INFLUENCER] does NOT wear the source person's top. [INFLUENCER] wears: ${wardrobe}. Write [INFLUENCER]'s top exactly like that everywhere clothing is mentioned (the garment's own reference images travel with the generation, so name it and its visible print or logo plainly, never a different top). Keep the rest of the source outfit — trousers, shoes, jacket, accessories — unless the line above names it. Other people's clothing is unchanged.` : '',
       (PRONOUN_RULE && !isBgSwap) ? PRONOUN_RULE : '',
       (OWN_SUBJECT_RULE && !isBgSwap) ? OWN_SUBJECT_RULE : '',
       !isBgSwap ? SPEECH_MOTION_RULE : '',

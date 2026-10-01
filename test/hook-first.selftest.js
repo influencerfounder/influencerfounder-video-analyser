@@ -44,15 +44,19 @@ t('the writer is told to use the measured times EXACTLY, never its own estimate'
 t('names the hook (Shot 1 up to the first cut) without a transition', () => assert.ok(multi.includes('"Shot 1 [0-1.21s]" with no transition words')));
 t('later shots use Wan\'s shape: Shot N [a-bs] Hard cut transition + camera state + end state', () => assert.ok(/Shot N \[a-bs\] Hard cut transition, <framing>, <camera state>: <one action>\. Ends with <end state>/.test(multi)));
 t('the hook is the most precise part; later shots one short line each', () => assert.ok(/MOST PRECISE part/.test(multi) && /ONE line of 15-35 words/.test(multi)));
+t('the outfit is restated as a fixed fact after the overall sentence', () => assert.ok(multi.includes('[INFLUENCER] wears this same outfit, fully dressed, in every shot.')));
+t('every later shot line names the outfit again (3 of 10 takes lost it without this)', () => assert.ok(/name the outfit again inside that line in 2-4 words/.test(multi)));
 t('the last shot ends with "no new action" (stops invented filler)', () => assert.ok(multi.includes('"no new action"')));
 t('cuts past the clip length are dropped from the list', () => { const r = rule('hookfirst', false, [1.21, 9.5], 9); assert.ok(r.includes('1.21s') && !r.includes('9.5s')); });
 const none = rule('hookfirst', false, [], 9);
 t('no cut: one continuous take, timed phases, "Generate single shot."', () => assert.ok(/ONE continuous take/.test(none) && none.includes('"Generate single shot."') && /timed PHASES/.test(none)));
 t('no cut: never instructs a Shot label or a transition (that is what made the 09-29 dissolve)', () => assert.ok(!/Shot N \[a-bs\] Hard cut/.test(none) && /do NOT write any transition word/.test(none)));
+t('no-cut phases also restate the outfit', () => assert.ok(/naming the outfit again in 2-4 words whenever \[INFLUENCER\] is in it/.test(none)));
 t('measurement unavailable: the writer reads cuts itself, says so', () => assert.ok(/measurement was unavailable/.test(rule('hookfirst', false, null, 9))));
 t('every other style: the rule is EMPTY (byte-identical prompts)', () => { assert.strictEqual(rule('realism', false, [1.2], 9), ''); assert.strictEqual(rule('original', false, null, 9), ''); });
 t('bgswap: the rule is empty', () => assert.strictEqual(rule('hookfirst', true, [1.2], 9), ''));
 t('hookfirst never also gets SHOT_CUTS_RULE', () => assert.ok(SRC.includes("(shotCuts && !isBgSwap && promptStyle !== 'improve' && promptStyle !== 'hookfirst') ? SHOT_CUTS_RULE : ''")));
+t('a wardrobe override reaches the system prompt and the cache key', () => { assert.ok(/\(wardrobe && !isBgSwap\) \? `👕 WARDROBE OVERRIDE — \[INFLUENCER\] does NOT wear the source person's top/.test(SRC)); assert.ok(/String\(b\.wardrobe \|\| ''\),\n  \]\);/.test(SRC)); });
 t('hookfirst is accepted by the whitelist and gets the realism layer', () => { assert.ok(SRC.includes("['original','realism','improve','hookfirst'].includes(req.body.promptStyle)")); assert.ok(SRC.includes("promptStyle === 'improve' || promptStyle === 'hookfirst') ? `${basePrompt} ${LANE_LAYERS[lane]}`")); });
 
 console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);
