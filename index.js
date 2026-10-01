@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.50.0';
+const ANALYSER_VERSION = '2.51.0';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 // drawtext (used by caption burn-in) needs libfreetype, which the ffmpeg-static
@@ -1348,6 +1348,15 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       '(4) The LAST shot or phase ends with what [INFLUENCER] is doing when the clip ends, followed by "no new action".',
       'The full-clip frames are evenly spaced across the source in time order. Keep the whole prompt between 200 and 350 words. This structure overrides the instruction to put the opening framing in the first two sentences: the overall sentence comes first, the hook second.',
     ].filter(Boolean).join(' ');
+    /* 🧥 LAYERED OUTFIT (2026-10-01, Mike: "if influencer is wearing multiple layers of clothing").
+       Measured on the Rolls-Royce recreate: the prompt named "a white scoop-neck tank underneath" an
+       open black jacket ONCE, and the take showed the open jacket over the bare tattooed chest — the
+       identity references show the chest ink, and one mention of the inner layer lost to them. An
+       IF-rule in the writer (only it sees the clothing, trigger-must-be-the-observer), worded
+       POSITIVELY — never naming bare skin, because naming what must not appear draws it. Writer-only
+       text: costs the video prompt nothing on any video without layers. */
+    const LAYERED_OUTFIT_RULE = "🧥 IF [INFLUENCER] wears more than one layer on the upper body — an open jacket, blazer, shirt or overshirt worn over a tee, tank, top or shirt — write the inner layer as what covers the chest and stomach (for example \"a white tank under the open black jacket, covering the chest and stomach\"), and name that inner layer again in every shot or line where the outer layer hangs open. If [INFLUENCER] wears a single layer, add nothing about this.";
+
     const sysSend = [
       sysFinal,
       (shotCuts && !isBgSwap && promptStyle !== 'improve' && promptStyle !== 'hookfirst') ? SHOT_CUTS_RULE : '',
@@ -1364,6 +1373,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       !isBgSwap ? SPEECH_MOTION_RULE : '',
       !isBgSwap ? HARD_CUT_RULE : '',
       !isBgSwap ? CAR_SHOES_RULE : '',
+      !isBgSwap ? LAYERED_OUTFIT_RULE : '',
     ].filter(Boolean).join('\n\n');
     const userFinal = isBgSwap
       ? `These ${frameBase64s.length} frames were extracted from my own source video. `
