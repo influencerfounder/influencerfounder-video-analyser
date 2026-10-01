@@ -58,7 +58,7 @@ t('measurement unavailable: the writer reads cuts itself, says so', () => assert
 t('every other style: the rule is EMPTY (byte-identical prompts)', () => { assert.strictEqual(rule('realism', false, [1.2], 9), ''); assert.strictEqual(rule('original', false, null, 9), ''); });
 t('bgswap: the rule is empty', () => assert.strictEqual(rule('hookfirst', true, [1.2], 9), ''));
 t('hookfirst never also gets SHOT_CUTS_RULE', () => assert.ok(SRC.includes("(shotCuts && !isBgSwap && promptStyle !== 'improve' && promptStyle !== 'hookfirst') ? SHOT_CUTS_RULE : ''")));
-t('a wardrobe override reaches the system prompt and the cache key', () => { assert.ok(/\(wardrobe && !isBgSwap\) \? `👕 WARDROBE OVERRIDE — \[INFLUENCER\] does NOT wear the source person's top/.test(SRC)); assert.ok(/String\(b\.wardrobe \|\| ''\),\n  \]\);/.test(SRC)); });
+t('a wardrobe override reaches the system prompt and the cache key', () => { assert.ok(/\(wardrobe && !isBgSwap\) \? `👕 WARDROBE OVERRIDE — \[INFLUENCER\] does NOT wear the source person's top/.test(SRC)); assert.ok(/String\(b\.wardrobe \|\| ''\),\n[\s\S]{0,160}?\n  \]\);/.test(SRC)); });
 t('hookfirst asks the writer whether the influencer is in the opening frame', () => assert.ok(/\(promptStyle === 'hookfirst' && !isBgSwap\) \? 'Also output, on its own line directly after the LEGS line, exactly "OPENING: SHOWN"/.test(SRC)));
 { // the parser, executed on real-shaped output
   const pc = grab('    let influencerInOpening = null;', '    // 🧠 WHY-IT-WENT-VIRAL REPORT', 'opening parse');

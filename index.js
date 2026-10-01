@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.54.1';
+const ANALYSER_VERSION = '2.55.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -451,6 +451,8 @@ function cloneJoinKey(b) {
     Array.isArray(b.elementTypes) ? b.elementTypes.slice().sort().join(',') : '',
     // The wardrobe override changes the SYSTEM prompt too (2026-10-01).
     String(b.wardrobe || ''),
+    // …and so does a new-setting override (2026-10-01).
+    String(b.sceneOverride || ''),
   ]);
 }
 function runRecorded(handler, req) {
@@ -499,6 +501,8 @@ const cloneHandler = async (req, res) => {
     // 👕 WARDROBE OVERRIDE (2026-10-01): a garment the influencer wears INSTEAD of the source's top
     // (Mike's own brand pieces). Plain text from the tool's garment set; capped, never required.
     const wardrobe = String(req.body.wardrobe || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    // 🏟 New setting (owner test, 2026-10-01): the recreate moves the source's shot to another place.
+    const sceneOverride = String(req.body.sceneOverride || '').replace(/\s+/g, ' ').trim().slice(0, 300);
     // Recreate prompt style (Mike's A/B, 2026-09-02). 'original' = the exact
     // May 2026 director method (recreate the video 1:1, swap the person; NO realism
     // layer) — the DEFAULT, exactly the May 1:1 method that predates the reach decline. 'realism' =
@@ -1371,6 +1375,10 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       // whole video, so it decides (trigger-must-be-the-observer). Read by name like LEGS.
       (promptStyle === 'hookfirst' && !isBgSwap) ? 'Also output, on its own line directly after the LEGS line, exactly "OPENING: SHOWN" if [INFLUENCER] — the main character you are writing as [INFLUENCER] — is clearly visible in the very FIRST frame of the source, or "OPENING: ABSENT" if the video opens on anyone or anything else (a bodyguard, driver, waiter, bystander, a product, scenery, a black frame).' : '',
       (wardrobe && !isBgSwap) ? `👕 WARDROBE OVERRIDE — [INFLUENCER] does NOT wear the source person's top. [INFLUENCER] wears: ${wardrobe}. Write [INFLUENCER]'s top exactly like that everywhere clothing is mentioned (the garment's own reference images travel with the generation, so name it and its visible print or logo plainly, never a different top). Keep the rest of the source outfit — trousers, shoes, jacket, accessories — unless the line above names it. Other people's clothing is unchanged.` : '',
+      // 🏟 NEW SETTING (2026-10-01, Mike: the FIFA winner with Kryfex "in 3 other types of audiences").
+      // The tool builds the opening frame from the source's real first frame moved to this setting; this
+      // tells the writer the same thing so the prompt and the frame agree. Camera, timing and actions stay.
+      (sceneOverride && !isBgSwap) ? `🏟 SETTING OVERRIDE — this recreate does NOT take place in the source's location. It takes place here: ${sceneOverride}. Write the location, the light and the background for that place, and give the people around [INFLUENCER] the same number, positions and live actions as in the source, dressed for that place. If the line above names what [INFLUENCER] wears, write that outfit everywhere clothing is mentioned; otherwise keep the source outfit. Keep everything else exactly as the source: the camera, framing and distance, the timing, every shot or phase, and every action [INFLUENCER] makes.` : '',
       (PRONOUN_RULE && !isBgSwap) ? PRONOUN_RULE : '',
       (OWN_SUBJECT_RULE && !isBgSwap) ? OWN_SUBJECT_RULE : '',
       !isBgSwap ? SPEECH_MOTION_RULE : '',
