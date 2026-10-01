@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.55.0';
+const ANALYSER_VERSION = '2.56.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -1374,6 +1374,9 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       // the car) that swap turns the bystander into the influencer. Only this writer watches the
       // whole video, so it decides (trigger-must-be-the-observer). Read by name like LEGS.
       (promptStyle === 'hookfirst' && !isBgSwap) ? 'Also output, on its own line directly after the LEGS line, exactly "OPENING: SHOWN" if [INFLUENCER] — the main character you are writing as [INFLUENCER] — is clearly visible in the very FIRST frame of the source, or "OPENING: ABSENT" if the video opens on anyone or anything else (a bodyguard, driver, waiter, bystander, a product, scenery, a black frame).' : '',
+      // 👕 TOP (v2.56.0): the garment covering [INFLUENCER]'s chest, named once so the code can put it
+      // back into any timed chest/neck close-up that forgot it (hookGuard.ensureGarmentOnChest).
+      (promptStyle === 'hookfirst' && !isBgSwap) ? 'Also output, on its own line directly after the OPENING line, exactly "TOP: " followed by the garment that covers [INFLUENCER]\'s chest in this recreate in 2-6 words (for example "TOP: white Real Madrid jersey"), or "TOP: NONE" if [INFLUENCER] is bare-chested in the source.' : '',
       (wardrobe && !isBgSwap) ? `👕 WARDROBE OVERRIDE — [INFLUENCER] does NOT wear the source person's top. [INFLUENCER] wears: ${wardrobe}. Write [INFLUENCER]'s top exactly like that everywhere clothing is mentioned (the garment's own reference images travel with the generation, so name it and its visible print or logo plainly, never a different top). Keep the rest of the source outfit — trousers, shoes, jacket, accessories — unless the line above names it. Other people's clothing is unchanged.` : '',
       // 🏟 NEW SETTING (2026-10-01, Mike: the FIFA winner with Kryfex "in 3 other types of audiences").
       // The tool builds the opening frame from the source's real first frame moved to this setting; this
@@ -1650,6 +1653,14 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         basePrompt = (basePrompt.slice(0, m.index) + basePrompt.slice(m.index + m[0].length)).replace(/^\n+/, '').trim();
       }
     }
+    let topGarment = '';
+    {
+      const m = basePrompt.match(/^TOP:\s*(.{1,80}?)\s*$/im);
+      if (m) {
+        topGarment = m[1].replace(/^["']|["']$/g, '').trim();
+        basePrompt = (basePrompt.slice(0, m.index) + basePrompt.slice(m.index + m[0].length)).replace(/^\n+/, '').trim();
+      }
+    }
     // 🧠 WHY-IT-WENT-VIRAL REPORT (improve mode only). Parsed AFTER the LANE and
     // TALKING strips so those two anchored regexes keep matching line 1 / line 2
     // exactly as before — the report lines are appended below them, never above.
@@ -1722,7 +1733,11 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       const scrub = hookGuardLib.scrubPersonTempo(basePrompt);
       basePrompt = scrub.text;
       hookGuard.tempoRemoved = scrub.removed;
-      console.log(`[clone] hookfirst guard: posed=${hookGuard.posed} revised=${hookGuard.revised}${hookGuard.rejected ? ' (revision rejected)' : ''}${hookGuard.error ? ' error=' + hookGuard.error : ''}${hookGuard.skipped ? ' skipped=' + hookGuard.skipped : ''} tempoRemoved=${JSON.stringify(scrub.removed)}`);
+      const dressed = hookGuardLib.ensureGarmentOnChest(basePrompt, topGarment);
+      basePrompt = dressed.text;
+      hookGuard.top = topGarment || null;
+      hookGuard.garmentAdded = dressed.added;
+      console.log(`[clone] hookfirst guard: posed=${hookGuard.posed} revised=${hookGuard.revised}${hookGuard.rejected ? ' (revision rejected)' : ''}${hookGuard.error ? ' error=' + hookGuard.error : ''}${hookGuard.skipped ? ' skipped=' + hookGuard.skipped : ''} tempoRemoved=${JSON.stringify(scrub.removed)} top=${JSON.stringify(topGarment)} garmentAdded=${dressed.added}`);
     }
 
     const clonePrompt = (promptStyle === 'realism' || promptStyle === 'improve' || promptStyle === 'hookfirst') ? `${basePrompt} ${LANE_LAYERS[lane]}` : basePrompt;

@@ -132,4 +132,30 @@ function acceptRevision(before, after, name) {
       && hookMoves(hookSegment(a), name).length > hookMoves(hookSegment(before), name).length;
 }
 
-module.exports = { HOOK_MIN_MOVES, hookSegment, hookMoves, isPosed, scrubPersonTempo, reviseHookInstruction, acceptRevision };
+
+// 👕 GARMENT ON CHEST CLOSE-UPS (v2.56.0, 2026-10-01). Measured on the FIFA takes: every dressed
+// take named the jersey in each timed line that framed the chest ("white jersey visible at bottom of
+// frame"); the shirtless plain takes had 1-2 timed lines framing "face and upper chest" or the "neck
+// tattoo" with NO garment named — and the identity references are shirtless on purpose (the ink),
+// so an unnamed chest is filled from them. Trigger-based: only a timed line that frames the chest,
+// torso or neck AND names no clothing gets "<NAME> still wears the <top>." after its timestamp.
+const CHEST = /\b(?:upper\s+chest|chest|torso|collarbones?|upper\s+body|neck\s+tattoo|face\s+and\s+neck|neck\s+and\s+(?:chest|shoulders))\b/i;
+const OTHER_CHEST = /\b(?:her|their)\s+(?:upper\s+)?(?:chest|torso)\b/i;
+const CLOTHING = /\b(?:jersey|tee|t-shirt|shirt|hoodie|sweater|sweatshirt|jumper|top|tank|vest|blazer|jacket|coat|collar|kit|outfit|dress|suit|polo|hood|cardigan|blouse|overshirt|sleeves?|neckline)\b/i;
+const TIMED_LINE = /^(\s*(?:Shot\s+\d+\s*)?\[\s*\d+(?:\.\d+)?\s*s?\s*[-–]\s*\d+(?:\.\d+)?\s*s?\s*\]\s*)/i;
+function ensureGarmentOnChest(prompt, top, who = '[INFLUENCER]') {
+  const garment = String(top || '').trim().replace(/[.\s]+$/, '');
+  if (!garment || /^none$/i.test(garment)) return { text: String(prompt || ''), added: 0 };
+  let added = 0;
+  const text = String(prompt || '').split('\n').map((line) => {
+    const m = TIMED_LINE.exec(line);
+    if (!m) return line;
+    const body = line.slice(m[0].length);
+    if (!CHEST.test(body) || OTHER_CHEST.test(body) || CLOTHING.test(body)) return line;
+    added++;
+    return `${m[0]}${who} still wears the ${garment.replace(/^(?:a|an|the)\s+/i, '')}. ${body}`;
+  }).join('\n');
+  return { text, added };
+}
+
+module.exports = { ensureGarmentOnChest, HOOK_MIN_MOVES, hookSegment, hookMoves, isPosed, scrubPersonTempo, reviseHookInstruction, acceptRevision };

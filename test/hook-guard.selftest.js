@@ -63,13 +63,13 @@ const MOVING = '[INFLUENCER] sits in a stadium stand. [INFLUENCER] wears this sa
   const j = SRC.indexOf('    const clonePrompt = (promptStyle', i);
   await t('guard block found before clonePrompt', () => assert.ok(i > 0 && j > i));
   const block = SRC.slice(i, j);
-  const run = async ({ promptStyle = 'hookfirst', opening = true, prompt = POSED, reply, throws, kie = 'k', leftMs = 200000 }) => {
+  const run = async ({ promptStyle = 'hookfirst', opening = true, prompt = POSED, reply, throws, kie = 'k', leftMs = 200000, top = '' }) => {
     const calls = [];
     const axios = { post: async (url, body) => { calls.push({ url, body }); if (throws) throw Object.assign(new Error('boom'), { code: 'ECONNABORTED' }); return { data: { content: [{ type: 'text', text: reply }] } }; } };
     const hookContent = [{ type: 'text', text: 'HOOK WINDOW' }, { type: 'image', source: {} }, { type: 'text', text: 'FULL CLIP — evenly sampled frames' }];
-    const fn = new Function('promptStyle', 'isBgSwap', 'influencerInOpening', 'basePrompt', 'hookContent', 'hookGuardLib', 'axios', 'kieApiKey', 'ANTHROPIC_API_KEY', 'CLONE_BUDGET_MS', 'startedAt', 'HOOK_REVISE_MIN_MS', 'console',
+    const fn = new Function('promptStyle', 'isBgSwap', 'influencerInOpening', 'basePrompt', 'hookContent', 'hookGuardLib', 'axios', 'kieApiKey', 'ANTHROPIC_API_KEY', 'CLONE_BUDGET_MS', 'startedAt', 'HOOK_REVISE_MIN_MS', 'console', 'topGarment',
       `return (async () => {\n${block}\nreturn { basePrompt, hookGuard };\n})();`);
-    const out = await fn(promptStyle, false, opening, prompt, hookContent, g, axios, kie, 'a', leftMs, Date.now(), 45000, { log() {} });
+    const out = await fn(promptStyle, false, opening, prompt, hookContent, g, axios, kie, 'a', leftMs, Date.now(), 45000, { log() {} }, top);
     return { ...out, calls };
   };
   const good = goodHook + tail;
@@ -84,6 +84,16 @@ const MOVING = '[INFLUENCER] sits in a stadium stand. [INFLUENCER] wears this sa
   await t('no budget left → skipped, no call', async () => { const r = await run({ leftMs: 30000, reply: good }); assert.strictEqual(r.calls.length, 0); assert.strictEqual(r.hookGuard.skipped, 'no_budget'); });
   await t('the tempo scrub runs on the final prompt, after a revision too', async () => { const r = await run({ reply: good.replace('turns the head right', 'slowly turns the head right') }); assert.ok(r.hookGuard.revised && !/slowly turns/.test(r.basePrompt) && r.hookGuard.tempoRemoved.includes('slowly')); });
   await t('every other style: no guard, prompt untouched even with "slowly" in it', async () => { const p = MOVING.replace('turns', 'slowly turns'); const r = await run({ promptStyle: 'realism', prompt: p }); assert.strictEqual(r.hookGuard, null); assert.strictEqual(r.basePrompt, p); });
+  // ── garment on chest close-ups (v2.56.0) ──────────────────────────────────────────────────
+  const CL = 'Overall line, white jersey. [INFLUENCER] wears this same outfit.\n\n[0-3s] [INFLUENCER] in the white jersey turns.\n\n[3-5s] Camera settles into a tight close-up on face and upper chest; eyes cut right.\n\n[5-7s] Fingertips graze the neck tattoo, white jersey collar in frame.\n\n[7-9s] The woman behind uncrosses her arms over her chest.\n\n[9-10s] Eyes settle, no new action.';
+  const gc = g.ensureGarmentOnChest(CL, 'a white Real Madrid jersey');
+  await t('a chest close-up that names no clothing gets the top', () => assert.ok(gc.text.includes('[3-5s] [INFLUENCER] still wears the white Real Madrid jersey. Camera settles')));
+  await t('a chest/neck line that already names clothing is left alone', () => assert.ok(gc.text.includes('[5-7s] Fingertips graze')));
+  await t('another person\'s chest is not the influencer\'s', () => assert.ok(gc.text.includes('[7-9s] The woman behind')));
+  await t('only one line changed, nothing else touched', () => { assert.strictEqual(gc.added, 1); assert.strictEqual(gc.text.replace('[INFLUENCER] still wears the white Real Madrid jersey. ', ''), CL); });
+  await t('TOP: NONE or no TOP → nothing added (a bare-chested source stays bare)', () => { assert.strictEqual(g.ensureGarmentOnChest(CL, 'NONE').text, CL); assert.strictEqual(g.ensureGarmentOnChest(CL, '').text, CL); });
+  await t('the wiring adds the top after the scrub', async () => { const r = await run({ prompt: MOVING.replace('[3-5s] Gaze lifts back to the lens, in the same white jersey', '[3-5s] Close-up on face and upper chest'), top: 'white jersey' }); assert.ok(/\[3-5s\] \[INFLUENCER\] still wears the white jersey\. Close-up/.test(r.basePrompt) && r.hookGuard.garmentAdded === 1); });
+  await t('the writer is asked for the TOP line (hookfirst only) and it is parsed out of the prompt', () => { assert.ok(/\(promptStyle === 'hookfirst' && !isBgSwap\) \? 'Also output, on its own line directly after the OPENING line, exactly "TOP: "/.test(SRC)); assert.ok(/const m = basePrompt\.match\(\/\^TOP:/.test(SRC)); });
   await t('hookGuard travels in the response', () => assert.ok(/influencerInOpening,\n\s+hookGuard: hookGuard \|\| undefined,/.test(SRC)));
 
   console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);
