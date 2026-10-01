@@ -25,7 +25,9 @@ const budget = grab('      const KIE_SAFE_FRAME_COUNT = 20;', '      const note 
 const block  = grab("    let hookBlock = '';", "catch (_) { hookBlock = ''; }", 'hookBlock') + "catch (_) { hookBlock = ''; }";
 
 // Compile the REAL code, once, with its free variables as parameters.
-const run = new Function('hookFrames', 'isBgSwap', 'imageCount', 'hookReport', `
+// promptStyle/measuredCuts: the hook-first label (v2.48.0) reads them; a non-hookfirst style is the default path.
+const run = new Function('hookFrames', 'isBgSwap', 'imageCount', 'hookReport', `const promptStyle = 'realism', measuredCuts = null;
+
 ${hookc}
 ${himg}
   const imageContent = Array.from({length: imageCount}, (_, i) => ({ type:'image', tag:'even'+i }));

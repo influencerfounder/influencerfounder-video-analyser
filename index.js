@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.47.0';
+const ANALYSER_VERSION = '2.48.0';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 // drawtext (used by caption burn-in) needs libfreetype, which the ffmpeg-static
@@ -500,7 +500,7 @@ const cloneHandler = async (req, res) => {
     // scaffolded builder (systemPrompt) — hook-mechanism-first, timestamped shots, full sequence, realism layer —
     // NOT to copy the source but to make a stronger version of it, optionally steered by improveBrief.
     // Realism is the default everywhere since 2026-09-09 (Mike) — a caller that sends nothing gets it.
-    const promptStyle = ['original','realism','improve'].includes(req.body.promptStyle) ? req.body.promptStyle : 'realism';
+    const promptStyle = ['original','realism','improve','hookfirst'].includes(req.body.promptStyle) ? req.body.promptStyle : 'realism';
     const improveBrief = String(req.body.improveBrief || '').slice(0, 600).trim();
     // ✂️ Shot Cuts (opt-in, 2026-09-03) — see SHOT_CUTS_RULE below for why this exists.
     const shotCuts = req.body.shotCuts === true;
@@ -618,6 +618,34 @@ const cloneHandler = async (req, res) => {
     const duration = await new Promise((resolve) => {
       ffmpeg.ffprobe(videoPath, (err, meta) => resolve(err ? 15 : (meta?.format?.duration || 15)));
     });
+
+    // 🪝 MEASURED CUTS (hook-first style, 2026-10-01). The cut points are read off the FILE with
+    // ffmpeg scene detection, never estimated by the writer: measured on the lobby source, threshold
+    // 0.2 found all 5 real cuts (1.21/2.92/5.08/7.04/7.67 s), and Wan 3.0 then landed every one of
+    // them within a frame when the prompt carried them as decimal timestamps — where the prose prompt
+    // had stretched a 1.2 s hook to ~4 s. Cuts closer than 0.3 s are merged (a flash is one event).
+    // Only computed for 'hookfirst'; every other style is byte-identical to before.
+    let measuredCuts = null;
+    if (promptStyle === 'hookfirst' && mode !== 'bgswap') {
+      try {
+        const bin = SYSTEM_FFMPEG || process.env.FFMPEG_BIN || ffmpegStatic;
+        const out = await new Promise((resolve) => {
+          const { spawn } = require('child_process');
+          const pr = spawn(bin, ['-hide_banner', '-i', videoPath, '-an', '-vf', "select='gt(scene,0.2)',showinfo", '-f', 'null', '-']);
+          let err = '';
+          pr.stderr.on('data', (d) => { err += d.toString(); if (err.length > 2e6) err = err.slice(-1e6); });
+          pr.on('close', () => resolve(err));
+          pr.on('error', () => resolve(''));
+        });
+        const raw = [...out.matchAll(/pts_time:([0-9.]+)/g)].map(m => Number(m[1])).filter(t => t > 0.15 && t < duration - 0.15);
+        measuredCuts = [];
+        for (const t of raw) if (!measuredCuts.length || t - measuredCuts[measuredCuts.length - 1] >= 0.3) measuredCuts.push(Math.round(t * 100) / 100);
+        console.log(`[clone] hookfirst measured cuts: ${measuredCuts.length ? measuredCuts.join(', ') : 'none'}`);
+      } catch (e) {
+        console.warn('[clone] cut detection failed — hookfirst falls back to the writer\'s own reading:', e.message);
+        measuredCuts = null;
+      }
+    }
 
     // 2b. Keep a short-lived PLAYABLE copy of the source video, so the Studio can
     // show the original next to the finished recreate ("what went well / what to
@@ -758,7 +786,14 @@ const cloneHandler = async (req, res) => {
     // single frame from 0-3s — the model literally couldn't see the window it was
     // scoring. Extracted sequentially with the same low-memory options.
     const hookFrames = [];
-    for (const ts of [0.3, 1.0, 2.0, 3.0]) {
+    // 🪝 Hook-first: the hook gets the effort (CLAUDE.md, 2026-10-01) — five frames spread across
+    // the FIRST SHOT itself (0 → first measured cut, max 3 s), so a 1.2 s hook is seen five times
+    // instead of once. Every other style keeps the fixed 0.3/1/2/3 s window.
+    const hookEnd = Math.min(3, duration, (measuredCuts && measuredCuts.length) ? measuredCuts[0] : 3);
+    const hookTs = promptStyle === 'hookfirst'
+      ? [0.05, 0.25, 0.5, 0.75, 0.95].map(f => Math.round(Math.max(0.05, f * hookEnd - (f === 0.95 ? 0.02 : 0)) * 100) / 100)
+      : [0.3, 1.0, 2.0, 3.0];
+    for (const ts of hookTs) {
       if (ts >= duration) break;
       try {
         const hp = path.join(framesDir, `hook-${String(ts).replace('.', '_')}.jpg`);
@@ -886,7 +921,7 @@ const cloneHandler = async (req, res) => {
     // stay under the gateway's image ceiling, and sampling a mixed text/image array would
     // both drop hook frames and splice stray labels into the subset.
     const hookContent = (hookFrames.length && !isBgSwap) ? [
-      { type: 'text', text: `HOOK WINDOW — the source's opening ${hookFrames.length} frames in order (${hookFrames.map(h => h.ts + 's').join(', ')}). This is the scroll-stopping moment you must preserve.` },
+      { type: 'text', text: `HOOK WINDOW — the source's opening ${hookFrames.length} frames in order (${hookFrames.map(h => h.ts + 's').join(', ')})${promptStyle === 'hookfirst' && measuredCuts && measuredCuts.length ? `, all inside the first shot, which ends at the measured cut at ${measuredCuts[0]}s` : ''}. This is the scroll-stopping moment you must preserve.` },
       ...hookFrames.map(h => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: h.dataUrl.split(',')[1] } })),
       { type: 'text', text: 'FULL CLIP — evenly sampled frames covering the whole video:' },
     ] : [];
@@ -1179,7 +1214,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     // from the recreate path entirely — its condensing/re-engineering was the suspected viral-cliff cause.
     const sysFinal = isBgSwap ? BG_SWAP_SYSTEM
       : promptStyle === 'improve' ? systemPrompt          // the scaffolded/hook-optimised builder, used to IMPROVE (not copy)
-      : promptStyle === 'realism' ? REALISM_CLONE_SYSTEM
+      : (promptStyle === 'realism' || promptStyle === 'hookfirst') ? REALISM_CLONE_SYSTEM
       : ORIGINAL_CLONE_SYSTEM_TAGGED;
     // ✂️ SHOT CUTS — a flat-prose 1:1 prompt renders as ONE continuous camera move even when the
     // source cuts between setups: measured 2026-09-03, a source with 4 real cuts produced an output
@@ -1286,9 +1321,32 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
        video without this moment pays nothing. Writer-only text: the video model never reads it. */
     const CAR_SHOES_RULE = "👟 IF the frames show someone getting out of a vehicle while their shoes come off or go on, watch that moment frame by frame before writing it: where the shoes are (on the feet, in a hand, tossed or placed onto the ground — and where they land), and whether the feet go straight into them on the way out. Write that moment in ONE sentence, in the order the source shows it, naming where the shoes end up and how the feet meet them. Never add a step the frames do not clearly show — no extra barefoot pause or walk, no putting shoes on while standing, and no second pair of shoes.";
 
+    // 🪝 HOOK-FIRST STRUCTURE (owner-only test style, 2026-10-01). Mike's standing rule: the hook
+    // gets 80% of the EFFORT, not 80% of the words — the hook comes first and is described most
+    // precisely; every later shot still gets its own short line (timestamp, action, camera state,
+    // end state). Research (reports/Hook first timestamped recreate prompts.md): all three measured
+    // failures — a stretched hook, a drifting camera, invented filler — came from under-specified
+    // timing and later shots; Wan's official multi-shot shape is overall line + Shot N [t0-t1 s].
+    // Replaces SHOT_CUTS_RULE for this style (the writer's own cut reading is what it supersedes).
+    const cutList = (measuredCuts && measuredCuts.length) ? measuredCuts : null;
+    const HOOK_FIRST_RULE = promptStyle !== 'hookfirst' || isBgSwap ? '' : [
+      `🪝 HOOK-FIRST STRUCTURE — this replaces any other instruction about the ORDER or LENGTH of the prompt. The clip will be ${shotTarget} seconds long.`,
+      cutList
+        ? `The source's cut points were MEASURED from the video file: ${cutList.filter(t => t < shotTarget).map(t => t + 's').join(', ')}. Use these EXACT decimal times as the shot boundaries — never estimate your own, never round them, never add or drop a cut. Shots after ${shotTarget}s do not exist in this clip.`
+        : (measuredCuts ? 'Scene detection found NO cut: the source is ONE continuous take.' : 'Read the cuts from the frames yourself; the measurement was unavailable.'),
+      'Write the prompt in this order:',
+      '(1) ONE overall sentence: the setting, the light, and what [INFLUENCER] wears (exact garments, colours and any visible print or logo text, quoted).',
+      `(2) THE HOOK — the first shot (0s to the first cut${cutList ? '' : ', or the first 1-3 s'}) — is the MOST PRECISE part of the prompt, 40-90 words. It decides whether anyone watches the rest, so study every HOOK WINDOW frame and state: the camera distance (full body / medium / close-up), its height and angle, which way [INFLUENCER] faces relative to the lens and where they are in the frame, what is in the foreground and the background, the camera's state (fixed, or the exact move), and the action already in progress in the very first frame.`,
+      cutList
+        ? `(3) EVERY later shot as ONE line of 15-35 words: "Shot N [a-bs] Hard cut transition, <framing>, <camera state>: <one action>. Ends with <end state>." Write Shot 1 as "Shot 1 [0-${cutList[0]}s]" with no transition words. Write "camera fixed" whenever the framing does not change.`
+        : '(3) The rest of the take as timed PHASES, split at the moments the movement or the camera state changes (a turn, sitting down, a door opening), read from the evenly spaced frames: "[a-bs] <one action>, <camera state>." One line each, 15-35 words. Do NOT write "Shot" labels and do NOT write any transition word — it is one continuous take. End the prompt with the sentence "Generate single shot."',
+      '(4) The LAST shot or phase ends with what [INFLUENCER] is doing when the clip ends, followed by "no new action".',
+      'The full-clip frames are evenly spaced across the source in time order. Keep the whole prompt between 200 and 350 words. This structure overrides the instruction to put the opening framing in the first two sentences: the overall sentence comes first, the hook second.',
+    ].filter(Boolean).join(' ');
     const sysSend = [
       sysFinal,
-      (shotCuts && !isBgSwap && promptStyle !== 'improve') ? SHOT_CUTS_RULE : '',
+      (shotCuts && !isBgSwap && promptStyle !== 'improve' && promptStyle !== 'hookfirst') ? SHOT_CUTS_RULE : '',
+      HOOK_FIRST_RULE,
       (PRONOUN_RULE && !isBgSwap) ? PRONOUN_RULE : '',
       (OWN_SUBJECT_RULE && !isBgSwap) ? OWN_SUBJECT_RULE : '',
       !isBgSwap ? SPEECH_MOTION_RULE : '',
@@ -1580,7 +1638,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         .trim();
     }
 
-    const clonePrompt = (promptStyle === 'realism' || promptStyle === 'improve') ? `${basePrompt} ${LANE_LAYERS[lane]}` : basePrompt;
+    const clonePrompt = (promptStyle === 'realism' || promptStyle === 'improve' || promptStyle === 'hookfirst') ? `${basePrompt} ${LANE_LAYERS[lane]}` : basePrompt;
 
     res.json({
       success: true,
@@ -1603,6 +1661,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       lane,
       laneLayers: LANE_LAYERS,
       analyserVersion: ANALYSER_VERSION,
+      measuredCuts: measuredCuts || undefined,
       ...recommendRecreateSpec(duration),
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
       sourceAudio,
