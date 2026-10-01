@@ -44,6 +44,8 @@ t('the writer is told to use the measured times EXACTLY, never its own estimate'
 t('names the hook (Shot 1 up to the first cut) without a transition', () => assert.ok(multi.includes('"Shot 1 [0-1.21s]" with no transition words')));
 t('later shots use Wan\'s shape: Shot N [a-bs] Hard cut transition + camera state + end state', () => assert.ok(/Shot N \[a-bs\] Hard cut transition, <framing>, <camera state>: <one action>\. Ends with <end state>/.test(multi)));
 t('the hook is the most precise part; later shots one short line each', () => assert.ok(/MOST PRECISE part/.test(multi) && /ONE line of 15-35 words/.test(multi)));
+t('the hook is written as a MOMENT with real movement, never a pose', () => assert.ok(/Write the hook as a MOMENT, never a pose: name what \[INFLUENCER\]'s head, eyes and hands are already doing/.test(multi)));
+t('IF people are visible around the influencer, each gets a live action (frozen crowd fix)', () => assert.ok(/IF other people are visible behind or around \[INFLUENCER\], give each one a live action of their own/.test(multi)));
 t('the outfit is restated as a fixed fact after the overall sentence', () => assert.ok(multi.includes('[INFLUENCER] wears this same outfit, fully dressed, in every shot.')));
 t('every later shot line names the outfit again (3 of 10 takes lost it without this)', () => assert.ok(/name the outfit again inside that line in 2-4 words/.test(multi)));
 t('the last shot ends with "no new action" (stops invented filler)', () => assert.ok(multi.includes('"no new action"')));
