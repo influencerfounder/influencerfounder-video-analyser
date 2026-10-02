@@ -248,7 +248,9 @@ function scrubHookStillness(prompt) {
       t = t.replace(new RegExp(rx.source, 'gi'), (...args) => {
         const m = args[0], off = args[args.length - 2], whole = args[args.length - 1];
         const before = whole.slice(Math.max(0, off - 40), off);
-        if (/\b(?:camera|lens|frame|framing|shot)\b/i.test(before + m)) return m;
+        // A hook-first label ("Shot 1 [0-1.2s]") is not the camera: strip it before the camera test, or
+        // the label alone protected every stillness word in every hook-first hook (toolscan F4, 2026-10-02).
+        if (/\b(?:camera|lens|frame|framing|shot)\b/i.test((before + m).replace(/\bshot\s*\d+\b(?:\s*\[[^\]]*\]?)?/gi, ' '))) return m;
         removed.push(m.trim());
         return rep ? m.replace(new RegExp(rx.source, 'i'), rep) : '';
       });
