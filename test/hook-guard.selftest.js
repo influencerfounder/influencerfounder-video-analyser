@@ -135,6 +135,12 @@ const MOVING = '[INFLUENCER] sits in a stadium stand. [INFLUENCER] wears this sa
     await t('lines after the hook are untouched', () => assert.ok(/3–5s: later line, his shoulders stay square\./.test(r.text)));
     await t('an unbracketed "3–5s:" line ends the hook', () => assert.ok(g.hookSegment(P).endsWith('Kryfex remains perfectly still.\n\n')));
     await t('the wiring runs it on hookfirst', () => { const S = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8'); assert.ok(/const still = hookGuardLib\.scrubHookStillness\(basePrompt\);\n\s+basePrompt = still\.text;/.test(S)); }); }
+  // ── toolscan 2026-10-02: F4 the "Shot 1 [..]" label is not the camera · F5 absent people are not people ──
+  await t('F4: a "Shot 1 [0-1.2s]" hook still loses its stillness words', () => assert.deepStrictEqual(g.scrubHookStillness('Shot 1 [0-1.2s] [INFLUENCER] sits perfectly still on the bench, looking into the lens. Shot 2 [1.2-4s] she stands up.').removed, ['sits perfectly still']));
+  await t('F4: the CAMERA may still hold still in a Shot-labelled hook', () => assert.deepStrictEqual(g.scrubHookStillness('Shot 1 [0-1.2s] The camera holds perfectly still on [INFLUENCER], who waves. Shot 2 [1.2-4s] x.').removed, []));
+  await t('F5: "alone … no other people in the room" gets no crowd sentence', () => assert.strictEqual(g.ensureCrowdMoves('Shot 1 [0-2s] [INFLUENCER] stands alone in an empty room, no other people in the room. Shot 2 [2-5s] she waves.').added, 0));
+  await t('F5: a ceiling fan is not fans', () => assert.strictEqual(g.ensureCrowdMoves('Shot 1 [0-2s] [INFLUENCER] sits on the bed while a ceiling fan turns overhead. Shot 2 [2-5s] she looks at the lens.').added, 0));
+  await t('F5: alone at first but a man passes later → the sentence is still added', () => assert.strictEqual(g.ensureCrowdMoves('[INFLUENCER] walks alone down the street. Shot 2 a man passes behind her.').added, 1));
   await t('hookGuard travels in the response', () => assert.ok(/influencerInOpening,\n\s+hookGuard: hookGuard \|\| undefined,/.test(SRC)));
 
   console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);

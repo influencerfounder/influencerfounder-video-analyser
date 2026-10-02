@@ -209,10 +209,14 @@ function missesMeasured(segment, m) {
 // the prompt names another person (a woman, a man, fans, a crowd…). Placed right after the outfit
 // sentence, so it is early (late text weighs less on Seedance).
 const CROWD_SENTENCE = (who) => `Throughout the whole clip, the people around ${who} keep moving naturally — talking, glancing around, shifting in their seats; nobody is frozen.`;
-const PEOPLE_AROUND = /\b(?:woman|women|man|men|girl|boy|people|crowd|fans?|spectators?|audience|bystanders?|onlookers?|photographers?|guests?|neighbou?rs?)\b/i;
+const PEOPLE_AROUND = /\b(?:woman|women|man|men|girl|boy|people|crowd|fans|(?<!\b(?:ceiling|desk|electric|table|standing|floor|box|exhaust|wall)\s)fan|spectators?|audience|bystanders?|onlookers?|photographers?|guests?|neighbou?rs?)\b/i;
+// Said ABSENT is not present: "no other people", "nobody else", "alone" (toolscan F5, 2026-10-02 — a solo
+// scene that said "no other people in the room" got "the people around … keep moving", and naming
+// people draws them).
+const PEOPLE_ABSENT = /\b(?:no\s+(?:other\s+)?(?:people|one|person|crowd|bystanders?|onlookers?)|nobody(?:\s+else)?|no\s*-?\s*one\s+else|(?:completely\s+|totally\s+)?(?:alone|empty|deserted)|by\s+(?:him|her|them)sel(?:f|ves)|on\s+(?:his|her|their)\s+own)\b[^.;\n]{0,40}/gi;
 function ensureCrowdMoves(prompt, who = '[INFLUENCER]') {
   const p = String(prompt || '');
-  if (!PEOPLE_AROUND.test(p) || /nobody is frozen|keep moving naturally/i.test(p)) return { text: p, added: 0 };
+  if (!PEOPLE_AROUND.test(p.replace(PEOPLE_ABSENT, ' ')) || /nobody is frozen|keep moving naturally/i.test(p)) return { text: p, added: 0 };
   const m = /wears this same outfit, fully dressed, in every shot\./i.exec(p);
   const at = m ? m.index + m[0].length : (p.indexOf('\n\n') > 0 ? p.indexOf('\n\n') : p.length);
   return { text: p.slice(0, at) + ' ' + CROWD_SENTENCE(who) + p.slice(at), added: 1 };
