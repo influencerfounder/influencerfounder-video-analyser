@@ -65,13 +65,13 @@ const MOVING = '[INFLUENCER] sits in a stadium stand. [INFLUENCER] wears this sa
   const j = SRC.indexOf('    const clonePrompt = (promptStyle', i);
   await t('guard block found before clonePrompt', () => assert.ok(i > 0 && j > i));
   const block = SRC.slice(i, j);
-  const run = async ({ promptStyle = 'hookfirst', opening = true, prompt = POSED, reply, throws, kie = 'k', leftMs = 200000, top = '' }) => {
+  const run = async ({ promptStyle = 'hookfirst', opening = true, prompt = POSED, reply, throws, kie = 'k', leftMs = 200000, top = '', motion = null }) => {
     const calls = [];
     const axios = { post: async (url, body) => { calls.push({ url, body }); if (throws) throw Object.assign(new Error('boom'), { code: 'ECONNABORTED' }); return { data: { content: [{ type: 'text', text: reply }] } }; } };
     const hookContent = [{ type: 'text', text: 'HOOK WINDOW' }, { type: 'image', source: {} }, { type: 'text', text: 'FULL CLIP — evenly sampled frames' }];
-    const fn = new Function('promptStyle', 'isBgSwap', 'influencerInOpening', 'basePrompt', 'hookContent', 'hookGuardLib', 'axios', 'kieApiKey', 'ANTHROPIC_API_KEY', 'CLONE_BUDGET_MS', 'startedAt', 'HOOK_REVISE_MIN_MS', 'console', 'topGarment',
+    const fn = new Function('promptStyle', 'isBgSwap', 'influencerInOpening', 'basePrompt', 'hookContent', 'hookGuardLib', 'axios', 'kieApiKey', 'ANTHROPIC_API_KEY', 'CLONE_BUDGET_MS', 'startedAt', 'HOOK_REVISE_MIN_MS', 'console', 'topGarment', 'hookMotion',
       `return (async () => {\n${block}\nreturn { basePrompt, hookGuard };\n})();`);
-    const out = await fn(promptStyle, false, opening, prompt, hookContent, g, axios, kie, 'a', leftMs, Date.now(), 45000, { log() {} }, top);
+    const out = await fn(promptStyle, false, opening, prompt, hookContent, g, axios, kie, 'a', leftMs, Date.now(), 45000, { log() {} }, top, motion);
     return { ...out, calls };
   };
   const good = goodHook + tail;
@@ -96,6 +96,20 @@ const MOVING = '[INFLUENCER] sits in a stadium stand. [INFLUENCER] wears this sa
   await t('TOP: NONE or no TOP → nothing added (a bare-chested source stays bare)', () => { assert.strictEqual(g.ensureGarmentOnChest(CL, 'NONE').text, CL); assert.strictEqual(g.ensureGarmentOnChest(CL, '').text, CL); });
   await t('the wiring adds the top after the scrub', async () => { const r = await run({ prompt: MOVING.replace('[3-5s] Gaze lifts back to the lens, in the same white jersey', '[3-5s] Close-up on face and upper chest'), top: 'white jersey' }); assert.ok(/\[3-5s\] \[INFLUENCER\] still wears the white jersey\. Close-up/.test(r.basePrompt) && r.hookGuard.garmentAdded === 1); });
   await t('the writer is asked for the TOP line (hookfirst only) and it is parsed out of the prompt', () => { assert.ok(/\(promptStyle === 'hookfirst' && !isBgSwap\) \? 'Also output, on its own line directly after the OPENING line, exactly "TOP: "/.test(SRC)); assert.ok(/const m = basePrompt\.match\(\/\^TOP:/.test(SRC)); });
+  // ── measured hook motion (v2.59.0) ─────────────────────────────────────────────────────────
+  const FIFA = { head: 0.436, middle: 0.528, bottom: 1.657, seconds: 1.5 }, WALK = { head: 1.782, middle: 3.012, bottom: 3.39, seconds: 1.5 };
+  await t('the FIFA knee bounce (bottom 3.8x the head) produces a note naming legs/knees', () => { const n = g.motionNote(FIFA); assert.ok(/BOTTOM quarter of the frame moves 3\.8x more than the head/.test(n) && /legs, knees or lap/.test(n)); });
+  await t('a walk moves every band — no note (it is described anyway)', () => assert.strictEqual(g.motionNote(WALK), ''));
+  await t('no measurement → no note, nothing missed', () => { assert.strictEqual(g.motionNote(null), ''); assert.strictEqual(g.missesMeasured('anything', null), false); });
+  await t('"the phone resting in the lap" does NOT count as naming the leg movement', () => assert.ok(g.missesMeasured('both hands hold the phone resting in the lap', FIFA)));
+  await t('"his right knee bounces quickly" does', () => assert.ok(!g.missesMeasured('his right knee bounces quickly, lifting the phone', FIFA)));
+  await t('a MOVING hook that misses the measured legs still gets the revision, with the measurement in it', async () => {
+    const r = await run({ prompt: MOVING, motion: FIFA, reply: MOVING.replace('[0-3s] [INFLUENCER] turns', '[0-3s] [INFLUENCER]\'s right knee bounces quickly; [INFLUENCER] turns') });
+    assert.strictEqual(r.calls.length, 1); assert.ok(/MEASURED MOTION/.test(r.calls[0].body.messages[0].content.slice(-1)[0].text)); assert.ok(r.hookGuard.revised && /knee bounces/.test(r.basePrompt));
+  });
+  await t('a revision that still misses the measured legs is rejected', async () => { const r = await run({ prompt: MOVING, motion: FIFA, reply: MOVING }); assert.ok(r.hookGuard.rejected && r.basePrompt === MOVING); });
+  await t('no leg motion measured → a moving hook costs no call', async () => { const r = await run({ prompt: MOVING, motion: WALK, reply: MOVING }); assert.strictEqual(r.calls.length, 0); });
+  await t('the analyser runs hookmotion.py for hookfirst and puts the note in the hook window', () => { const S = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8'); assert.ok(/execFile\(PYTHON, \[path\.join\(__dirname, 'hookmotion\.py'\), videoPath, String\(secs\)\]/.test(S) && /hookGuardLib\.motionNote\(hookMotion\)/.test(S)); });
   await t('hookGuard travels in the response', () => assert.ok(/influencerInOpening,\n\s+hookGuard: hookGuard \|\| undefined,/.test(SRC)));
 
   console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);

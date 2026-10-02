@@ -110,8 +110,9 @@ function scrubPersonTempo(prompt, name) {
 }
 
 // The one revision request. Hook frames ride in front (same order the writer saw them).
-function reviseHookInstruction(prompt) {
-  return 'Below is a video prompt. Its HOOK — the text before the second timed line — describes [INFLUENCER] as a POSE: it names where they sit and what they hold, but not what they DO. '
+function reviseHookInstruction(prompt, note) {
+  return 'Below is a video prompt. Its HOOK — the text before the second timed line — describes [INFLUENCER] as a POSE, or misses a movement that was measured: it names where they sit and what they hold, but not everything they DO. '
+    + (note ? note + ' ' : '')
     + 'Using ONLY the HOOK WINDOW frames above, in their time order, rewrite that hook so it names, in order, EVERY movement [INFLUENCER] actually makes across those frames — head, eyes, hands, arms, shoulders, torso, legs, knees and feet, whichever are in frame (for example: the head turns to the right, the eyes drop to the phone, a thumb moves on the screen, a knee bounces, a leg shifts) — at least two, each at real-life speed. '
     + 'Describe only movement the frames show; if they show very little, name the smallest real movements they do show. '
     + 'Never use a tempo word about a person (slowly, slow, gradually, unhurried, deliberately, lingering, for a beat). '
@@ -121,15 +122,16 @@ function reviseHookInstruction(prompt) {
 
 // Accept a revision only when it is the same prompt with a moving hook: it must name more moves,
 // keep the tail (everything from the second timed line) intact, and not have lost [INFLUENCER].
-function acceptRevision(before, after, name) {
+function acceptRevision(before, after, name, m) {
   const a = String(after || '').trim();
   if (!a || a.length < before.length * 0.7 || a.length > before.length * 1.5) return false;
   if (/\[INFLUENCER\]/.test(before) && !/\[INFLUENCER\]/.test(a)) return false;
   const tailOf = (p) => p.slice(hookSegment(p).length).trim();
   const tb = tailOf(before), ta = tailOf(a);
   if (tb && (ta.slice(0, 120) !== tb.slice(0, 120))) return false;
+  if (missesMeasured(hookSegment(a), m)) return false;   // the measured leg movement must now be named
   return hookMoves(hookSegment(a), name).length >= HOOK_MIN_MOVES
-      && hookMoves(hookSegment(a), name).length > hookMoves(hookSegment(before), name).length;
+      && (hookMoves(hookSegment(a), name).length > hookMoves(hookSegment(before), name).length || missesMeasured(hookSegment(before), m));
 }
 
 
@@ -158,4 +160,34 @@ function ensureGarmentOnChest(prompt, top, who = '[INFLUENCER]') {
   return { text, added };
 }
 
-module.exports = { ensureGarmentOnChest, HOOK_MIN_MOVES, hookSegment, hookMoves, isPosed, scrubPersonTempo, reviseHookInstruction, acceptRevision };
+
+// 📏 MEASURED HOOK MOTION (v2.59.0, 2026-10-01). hookmotion.py measures, with the camera's move
+// removed, how much the head band, the middle and the bottom quarter of the frame move in the hook.
+// A band that moves a lot MORE than the head is a movement the writer must name — the FIFA source's
+// knees bounce steadily (bottom 1.66 vs head 0.44 px/0.1 s) and no prompt ever had it, because
+// frame-to-frame it is a few pixels. Walking moves every band, so it never trips this (calibrated:
+// a walk measured 1.78 head / 3.39 bottom = 1.9x). Wording names the band and lets the writer say
+// which body part it is — trigger-must-be-the-observer: only the writer sees what is there.
+const MOTION_MIN = 1.0, MOTION_RATIO = 2.5;
+function motionNote(m) {
+  if (!m || !(m.head >= 0)) return '';
+  const head = Math.max(m.head, 0.1), out = [];
+  if (m.bottom >= MOTION_MIN && m.bottom >= MOTION_RATIO * head)
+    out.push(`the BOTTOM quarter of the frame moves ${Math.round(m.bottom / head * 10) / 10}x more than the head — in a seated or standing shot that is [INFLUENCER]'s legs, knees or lap (a knee bouncing, a leg jiggling, the lap and phone moving with it)`);
+  if (m.middle >= MOTION_MIN && m.middle >= MOTION_RATIO * head)
+    out.push(`the MIDDLE of the frame moves ${Math.round(m.middle / head * 10) / 10}x more than the head — [INFLUENCER]'s hands, arms or torso`);
+  return out.length
+    ? `MEASURED MOTION in the first ${m.seconds} s (optical flow, the camera's own move removed): ${out.join('; and ')}. This movement is continuous and real even where consecutive frames look almost identical — name it in the hook, which part moves and how, at real-life speed.`
+    : '';
+}
+
+// The measurement said the legs move; does the hook actually name a leg MOVEMENT? ("the phone
+// resting in the lap" names the lap, not a movement, so a body word alone is not enough.)
+const LEG_MOVE = /\b(?:knees?|legs?|feet|foot|thighs?)\b[^.;\n]{0,50}\b(?:bounc\w*|jiggl\w*|shift\w*|tap\w*|mov\w*|swing\w*|rock\w*|bob\w*|twitch\w*|fidget\w*)|\b(?:bounc\w*|jiggl\w*|tap\w*|rock\w*|bob\w*)\b[^.;\n]{0,30}\b(?:knees?|legs?|feet|foot|thighs?)\b/i;
+function missesMeasured(segment, m) {
+  if (!m || !(m.head >= 0)) return false;
+  const legsMove = m.bottom >= MOTION_MIN && m.bottom >= MOTION_RATIO * Math.max(m.head, 0.1);
+  return legsMove && !LEG_MOVE.test(String(segment || ''));
+}
+
+module.exports = { motionNote, missesMeasured, ensureGarmentOnChest, HOOK_MIN_MOVES, hookSegment, hookMoves, isPosed, scrubPersonTempo, reviseHookInstruction, acceptRevision };

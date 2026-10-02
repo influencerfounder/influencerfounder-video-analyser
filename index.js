@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.58.0';
+const ANALYSER_VERSION = '2.59.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -658,6 +658,22 @@ const cloneHandler = async (req, res) => {
         measuredCuts = null;
       }
     }
+    // 📏 MEASURED HOOK MOTION (v2.59.0) — see hookGuard.motionNote / hookmotion.py. Fails open.
+    let hookMotion = null;
+    if (promptStyle === 'hookfirst' && mode !== 'bgswap') {
+      try {
+        const secs = Math.min(1.5, (measuredCuts && measuredCuts.length) ? measuredCuts[0] : 1.5);
+        const out = await new Promise((resolve) => {
+          require('child_process').execFile(PYTHON, [path.join(__dirname, 'hookmotion.py'), videoPath, String(secs)], { timeout: 45000 },
+            (err, stdout) => resolve(err ? '' : String(stdout || '')));
+        });
+        hookMotion = out ? JSON.parse(out.trim().split('\n').pop()) : null;
+        console.log(`[clone] hookfirst measured motion: ${JSON.stringify(hookMotion)}`);
+      } catch (e) {
+        console.warn('[clone] hook motion measure failed:', e.message);
+        hookMotion = null;
+      }
+    }
 
     // 2b. Keep a short-lived PLAYABLE copy of the source video, so the Studio can
     // show the original next to the finished recreate ("what went well / what to
@@ -941,7 +957,7 @@ const cloneHandler = async (req, res) => {
     // stay under the gateway's image ceiling, and sampling a mixed text/image array would
     // both drop hook frames and splice stray labels into the subset.
     const hookContent = (hookFrames.length && !isBgSwap) ? [
-      { type: 'text', text: `HOOK WINDOW — the source's opening ${hookFrames.length} frames in order${promptStyle === 'hookfirst' ? ' (the first ones only 0.15 s apart: compare each frame with the next to catch small movements — a knee or leg shifting, a foot, fingers, a shoulder)' : ''} (${hookFrames.map(h => h.ts + 's').join(', ')})${promptStyle === 'hookfirst' && measuredCuts && measuredCuts.length ? `, all inside the first shot, which ends at the measured cut at ${measuredCuts[0]}s` : ''}. This is the scroll-stopping moment you must preserve.` },
+      { type: 'text', text: `HOOK WINDOW — the source's opening ${hookFrames.length} frames in order${promptStyle === 'hookfirst' ? ' (the first ones only 0.15 s apart: compare each frame with the next to catch small movements — a knee or leg shifting, a foot, fingers, a shoulder)' : ''} (${hookFrames.map(h => h.ts + 's').join(', ')})${promptStyle === 'hookfirst' && measuredCuts && measuredCuts.length ? `, all inside the first shot, which ends at the measured cut at ${measuredCuts[0]}s` : ''}. This is the scroll-stopping moment you must preserve.${promptStyle === 'hookfirst' && hookGuardLib.motionNote(hookMotion) ? ' ' + hookGuardLib.motionNote(hookMotion) : ''}` },
       ...hookFrames.map(h => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: h.dataUrl.split(',')[1] } })),
       { type: 'text', text: 'FULL CLIP — evenly sampled frames covering the whole video:' },
     ] : [];
@@ -1714,14 +1730,15 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     let hookGuard = null;
     if (promptStyle === 'hookfirst' && !isBgSwap) {
       hookGuard = { posed: false, revised: false, tempoRemoved: [] };
-      if (influencerInOpening === true && hookContent.length && hookGuardLib.isPosed(hookGuardLib.hookSegment(basePrompt))) {
+      if (influencerInOpening === true && hookContent.length && (hookGuardLib.isPosed(hookGuardLib.hookSegment(basePrompt)) || hookGuardLib.missesMeasured(hookGuardLib.hookSegment(basePrompt), hookMotion))) {
+        hookGuard.missedMeasured = hookGuardLib.missesMeasured(hookGuardLib.hookSegment(basePrompt), hookMotion);
         hookGuard.posed = true;
         const leftMs = CLONE_BUDGET_MS - (Date.now() - startedAt);
         if (leftMs < HOOK_REVISE_MIN_MS) hookGuard.skipped = 'no_budget';
         else {
           try {
             // The hook frames exactly as the writer saw them, minus the trailing "FULL CLIP" label.
-            const content = [...hookContent.slice(0, -1), { type: 'text', text: hookGuardLib.reviseHookInstruction(basePrompt) }];
+            const content = [...hookContent.slice(0, -1), { type: 'text', text: hookGuardLib.reviseHookInstruction(basePrompt, hookGuardLib.motionNote(hookMotion)) }];
             const timeout = Math.min(leftMs - 10000, 90000);
             const body = { max_tokens: 1500, system: 'You edit video-generation prompts. Return only the edited prompt text.', messages: [{ role: 'user', content }] };
             const r = kieApiKey
@@ -1731,7 +1748,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
                   { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout });
             // Kie can answer 200 with the error in the body — an empty text is simply not accepted.
             const revised = (r.data?.content || []).filter(b => b && b.type === 'text').map(b => b.text).join('').trim();
-            if (hookGuardLib.acceptRevision(basePrompt, revised)) { basePrompt = revised; hookGuard.revised = true; }
+            if (hookGuardLib.acceptRevision(basePrompt, revised, undefined, hookMotion)) { basePrompt = revised; hookGuard.revised = true; }
             else hookGuard.rejected = true;
           } catch (e) {
             hookGuard.error = String(e.response?.status || e.code || e.message || 'error').slice(0, 120);
@@ -1770,6 +1787,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       legsBare,
       influencerInOpening,
       hookGuard: hookGuard || undefined,
+      hookMotion: hookMotion || undefined,
       lane,
       laneLayers: LANE_LAYERS,
       analyserVersion: ANALYSER_VERSION,
