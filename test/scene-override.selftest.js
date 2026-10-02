@@ -14,6 +14,7 @@ const lj = SRC.indexOf("` : '',", li) + 1;
 t('rule found inside the system-prompt list', () => assert.ok(li > 0 && lj > li && SRC.lastIndexOf('const sysSend = [', li) > 0));
 const rule = (sceneOverride, isBgSwap) => new Function('sceneOverride', 'isBgSwap', 'return ' + SRC.slice(li, lj) + " : '';")(sceneOverride, isBgSwap);
 t('with a setting: names it, keeps camera/timing/actions, re-dresses the bystanders', () => { const r = rule('courtside at an NBA game', false); assert.ok(r.includes('It takes place here: courtside at an NBA game.') && /same number, positions and live actions/.test(r) && /the camera, framing and distance, the timing/.test(r)); });
+t('a named garment replaces ONLY that garment; trousers/shoes stay and are written out', () => { const r = rule('fashion show, a black tee', false); assert.ok(/replaces ONLY that garment/.test(r) && /trousers, shoes, jacket — stays exactly as the source shows it and is written out, never dropped/.test(r)); });
 t('without a setting: nothing (every other recreate is byte-identical)', () => assert.strictEqual(rule('', false), ''));
 t('bgswap: nothing', () => assert.strictEqual(rule('courtside', true), ''));
 console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);
