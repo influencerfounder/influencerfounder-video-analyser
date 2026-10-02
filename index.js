@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.60.0';
+const ANALYSER_VERSION = '2.60.1';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -1405,7 +1405,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       // 🏟 NEW SETTING (2026-10-01, Mike: the FIFA winner with Kryfex "in 3 other types of audiences").
       // The tool builds the opening frame from the source's real first frame moved to this setting; this
       // tells the writer the same thing so the prompt and the frame agree. Camera, timing and actions stay.
-      (sceneOverride && !isBgSwap) ? `🏟 SETTING OVERRIDE — this recreate does NOT take place in the source's location. It takes place here: ${sceneOverride}. Write the location, the light and the background for that place, and give the people around [INFLUENCER] the same number, positions and live actions as in the source, dressed for that place. If the line above names a garment [INFLUENCER] wears, it replaces ONLY that garment (a named top replaces the source's top); every garment it does not name — trousers, shoes, jacket — stays exactly as the source shows it and is written out, never dropped (measured 2026-10-01: an override naming only a t-shirt lost the source's long trousers and the frame came back in shorts with bare knees). Keep everything else exactly as the source: the camera, framing and distance, the timing, every shot or phase, and every action [INFLUENCER] makes.` : '',
+      (sceneOverride && !isBgSwap) ? `🏟 SETTING OVERRIDE — this recreate does NOT take place in the source's location. It takes place here: ${sceneOverride}. Write the location, the light and the background for that place, and give the people around [INFLUENCER] the same number, positions and live actions as in the source, dressed for that place. If the line above names a garment [INFLUENCER] wears, it replaces ONLY that garment (a named top replaces the source's top); every garment it does not name — trousers, shoes, jacket — stays exactly as the source shows it and is written out, never dropped (measured 2026-10-01: an override naming only a t-shirt lost the source's long trousers and the frame came back in shorts with bare knees). Keep everything else exactly as the source: the camera, framing and distance, the timing, every shot or phase, and every action [INFLUENCER] makes. Keep the source's GEOMETRY OF ATTENTION: whatever [INFLUENCER] and the people around are watching sits where it sits in the source — when they face the camera while watching an event, the new setting's event (the runway, the court, the stage, the ring) is BEHIND THE CAMERA, out of frame, and behind [INFLUENCER] are only more of the audience; never put the event behind [INFLUENCER]'s back (Mike, 2026-10-02: a runway behind a guest who looks at the camera is not natural).` : '',
       (PRONOUN_RULE && !isBgSwap) ? PRONOUN_RULE : '',
       (OWN_SUBJECT_RULE && !isBgSwap) ? OWN_SUBJECT_RULE : '',
       !isBgSwap ? SPEECH_MOTION_RULE : '',
