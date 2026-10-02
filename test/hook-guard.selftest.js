@@ -75,14 +75,15 @@ const MOVING = '[INFLUENCER] sits in a stadium stand. [INFLUENCER] wears this sa
     return { ...out, calls };
   };
   const good = goodHook + tail;
-  await t('posed + OPENING: SHOWN → one revision call, accepted', async () => { const r = await run({ reply: good }); assert.strictEqual(r.calls.length, 1); assert.ok(r.hookGuard.posed && r.hookGuard.revised); assert.strictEqual(r.basePrompt, good); });
+  const noCrowd = (x) => x.replace(/ Throughout the whole clip, the people around \[INFLUENCER\] keep moving naturally — talking, glancing around, shifting in their seats; nobody is frozen\./, '');
+  await t('posed + OPENING: SHOWN → one revision call, accepted', async () => { const r = await run({ reply: good }); assert.strictEqual(r.calls.length, 1); assert.ok(r.hookGuard.posed && r.hookGuard.revised); assert.strictEqual(noCrowd(r.basePrompt), good); });
   await t('the revision call carries the hook frames but NOT the "FULL CLIP" label, and the prompt', async () => { const r = await run({ reply: good }); const c = r.calls[0].body.messages[0].content; assert.strictEqual(c.length, 3); assert.ok(c[1].type === 'image' && /PROMPT:\n/.test(c[2].text) && !c.some(x => /FULL CLIP/.test(x.text || ''))); });
   await t('Kie key → Kie gateway with thinking disabled; no Kie key → Anthropic direct', async () => { const a = await run({ reply: good }); assert.ok(/api\.kie\.ai/.test(a.calls[0].url) && a.calls[0].body.thinking.type === 'disabled'); const b = await run({ reply: good, kie: '' }); assert.ok(/api\.anthropic\.com/.test(b.calls[0].url)); });
-  await t('OPENING: ABSENT → no revision (a bodyguard opening has no influencer movement)', async () => { const r = await run({ opening: false, reply: good }); assert.strictEqual(r.calls.length, 0); assert.strictEqual(r.basePrompt, POSED); });
+  await t('OPENING: ABSENT → no revision (a bodyguard opening has no influencer movement)', async () => { const r = await run({ opening: false, reply: good }); assert.strictEqual(r.calls.length, 0); assert.strictEqual(noCrowd(r.basePrompt), POSED); });
   await t('OPENING unknown → no revision', async () => { const r = await run({ opening: null, reply: good }); assert.strictEqual(r.calls.length, 0); });
   await t('a moving hook → no call at all (trigger-based: costs nothing)', async () => { const r = await run({ prompt: MOVING, reply: good }); assert.strictEqual(r.calls.length, 0); assert.ok(!r.hookGuard.posed); });
-  await t('a bad revision is rejected and the original prompt kept', async () => { const r = await run({ reply: 'Sure! Here it is.' }); assert.ok(r.hookGuard.rejected && r.basePrompt === POSED); });
-  await t('a failing call keeps the original prompt (never fails the analysis)', async () => { const r = await run({ throws: true }); assert.ok(r.hookGuard.error && r.basePrompt === POSED); });
+  await t('a bad revision is rejected and the original prompt kept', async () => { const r = await run({ reply: 'Sure! Here it is.' }); assert.ok(r.hookGuard.rejected && noCrowd(r.basePrompt) === POSED); });
+  await t('a failing call keeps the original prompt (never fails the analysis)', async () => { const r = await run({ throws: true }); assert.ok(r.hookGuard.error && noCrowd(r.basePrompt) === POSED); });
   await t('no budget left → skipped, no call', async () => { const r = await run({ leftMs: 30000, reply: good }); assert.strictEqual(r.calls.length, 0); assert.strictEqual(r.hookGuard.skipped, 'no_budget'); });
   await t('the tempo scrub runs on the final prompt, after a revision too', async () => { const r = await run({ reply: good.replace('turns the head right', 'slowly turns the head right') }); assert.ok(r.hookGuard.revised && !/slowly turns/.test(r.basePrompt) && r.hookGuard.tempoRemoved.includes('slowly')); });
   await t('every other style: no guard, prompt untouched even with "slowly" in it', async () => { const p = MOVING.replace('turns', 'slowly turns'); const r = await run({ promptStyle: 'realism', prompt: p }); assert.strictEqual(r.hookGuard, null); assert.strictEqual(r.basePrompt, p); });
@@ -113,9 +114,17 @@ const MOVING = '[INFLUENCER] sits in a stadium stand. [INFLUENCER] wears this sa
     const r = await run({ prompt: MOVING, motion: FIFA, reply: MOVING.replace('[0-3s] [INFLUENCER] turns', '[0-3s] [INFLUENCER]\'s right knee bounces quickly; [INFLUENCER] turns') });
     assert.strictEqual(r.calls.length, 1); assert.ok(/MEASURED MOTION/.test(r.calls[0].body.messages[0].content.slice(-1)[0].text)); assert.ok(r.hookGuard.revised && /knee bounces/.test(r.basePrompt));
   });
-  await t('a revision that still misses the measured legs is rejected', async () => { const r = await run({ prompt: MOVING, motion: FIFA, reply: MOVING }); assert.ok(r.hookGuard.rejected && r.basePrompt === MOVING); });
+  await t('a revision that still misses the measured legs is rejected', async () => { const r = await run({ prompt: MOVING, motion: FIFA, reply: MOVING }); assert.ok(r.hookGuard.rejected && noCrowd(r.basePrompt) === MOVING); });
   await t('no leg motion measured → a moving hook costs no call', async () => { const r = await run({ prompt: MOVING, motion: WALK, reply: MOVING }); assert.strictEqual(r.calls.length, 0); });
   await t('the analyser runs hookmotion.py for hookfirst and puts the note in the hook window', () => { const S = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8'); assert.ok(/execFile\(PYTHON, \[path\.join\(__dirname, 'hookmotion\.py'\), videoPath, String\(secs\)\]/.test(S) && /hookGuardLib\.motionNote\(hookMotion\)/.test(S)); });
+  // ── the crowd keeps moving (v2.60.0) ───────────────────────────────────────────────────────
+  { const P = '[INFLUENCER] sits courtside in a black tee. [INFLUENCER] wears this same outfit, fully dressed, in every shot.\n\nBehind, a woman sits with arms crossed.\n\n[0-3s] x.';
+    const c = g.ensureCrowdMoves(P);
+    await t('people around + no crowd sentence → it is put right after the outfit sentence', () => assert.ok(c.added === 1 && c.text.includes('in every shot. Throughout the whole clip, the people around [INFLUENCER] keep moving naturally — talking, glancing around, shifting in their seats; nobody is frozen.\n\nBehind')));
+    await t('already there → untouched', () => assert.strictEqual(g.ensureCrowdMoves(c.text).text, c.text));
+    await t('nobody else in the video → untouched', () => { const Q = '[INFLUENCER] walks alone on a beach. [INFLUENCER] wears this same outfit, fully dressed, in every shot.'; assert.strictEqual(g.ensureCrowdMoves(Q).text, Q); });
+    await t('the writer is asked for the sentence and for an ONGOING action per person', () => { const S = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8'); assert.ok(/nobody is frozen\."'/.test(S) && /give EACH one an ongoing action of their own that keeps going through the hook/.test(S) && /const crowd = hookGuardLib\.ensureCrowdMoves\(basePrompt\);/.test(S)); });
+    await t('the wiring adds it (hookfirst)', async () => { const r = await run({ prompt: P }); assert.ok(r.hookGuard.crowdAdded === 1 && /nobody is frozen/.test(r.basePrompt)); }); }
   await t('hookGuard travels in the response', () => assert.ok(/influencerInOpening,\n\s+hookGuard: hookGuard \|\| undefined,/.test(SRC)));
 
   console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);

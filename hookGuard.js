@@ -200,4 +200,21 @@ function missesMeasured(segment, m) {
   return legsMove && !LEG_MOVE.test(String(segment || ''));
 }
 
-module.exports = { motionNote, missesMeasured, ensureGarmentOnChest, HOOK_MIN_MOVES, hookSegment, hookMoves, isPosed, scrubPersonTempo, reviseHookInstruction, acceptRevision };
+
+// 👥 THE CROWD KEEPS MOVING (v2.60.0, 2026-10-02, Mike: "People in the background are frozen again").
+// Measured: on Seedance the bystanders moved at ~half the source (boxing 0.32, fashion 0.45 vs 0.73)
+// when the prompt described them once, in the hook, half of them as a pose. The writer is asked for
+// the sentence below whenever people are around; this puts it in when the writer forgot it. Trigger:
+// the prompt names another person (a woman, a man, fans, a crowd…). Placed right after the outfit
+// sentence, so it is early (late text weighs less on Seedance).
+const CROWD_SENTENCE = (who) => `Throughout the whole clip, the people around ${who} keep moving naturally — talking, glancing around, shifting in their seats; nobody is frozen.`;
+const PEOPLE_AROUND = /\b(?:woman|women|man|men|girl|boy|people|crowd|fans?|spectators?|audience|bystanders?|onlookers?|photographers?|guests?|neighbou?rs?)\b/i;
+function ensureCrowdMoves(prompt, who = '[INFLUENCER]') {
+  const p = String(prompt || '');
+  if (!PEOPLE_AROUND.test(p) || /nobody is frozen|keep moving naturally/i.test(p)) return { text: p, added: 0 };
+  const m = /wears this same outfit, fully dressed, in every shot\./i.exec(p);
+  const at = m ? m.index + m[0].length : (p.indexOf('\n\n') > 0 ? p.indexOf('\n\n') : p.length);
+  return { text: p.slice(0, at) + ' ' + CROWD_SENTENCE(who) + p.slice(at), added: 1 };
+}
+
+module.exports = { ensureCrowdMoves, motionNote, missesMeasured, ensureGarmentOnChest, HOOK_MIN_MOVES, hookSegment, hookMoves, isPosed, scrubPersonTempo, reviseHookInstruction, acceptRevision };
