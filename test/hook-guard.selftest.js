@@ -93,6 +93,12 @@ const MOVING = '[INFLUENCER] sits in a stadium stand. [INFLUENCER] wears this sa
   await t('a chest/neck line that already names clothing is left alone', () => assert.ok(gc.text.includes('[5-7s] Fingertips graze')));
   await t('another person\'s chest is not the influencer\'s', () => assert.ok(gc.text.includes('[7-9s] The woman behind')));
   await t('only one line changed, nothing else touched', () => { assert.strictEqual(gc.added, 1); assert.strictEqual(gc.text.replace('[INFLUENCER] still wears the white Real Madrid jersey. ', ''), CL); });
+  await t('a TOP that disagrees with the outfit sentence is NOT inserted (the boxing "white adidas jersey black blazer")', () => {
+    const P = 'Kryfex sits ringside wearing a black blazer over a black t-shirt.\n\n[0-3s] Kryfex turns.\n\n[3-5s] Close-up on face and upper chest.';
+    const r = g.ensureGarmentOnChest(P, 'white adidas jersey black blazer', 'Kryfex');
+    assert.strictEqual(r.added, 0); assert.strictEqual(r.text, P); assert.ok(r.disagreed);
+    assert.strictEqual(g.ensureGarmentOnChest(P, 'black blazer', 'Kryfex').added, 1);
+  });
   await t('TOP: NONE or no TOP → nothing added (a bare-chested source stays bare)', () => { assert.strictEqual(g.ensureGarmentOnChest(CL, 'NONE').text, CL); assert.strictEqual(g.ensureGarmentOnChest(CL, '').text, CL); });
   await t('the wiring adds the top after the scrub', async () => { const r = await run({ prompt: MOVING.replace('[3-5s] Gaze lifts back to the lens, in the same white jersey', '[3-5s] Close-up on face and upper chest'), top: 'white jersey' }); assert.ok(/\[3-5s\] \[INFLUENCER\] still wears the white jersey\. Close-up/.test(r.basePrompt) && r.hookGuard.garmentAdded === 1); });
   await t('the writer is asked for the TOP line (hookfirst only) and it is parsed out of the prompt', () => { assert.ok(/\(promptStyle === 'hookfirst' && !isBgSwap\) \? 'Also output, on its own line directly after the OPENING line, exactly "TOP: "/.test(SRC)); assert.ok(/const m = basePrompt\.match\(\/\^TOP:/.test(SRC)); });

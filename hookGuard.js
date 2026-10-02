@@ -145,9 +145,19 @@ const CHEST = /\b(?:upper\s+chest|chest|torso|collarbones?|upper\s+body|neck\s+t
 const OTHER_CHEST = /\b(?:her|their)\s+(?:upper\s+)?(?:chest|torso)\b/i;
 const CLOTHING = /\b(?:jersey|tee|t-shirt|shirt|hoodie|sweater|sweatshirt|jumper|top|tank|vest|blazer|jacket|coat|collar|kit|outfit|dress|suit|polo|hood|cardigan|blouse|overshirt|sleeves?|neckline)\b/i;
 const TIMED_LINE = /^(\s*(?:Shot\s+\d+\s*)?\[\s*\d+(?:\.\d+)?\s*s?\s*[-–]\s*\d+(?:\.\d+)?\s*s?\s*\]\s*)/i;
+// The TOP line must agree with the prompt's own outfit sentence. Measured 2026-10-02 (boxing,
+// setting override): the writer's TOP said "white adidas jersey black blazer" — the SOURCE's jersey
+// mixed into the new outfit — and that got inserted into a close-up line. Every content word of TOP
+// must appear in the overall sentence (the first ~700 characters); otherwise nothing is inserted.
+function topAgrees(prompt, garment) {
+  const head = String(prompt || '').slice(0, 700).toLowerCase();
+  const words = garment.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(w => w.length > 2 && !/^(the|and|with|over|under|plain)$/.test(w));
+  return words.length > 0 && words.every(w => head.includes(w));
+}
 function ensureGarmentOnChest(prompt, top, who = '[INFLUENCER]') {
   const garment = String(top || '').trim().replace(/[.\s]+$/, '');
   if (!garment || /^none$/i.test(garment)) return { text: String(prompt || ''), added: 0 };
+  if (!topAgrees(prompt, garment)) return { text: String(prompt || ''), added: 0, disagreed: true };
   let added = 0;
   const text = String(prompt || '').split('\n').map((line) => {
     const m = TIMED_LINE.exec(line);
