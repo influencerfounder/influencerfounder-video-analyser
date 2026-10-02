@@ -125,6 +125,16 @@ const MOVING = '[INFLUENCER] sits in a stadium stand. [INFLUENCER] wears this sa
     await t('nobody else in the video → untouched', () => { const Q = '[INFLUENCER] walks alone on a beach. [INFLUENCER] wears this same outfit, fully dressed, in every shot.'; assert.strictEqual(g.ensureCrowdMoves(Q).text, Q); });
     await t('the writer is asked for the sentence and for an ONGOING action per person', () => { const S = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8'); assert.ok(/nobody is frozen\."'/.test(S) && /give EACH one an ongoing action of their own that keeps going through the hook/.test(S) && /const crowd = hookGuardLib\.ensureCrowdMoves\(basePrompt\);/.test(S)); });
     await t('the wiring adds it (hookfirst)', async () => { const r = await run({ prompt: P }); assert.ok(r.hookGuard.crowdAdded === 1 && /nobody is frozen/.test(r.basePrompt)); }); }
+  // ── stillness scrub (v2.61.0) ───────────────────────────────────────────────────────────────
+  { const P = 'Overall.\n\nMedium shot, lens centred on Kryfex, facing the camera; the knees continuously shift, while both arms rest low and the shoulders stay square — behind Kryfex, a woman shifts in her seat, and a man sits perfectly still with arms folded. The camera holds perfectly still.\n\n0–3s: eyes hold a direct, unblinking stare, Kryfex remains perfectly still.\n\n3–5s: later line, his shoulders stay square.';
+    const r = g.scrubHookStillness(P);
+    await t('"the shoulders stay square" and ", unblinking" are deleted from the hook', () => assert.ok(!/stay square — behind/.test(r.text) && /hold a direct stare/.test(r.text)));
+    await t('"remains perfectly still" becomes "keeps moving naturally" (the sentence keeps a verb)', () => assert.ok(/Kryfex keeps moving naturally\./.test(r.text)));
+    await t('another person\'s "sits perfectly still" loses the stillness too (it fights "nobody is frozen")', () => assert.ok(/a man sits with arms folded/.test(r.text)));
+    await t('the CAMERA may hold still', () => assert.ok(/The camera holds perfectly still\./.test(r.text)));
+    await t('lines after the hook are untouched', () => assert.ok(/3–5s: later line, his shoulders stay square\./.test(r.text)));
+    await t('an unbracketed "3–5s:" line ends the hook', () => assert.ok(g.hookSegment(P).endsWith('Kryfex remains perfectly still.\n\n')));
+    await t('the wiring runs it on hookfirst', () => { const S = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8'); assert.ok(/const still = hookGuardLib\.scrubHookStillness\(basePrompt\);\n\s+basePrompt = still\.text;/.test(S)); }); }
   await t('hookGuard travels in the response', () => assert.ok(/influencerInOpening,\n\s+hookGuard: hookGuard \|\| undefined,/.test(SRC)));
 
   console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);

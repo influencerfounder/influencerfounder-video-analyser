@@ -20,12 +20,13 @@ const HOOK_MIN_MOVES = 2;
 // overall sentence and the opening description first, then "[0-3s]" (or "Shot 1 [0-1.2s]"), or
 // sometimes no [0-…] line at all and goes straight to "[3s-5s]"; either way the first timed line
 // with a start above zero is where the hook ends. No such line → the first ~700 characters.
-const TIMED = /(?:\bShot\s+\d+\s*)?\[\s*(\d+(?:\.\d+)?)\s*s?\s*[-–]\s*\d+(?:\.\d+)?\s*s?\s*\]/gi;
+// Bracketed "[3-5s]" / "Shot 2 [1.2-3s]", or a line that STARTS "3–5s:" (the writer uses both).
+const TIMED = /(?:\bShot\s+\d+\s*)?\[\s*(\d+(?:\.\d+)?)\s*s?\s*[-–]\s*\d+(?:\.\d+)?\s*s?\s*\]|(?:^|\n)[ \t]*(\d+(?:\.\d+)?)\s*s?\s*[-–]\s*\d+(?:\.\d+)?\s*s\s*:/gi;
 function hookSegment(prompt) {
   const p = String(prompt || '');
   const re = new RegExp(TIMED.source, 'gi');
   let m;
-  while ((m = re.exec(p))) if (parseFloat(m[1]) > 0) return p.slice(0, m.index);
+  while ((m = re.exec(p))) if (parseFloat(m[1] != null ? m[1] : m[2]) > 0) return p.slice(0, m.index + (m[0].match(/^\n/) ? 1 : 0));
   return p.slice(0, 700);
 }
 
@@ -217,4 +218,44 @@ function ensureCrowdMoves(prompt, who = '[INFLUENCER]') {
   return { text: p.slice(0, at) + ' ' + CROWD_SENTENCE(who) + p.slice(at), added: 1 };
 }
 
-module.exports = { ensureCrowdMoves, motionNote, missesMeasured, ensureGarmentOnChest, HOOK_MIN_MOVES, hookSegment, hookMoves, isPosed, scrubPersonTempo, reviseHookInstruction, acceptRevision };
+
+// 🧊 STILLNESS SCRUB (v2.61.0, 2026-10-02, Mike: "Kryfex freezes now the first 2 seconds"). Measured on
+// the fashion re-take: his head moved 0.05-0.14 for ~1.2 s (source 0.15-0.45) and the hook said
+// "facing directly into the camera … the shoulders stay square" and "eyes hold a direct, unblinking"
+// stare — stillness words the model renders literally, and ones the writer's motionless-ban list does
+// not name. Deleted from the HOOK only, never when the clause is about the camera or another person;
+// the movements the hook names stay. Same discipline as the tempo scrub.
+const STILL = [
+  [/\b(remains?|stays?)\s+(?:perfectly\s+|completely\s+|totally\s+)?(?:still|motionless|frozen)\b/gi, 'keeps moving naturally'],
+  [/\b(sits?|stands?|sitting|standing)\s+(?:perfectly\s+|completely\s+|totally\s+|dead\s+)?(?:still|motionless|frozen)\b/gi, '$1'],
+  /(?:,\s*|\s+and\s+|\s+while\s+)?\b(?:(?:the|his|her|their)\s+)?(?:shoulders|head|torso|body|posture|chin|jaw)\s+(?:stay|stays|remain|remains|held|kept|keep|keeps)\s+(?:perfectly\s+|completely\s+)?(?:square|still|rigid|level|fixed|locked|motionless|frozen)\b/gi,
+  /\b(?:perfectly|completely|totally|utterly)\s+(?:still|motionless|frozen|rigid)\b/gi,
+  /(?:,\s*)?\b(?:unblinking|unmoving|motionless|without\s+blinking|never\s+blinking|does\s+not\s+blink|doesn['’]t\s+blink)\b/gi,
+  /\b(?:holds?|holding)\s+(?:dead\s+|perfectly\s+)?still\b/gi,
+];
+function scrubHookStillness(prompt) {
+  const p = String(prompt || '');
+  const hook = hookSegment(p);
+  const removed = [];
+  const parts = hook.split(/((?<=[.!?;])\s+|\s+—\s+|\n+)/);
+  const out = parts.map((sent) => {
+    if (!sent || !sent.trim()) return sent;
+    // Everyone in the hook — the influencer AND the people around ("a man sits perfectly still"
+    // fights "nobody is frozen") — but never the camera ("the camera holds perfectly still").
+    let t = sent;
+    for (const entry of STILL) {
+      const [rx, rep] = Array.isArray(entry) ? entry : [entry, ''];
+      t = t.replace(new RegExp(rx.source, 'gi'), (...args) => {
+        const m = args[0], off = args[args.length - 2], whole = args[args.length - 1];
+        const before = whole.slice(Math.max(0, off - 40), off);
+        if (/\b(?:camera|lens|frame|framing|shot)\b/i.test(before + m)) return m;
+        removed.push(m.trim());
+        return rep ? m.replace(new RegExp(rx.source, 'i'), rep) : '';
+      });
+    }
+    return t.replace(/[ \t]{2,}/g, ' ').replace(/\s+([,.;:])/g, '$1').replace(/,\s*,/g, ',').replace(/\b(a|an)\s+(?=[,.;])/gi, '');
+  }).join('');
+  return { text: out + p.slice(hook.length), removed };
+}
+
+module.exports = { scrubHookStillness, ensureCrowdMoves, motionNote, missesMeasured, ensureGarmentOnChest, HOOK_MIN_MOVES, hookSegment, hookMoves, isPosed, scrubPersonTempo, reviseHookInstruction, acceptRevision };
