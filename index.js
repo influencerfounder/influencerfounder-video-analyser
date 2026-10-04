@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.64.0';
+const ANALYSER_VERSION = '2.64.1';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -456,6 +456,7 @@ function cloneJoinKey(b) {
     // 🧪 frameMode changes what the writer SEES (2026-10-04 test).
     b.frameMode === 'frames' ? 'frames' : 'grid',
     b.shotLog === 'gemini' ? 'gemini' : '',
+    b.dirMode === 'screen' ? 'screen' : '',
   ]);
 }
 function runRecorded(handler, req) {
@@ -529,6 +530,10 @@ const cloneHandler = async (req, res) => {
     // MEASURED data, like the cut times. Gemini never writes the prompt. Fail-open: no key, a big
     // file or an error → no log, the analysis runs as before, and the reason is returned.
     const shotLogMode = req.body.shotLog === 'gemini' ? 'gemini' : '';
+    // 🧪 DIRECTION TEST (owner, 2026-10-04). Every grid G63 prompt sent the camera RIGHT where the source
+    // pans LEFT (Wan then invented the unseen side of the set). Tests whether "his right" vs screen
+    // right is the confusion: 'screen' tells the writer left/right always mean the viewer's screen.
+    const dirMode = req.body.dirMode === 'screen' ? 'screen' : '';
     const improveBrief = String(req.body.improveBrief || '').slice(0, 600).trim();
     // ✂️ Shot Cuts (opt-in, 2026-09-03) — see SHOT_CUTS_RULE below for why this exists.
     const shotCuts = req.body.shotCuts === true;
@@ -1465,12 +1470,12 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         ? `IMPROVE MODE — this is NOT a faithful 1:1 copy. Complete STEP 0 first and commit to a driver, then write a prompt for a STRONGER version of the same core concept: sharpen the hook, tighten the pacing and heighten the payoff to maximise scroll-stopping power and watch-through. Keep [INFLUENCER] as the subject and keep the winning idea, but you MAY change setting, props, shot order or ending if it makes the video more likely to go viral.${improveBrief ? ` The user's specific direction: "${improveBrief}" — prioritise this.` : ''}\n\n` + userText + hookBlock + priorsBlock
         : originalUserText;   // 'original' and 'realism' use the verbatim May user message — the only
                               // difference between them is the realism layer, appended below for 'realism'/'improve'
-    let shotLogContent = [];
+    let shotLogContent = dirMode === 'screen' && !isBgSwap ? [{ type: 'text', text: 'LEFT AND RIGHT: every "left" and "right" you write means the VIEWER\'S screen left/right — never a person\'s own left/right (someone walking toward the lens turning to THEIR right moves to SCREEN LEFT). For every camera move and every turn, say which way it goes on screen. Read a camera turn from the BACKGROUND: if the background slides right across the frame, the camera is turning left.' }] : [];
     let shotLogInfo = null;
     if (shotLogMode && !isBgSwap) {
       shotLogInfo = await geminiShotLog(videoPath).catch(e => ({ ok: false, error: String(e.message || e).slice(0, 200) }));
       if (shotLogInfo && shotLogInfo.ok) {
-        shotLogContent = [{ type: 'text', text: 'MEASURED TIMELINE — a second model watched the WHOLE source file at 8 frames per second with its own clock and logged what happens. MAIN is the person you write as [INFLUENCER]; P1, P2… are other people. Use these times for every timestamp you write and follow its camera notes; where it disagrees with your own reading of the frames, the timeline wins on TIMING and the frames win on what things look like. Never describe MAIN\'s face, hair or skin from it.\n' + JSON.stringify(shotLogInfo.log) }];
+        shotLogContent = [...shotLogContent, { type: 'text', text: 'MEASURED TIMELINE — a second model watched the WHOLE source file at 8 frames per second with its own clock and logged what happens. MAIN is the person you write as [INFLUENCER]; P1, P2… are other people. Use these times for every timestamp you write and follow its camera notes; where it disagrees with your own reading of the frames, the timeline wins on TIMING and the frames win on what things look like. Never describe MAIN\'s face, hair or skin from it.\n' + JSON.stringify(shotLogInfo.log) }];
       }
       console.log('[clone] shotLog=gemini: ' + (shotLogInfo && shotLogInfo.ok ? `${(shotLogInfo.log.timeline || []).length} rows, ${shotLogInfo.secs}s` : 'skipped — ' + (shotLogInfo && shotLogInfo.error)));
     }
