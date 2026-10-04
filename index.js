@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.64.1';
+const ANALYSER_VERSION = '2.65.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -456,7 +456,7 @@ function cloneJoinKey(b) {
     // 🧪 frameMode changes what the writer SEES (2026-10-04 test).
     b.frameMode === 'frames' ? 'frames' : 'grid',
     b.shotLog === 'gemini' ? 'gemini' : '',
-    b.dirMode === 'screen' ? 'screen' : '',
+    b.dirMode === 'off' ? 'off' : 'screen',
   ]);
 }
 function runRecorded(handler, req) {
@@ -533,7 +533,10 @@ const cloneHandler = async (req, res) => {
     // 🧪 DIRECTION TEST (owner, 2026-10-04). Every grid G63 prompt sent the camera RIGHT where the source
     // pans LEFT (Wan then invented the unseen side of the set). Tests whether "his right" vs screen
     // right is the confusion: 'screen' tells the writer left/right always mean the viewer's screen.
-    const dirMode = req.body.dirMode === 'screen' ? 'screen' : '';
+    // ✅ DEFAULT since v2.65.0 (Mike, 2026-10-04): with it, 4/4 G63 analyses panned the camera LEFT like
+    // the source; without it 0/3 grid prompts did. Writer-only text — the video prompt pays nothing.
+    // 'off' is the opt-out for A/B runs.
+    const dirMode = req.body.dirMode === 'off' ? '' : 'screen';
     const improveBrief = String(req.body.improveBrief || '').slice(0, 600).trim();
     // ✂️ Shot Cuts (opt-in, 2026-09-03) — see SHOT_CUTS_RULE below for why this exists.
     const shotCuts = req.body.shotCuts === true;

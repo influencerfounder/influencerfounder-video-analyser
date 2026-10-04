@@ -85,7 +85,8 @@ t('shotLog gemini (v2.63.0) is off by default, joins the cache key, fails open a
   assert.ok(SRC.includes(".catch(e => ({ ok: false, error:"));
   assert.ok((SRC.match(/\.\.\.shotLogContent, \{ type: 'text', text: userFinal/g) || []).length === 3, 'the log reaches all three writer calls (Kie, fallback, Anthropic)');
   assert.ok(SRC.includes("shotLogContent = [...shotLogContent, { type: 'text', text: 'MEASURED TIMELINE"), 'the Gemini log is ADDED to the block, never overwrites the direction note');
-  assert.ok(SRC.includes("const dirMode = req.body.dirMode === 'screen' ? 'screen' : '';") && SRC.includes("b.dirMode === 'screen' ? 'screen' : '',"), 'dirMode is an opt-in test and joins the cache key');
+  assert.ok(SRC.includes("const dirMode = req.body.dirMode === 'off' ? '' : 'screen';") && SRC.includes("b.dirMode === 'off' ? 'off' : 'screen',"), 'screen direction is the DEFAULT since v2.65.0 (opt-out off) and joins the cache key');
+  assert.ok(/LEFT AND RIGHT: every "left" and "right" you write means the VIEWER\\'S screen left\/right/.test(SRC), 'the note names the viewer\'s screen');
 });
 
 t('timed lines are normalised to [a-bs] before any matcher reads them (v2.64.0)', () => {
