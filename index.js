@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.61.1';
+const ANALYSER_VERSION = '2.61.2';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -1421,7 +1421,11 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         ? `IMPROVE MODE — this is NOT a faithful 1:1 copy. Complete STEP 0 first and commit to a driver, then write a prompt for a STRONGER version of the same core concept: sharpen the hook, tighten the pacing and heighten the payoff to maximise scroll-stopping power and watch-through. Keep [INFLUENCER] as the subject and keep the winning idea, but you MAY change setting, props, shot order or ending if it makes the video more likely to go viral.${improveBrief ? ` The user's specific direction: "${improveBrief}" — prioritise this.` : ''}\n\n` + userText + hookBlock + priorsBlock
         : originalUserText;   // 'original' and 'realism' use the verbatim May user message — the only
                               // difference between them is the realism layer, appended below for 'realism'/'improve'
-    const maxTok = isBgSwap ? 2600 : 1000;
+    // 2026-10-04: the recreate writer was capped at 1000 tokens since bgswap shipped. Hook-first
+    // prompts (2026-10-01) write one timed line per measured cut, so a 45s source with 13 shots
+    // ran out mid-sentence at shot 8 of 13 — Wan got no instruction for the last 16s and the
+    // influencer drifted out of frame. Same headroom as bgswap; billed only for what is written.
+    const maxTok = 2600;
 
     let claudeResponse;
     // Set when Kie could not answer and the owner's Anthropic key wrote the prompt instead
@@ -1601,6 +1605,12 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     }
     let basePrompt = claudeResponse.data?.content?.[0]?.text?.trim() || '';
     if (!basePrompt) return res.status(500).json({ success: false, error: 'Empty response from Claude' });
+    // A cut-off prompt is worse than none: it generates a paid video whose second half has no
+    // instruction. Fail loudly so the job errors before any video is made.
+    if (claudeResponse.data?.stop_reason === 'max_tokens') {
+      console.error(`[clone] prompt truncated at max_tokens=${maxTok} (${basePrompt.length} chars) — refusing`);
+      return res.status(500).json({ success: false, error: 'prompt_truncated', detail: `The prompt writer ran out of room at ${basePrompt.length} characters; nothing was generated.` });
+    }
 
     // bgswap returns before ALL of the lane/realism-layer post-processing below —
     // none of it applies to a recreate+swap prompt, and appending a realism layer
@@ -1740,7 +1750,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
             // The hook frames exactly as the writer saw them, minus the trailing "FULL CLIP" label.
             const content = [...hookContent.slice(0, -1), { type: 'text', text: hookGuardLib.reviseHookInstruction(basePrompt, hookGuardLib.motionNote(hookMotion)) }];
             const timeout = Math.min(leftMs - 10000, 90000);
-            const body = { max_tokens: 1500, system: 'You edit video-generation prompts. Return only the edited prompt text.', messages: [{ role: 'user', content }] };
+            const body = { max_tokens: 2600, system: 'You edit video-generation prompts. Return only the edited prompt text.', messages: [{ role: 'user', content }] };
             const r = kieApiKey
               ? await axios.post('https://api.kie.ai/claude/v1/messages', { model: 'claude-sonnet-5', thinking: { type: 'disabled' }, ...body },
                   { headers: { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' }, timeout })
@@ -1748,7 +1758,9 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
                   { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout });
             // Kie can answer 200 with the error in the body — an empty text is simply not accepted.
             const revised = (r.data?.content || []).filter(b => b && b.type === 'text').map(b => b.text).join('').trim();
-            if (hookGuardLib.acceptRevision(basePrompt, revised, undefined, hookMotion)) { basePrompt = revised; hookGuard.revised = true; }
+            // A revision that ran out of room is a truncated prompt — keep the original.
+            if (r.data?.stop_reason === 'max_tokens') hookGuard.rejected = 'truncated';
+            else if (hookGuardLib.acceptRevision(basePrompt, revised, undefined, hookMotion)) { basePrompt = revised; hookGuard.revised = true; }
             else hookGuard.rejected = true;
           } catch (e) {
             hookGuard.error = String(e.response?.status || e.code || e.message || 'error').slice(0, 120);
