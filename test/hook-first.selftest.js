@@ -61,7 +61,7 @@ t('measurement unavailable: the writer reads cuts itself, says so', () => assert
 t('every other style: the rule is EMPTY (byte-identical prompts)', () => { assert.strictEqual(rule('realism', false, [1.2], 9), ''); assert.strictEqual(rule('original', false, null, 9), ''); });
 t('bgswap: the rule is empty', () => assert.strictEqual(rule('hookfirst', true, [1.2], 9), ''));
 t('hookfirst never also gets SHOT_CUTS_RULE', () => assert.ok(SRC.includes("(shotCuts && !isBgSwap && promptStyle !== 'improve' && promptStyle !== 'hookfirst') ? SHOT_CUTS_RULE : ''")));
-t('a wardrobe override reaches the system prompt and the cache key', () => { assert.ok(/\(wardrobe && !isBgSwap\) \? `👕 WARDROBE OVERRIDE — \[INFLUENCER\] does NOT wear the source person's top/.test(SRC)); assert.ok(/String\(b\.wardrobe \|\| ''\),\n[\s\S]{0,160}?\n  \]\);/.test(SRC)); });
+t('a wardrobe override reaches the system prompt and the cache key', () => { assert.ok(/\(wardrobe && !isBgSwap\) \? `👕 WARDROBE OVERRIDE — \[INFLUENCER\] does NOT wear the source person's top/.test(SRC)); assert.ok(/String\(b\.wardrobe \|\| ''\),\n[\s\S]{0,360}?\n  \]\);/.test(SRC)); });
 t('hookfirst asks the writer whether the influencer is in the opening frame', () => assert.ok(/\(promptStyle === 'hookfirst' && !isBgSwap\) \? 'Also output, on its own line directly after the LEGS line, exactly "OPENING: SHOWN"/.test(SRC)));
 { // the parser, executed on real-shaped output
   const pc = grab('    let influencerInOpening = null;', '    // 🧠 WHY-IT-WENT-VIRAL REPORT', 'opening parse');
@@ -71,6 +71,13 @@ t('hookfirst asks the writer whether the influencer is in the opening frame', ()
   t('no OPENING line → null (unknown), never "shown"', () => assert.strictEqual(run('The video opens.').influencerInOpening, null));
 }
 t('hookfirst is accepted by the whitelist and gets the realism layer', () => { assert.ok(SRC.includes("['original','realism','improve','hookfirst'].includes(req.body.promptStyle)")); assert.ok(SRC.includes("promptStyle === 'improve' || promptStyle === 'hookfirst') ? `${basePrompt} ${LANE_LAYERS[lane]}`")); });
+
+t('frameMode grid (v2.62.0) is off by default, joins the cache key, and never reaches bgswap', () => {
+  assert.ok(SRC.includes("const frameMode = req.body.frameMode === 'grid' ? 'grid' : '';"));
+  assert.ok(SRC.includes("b.frameMode === 'grid' ? 'grid' : '',"));
+  assert.ok(/if \(frameMode === 'grid' && !isBgSwap && frameFiles\.length\)/.test(SRC));
+  assert.ok(SRC.includes("const subset = gridContent ? gridContent"));
+});
 
 console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
