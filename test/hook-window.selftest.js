@@ -26,7 +26,7 @@ const block  = grab("    let hookBlock = '';", "catch (_) { hookBlock = ''; }", 
 
 // Compile the REAL code, once, with its free variables as parameters.
 // promptStyle/measuredCuts: the hook-first label (v2.48.0) reads them; a non-hookfirst style is the default path.
-const run = new Function('hookFrames', 'isBgSwap', 'imageCount', 'hookReport', `const promptStyle = 'realism', measuredCuts = null, frameMode = '', frameFiles = [];  // frameMode 'grid' (v2.62.0) is off here: the default path
+const run = new Function('hookFrames', 'isBgSwap', 'imageCount', 'hookReport', `const promptStyle = 'realism', measuredCuts = null, frameMode = '', frameFiles = [], shotLogMode = '';  // frameMode 'grid' (v2.62.0) is off here: the default path
 
 ${hookc}
 ${himg}

@@ -78,6 +78,12 @@ t('frameMode grid (v2.62.0) is off by default, joins the cache key, and never re
   assert.ok(/if \(frameMode === 'grid' && !isBgSwap && frameFiles\.length\)/.test(SRC));
   assert.ok(SRC.includes("const subset = gridContent ? gridContent"));
 });
+t('shotLog gemini (v2.63.0) is off by default, joins the cache key, fails open and only adds a text block', () => {
+  assert.ok(SRC.includes("const shotLogMode = req.body.shotLog === 'gemini' ? 'gemini' : '';"));
+  assert.ok(SRC.includes("b.shotLog === 'gemini' ? 'gemini' : '',"));
+  assert.ok(SRC.includes(".catch(e => ({ ok: false, error:"));
+  assert.ok((SRC.match(/\.\.\.shotLogContent/g) || []).length === 3, 'the log reaches all three writer calls (Kie, fallback, Anthropic)');
+});
 
 console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

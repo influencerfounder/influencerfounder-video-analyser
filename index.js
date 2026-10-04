@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.62.0';
+const ANALYSER_VERSION = '2.63.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -455,6 +455,7 @@ function cloneJoinKey(b) {
     String(b.sceneOverride || ''),
     // 🧪 frameMode changes what the writer SEES (2026-10-04 test).
     b.frameMode === 'grid' ? 'grid' : '',
+    b.shotLog === 'gemini' ? 'gemini' : '',
   ]);
 }
 function runRecorded(handler, req) {
@@ -521,6 +522,11 @@ const cloneHandler = async (req, res) => {
     // the writer real timestamps — measured cause of the G63 take: 11 UNLABELLED frames, one per
     // 2.3 s, so every phase time after the hook was a guess that Wan then followed. Default unchanged.
     const frameMode = req.body.frameMode === 'grid' ? 'grid' : '';
+    // 🧪 SHOT LOG (owner test "B", 2026-10-04). Gemini watches the whole source file (8 fps, its own
+    // clock, with sound) and returns a timed log of action + camera; the Claude writer gets it as
+    // MEASURED data, like the cut times. Gemini never writes the prompt. Fail-open: no key, a big
+    // file or an error → no log, the analysis runs as before, and the reason is returned.
+    const shotLogMode = req.body.shotLog === 'gemini' ? 'gemini' : '';
     const improveBrief = String(req.body.improveBrief || '').slice(0, 600).trim();
     // ✂️ Shot Cuts (opt-in, 2026-09-03) — see SHOT_CUTS_RULE below for why this exists.
     const shotCuts = req.body.shotCuts === true;
@@ -1457,6 +1463,16 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         ? `IMPROVE MODE — this is NOT a faithful 1:1 copy. Complete STEP 0 first and commit to a driver, then write a prompt for a STRONGER version of the same core concept: sharpen the hook, tighten the pacing and heighten the payoff to maximise scroll-stopping power and watch-through. Keep [INFLUENCER] as the subject and keep the winning idea, but you MAY change setting, props, shot order or ending if it makes the video more likely to go viral.${improveBrief ? ` The user's specific direction: "${improveBrief}" — prioritise this.` : ''}\n\n` + userText + hookBlock + priorsBlock
         : originalUserText;   // 'original' and 'realism' use the verbatim May user message — the only
                               // difference between them is the realism layer, appended below for 'realism'/'improve'
+    let shotLogContent = [];
+    let shotLogInfo = null;
+    if (shotLogMode && !isBgSwap) {
+      shotLogInfo = await geminiShotLog(videoPath).catch(e => ({ ok: false, error: String(e.message || e).slice(0, 200) }));
+      if (shotLogInfo && shotLogInfo.ok) {
+        shotLogContent = [{ type: 'text', text: 'MEASURED TIMELINE — a second model watched the WHOLE source file at 8 frames per second with its own clock and logged what happens. MAIN is the person you write as [INFLUENCER]; P1, P2… are other people. Use these times for every timestamp you write and follow its camera notes; where it disagrees with your own reading of the frames, the timeline wins on TIMING and the frames win on what things look like. Never describe MAIN\'s face, hair or skin from it.\n' + JSON.stringify(shotLogInfo.log) }];
+      }
+      console.log('[clone] shotLog=gemini: ' + (shotLogInfo && shotLogInfo.ok ? `${(shotLogInfo.log.timeline || []).length} rows, ${shotLogInfo.secs}s` : 'skipped — ' + (shotLogInfo && shotLogInfo.error)));
+    }
+
     // 2026-10-04: the recreate writer was capped at 1000 tokens since bgswap shipped. Hook-first
     // prompts (2026-10-01) write one timed line per measured cut, so a 45s source with 13 shots
     // ran out mid-sentence at shot 8 of 13 — Wan got no instruction for the last 16s and the
@@ -1504,7 +1520,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       const kieBody = {
         model: 'claude-sonnet-5', max_tokens: maxTok, system: sysSend,
         thinking: { type: 'disabled' },
-        messages: [{ role: 'user', content: [...hookContent, ...subset, { type: 'text', text: userFinal + note }] }]
+        messages: [{ role: 'user', content: [...hookContent, ...subset, ...shotLogContent, { type: 'text', text: userFinal + note }] }]
       };
       const kieHeaders = { 'Authorization': `Bearer ${kieApiKey}`, 'Content-Type': 'application/json' };
       const kieCall = (timeoutMs) => axios.post('https://api.kie.ai/claude/v1/messages', kieBody, { headers: kieHeaders, timeout: timeoutMs });
@@ -1609,7 +1625,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
             console.warn(`[clone] Kie failed (${kieFailure.reason}) — rescuing on the owner's Anthropic key with ${n} frames, ${Math.round(leftMs / 1000)}s left`);
             claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
               model: 'claude-sonnet-4-6', max_tokens: maxTok, system: sysSend,
-              messages: [{ role: 'user', content: [...hookContent, ...subset, { type: 'text', text: userFinal + note }] }]
+              messages: [{ role: 'user', content: [...hookContent, ...subset, ...shotLogContent, { type: 'text', text: userFinal + note }] }]
             }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout: leftMs });
             fallbackInfo = { provider: 'anthropic', model: 'claude-sonnet-4-6', ...kieFacts, usage: claudeResponse.data?.usage || null };
           } catch (fbErr) {
@@ -1629,7 +1645,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       // it short, so the proxy's timeout spoke first and mislabelled it as a slow Instagram link.
       claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
         model: 'claude-sonnet-4-6', max_tokens: maxTok, system: sysSend,
-        messages: [{ role: 'user', content: [...hookContent, ...(gridContent || imageContent), { type: 'text', text: userFinal }] }]
+        messages: [{ role: 'user', content: [...hookContent, ...(gridContent || imageContent), ...shotLogContent, { type: 'text', text: userFinal }] }]
       }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout: kieClaudeTimeoutMs(Date.now() - startedAt) });
     }
 
@@ -1846,6 +1862,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       lane,
       laneLayers: LANE_LAYERS,
       analyserVersion: ANALYSER_VERSION,
+      ...(shotLogInfo ? { shotLog: shotLogInfo } : {}),
       measuredCuts: measuredCuts || undefined,
       ...recommendRecreateSpec(duration),
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
@@ -4558,3 +4575,35 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+
+// 🧪 Gemini shot log (owner test B, 2026-10-04) — see shotLogMode in cloneHandler.
+const GEMINI_SHOTLOG_PROMPT = `You are logging a short vertical social video for a director who will recreate it shot for shot with a different lead person. Watch the whole video, including the sound.
+
+Return JSON only:
+{"cuts":[seconds of every hard cut, to 0.1 s],
+ "mainPerson":"one line: who the video is about (the person the camera follows) — describe only clothing and position, never face, hair, beard, skin or age",
+ "otherPeople":[{"id":"P1","look":"short physical description","firstSeen":0}],
+ "timeline":[{"start":0,"end":0,"who":"MAIN or P1/P2…","action":"what the body does, in plain words","camera":"what the lens does: fixed / pans left / follows / pushes in / pulls back / walks around …","where":"where in the location this happens"}]}
+
+Rules: times to 0.1 s, read from the video's own clock. A new timeline row whenever the action OR the camera changes. Cover 0 s to the end with no gaps. Only what is visible or audible — never guess. If the camera moves with the person, say so in that row.`;
+async function geminiShotLog(videoPath) {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) return { ok: false, error: 'no GEMINI_API_KEY' };
+  const size = fs.statSync(videoPath).size;
+  if (size > 18 * 1024 * 1024) return { ok: false, error: `file ${Math.round(size / 1048576)} MB > 18 MB inline limit` };
+  const model = process.env.GEMINI_SHOTLOG_MODEL || 'gemini-3.1-pro-preview';
+  const t0 = Date.now();
+  const r = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+    contents: [{ parts: [
+      { inline_data: { mime_type: 'video/mp4', data: fs.readFileSync(videoPath).toString('base64') }, video_metadata: { fps: 8 } },
+      { text: GEMINI_SHOTLOG_PROMPT },
+    ] }],
+    generationConfig: { responseMimeType: 'application/json', temperature: 0.2 },
+  }, { headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, timeout: 120000, validateStatus: () => true });
+  if (r.status !== 200) return { ok: false, error: `gemini ${r.status}: ${String(r.data?.error?.message || '').slice(0, 160)}` };
+  const parts = r.data?.candidates?.[0]?.content?.parts || [];
+  const txt = parts.filter(p => p && typeof p.text === 'string' && !p.thought).map(p => p.text).join('').trim();
+  let log; try { log = JSON.parse(txt); } catch (_) { return { ok: false, error: 'gemini returned no JSON' }; }
+  if (!log || !Array.isArray(log.timeline) || !log.timeline.length) return { ok: false, error: 'gemini log had no timeline' };
+  return { ok: true, model, secs: Math.round((Date.now() - t0) / 100) / 10, usage: r.data?.usageMetadata || null, log };
+}
