@@ -72,9 +72,10 @@ t('hookfirst asks the writer whether the influencer is in the opening frame', ()
 }
 t('hookfirst is accepted by the whitelist and gets the realism layer', () => { assert.ok(SRC.includes("['original','realism','improve','hookfirst'].includes(req.body.promptStyle)")); assert.ok(SRC.includes("promptStyle === 'improve' || promptStyle === 'hookfirst') ? `${basePrompt} ${LANE_LAYERS[lane]}`")); });
 
-t('frameMode grid (v2.62.0) is off by default, joins the cache key, and never reaches bgswap', () => {
-  assert.ok(SRC.includes("const frameMode = req.body.frameMode === 'grid' ? 'grid' : '';"));
-  assert.ok(SRC.includes("b.frameMode === 'grid' ? 'grid' : '',"));
+t('frameMode grid (v2.62.0, default v2.64.0) joins the cache key and never reaches bgswap', () => {
+  assert.ok(SRC.includes("const frameMode = req.body.frameMode === 'frames' ? '' : 'grid';"), 'grid is the DEFAULT since v2.64.0; frames is the opt-out');
+  assert.ok(SRC.includes("b.frameMode === 'frames' ? 'frames' : 'grid',"));
+  assert.ok(/The sheets are SMALL: read timing, movement and camera from them, but read clothing, printed text and logos from the full-size HOOK WINDOW frames/.test(SRC), 'print and logos come from the full-size frames (grid misread a tee 2026-10-04)');
   assert.ok(/if \(frameMode === 'grid' && !isBgSwap && frameFiles\.length\)/.test(SRC));
   assert.ok(SRC.includes("const subset = gridContent ? gridContent"));
 });
@@ -83,6 +84,11 @@ t('shotLog gemini (v2.63.0) is off by default, joins the cache key, fails open a
   assert.ok(SRC.includes("b.shotLog === 'gemini' ? 'gemini' : '',"));
   assert.ok(SRC.includes(".catch(e => ({ ok: false, error:"));
   assert.ok((SRC.match(/\.\.\.shotLogContent/g) || []).length === 3, 'the log reaches all three writer calls (Kie, fallback, Anthropic)');
+});
+
+t('timed lines are normalised to [a-bs] before any matcher reads them (v2.64.0)', () => {
+  assert.ok(/hookGuard = \{ posed: false, revised: false, tempoRemoved: \[\] \};\n\s*\/\/[^\n]*\n\s*\{ const n = hookGuardLib\.normalizeTimedLines\(basePrompt\)/.test(SRC), 'first thing in the hookfirst block');
+  assert.ok(SRC.includes('basePrompt = hookGuardLib.normalizeTimedLines(revised).text;'), 'and again on an accepted hook revision');
 });
 
 console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);

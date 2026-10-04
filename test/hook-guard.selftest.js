@@ -141,6 +141,21 @@ const MOVING = '[INFLUENCER] sits in a stadium stand. [INFLUENCER] wears this sa
   await t('F5: "alone … no other people in the room" gets no crowd sentence', () => assert.strictEqual(g.ensureCrowdMoves('Shot 1 [0-2s] [INFLUENCER] stands alone in an empty room, no other people in the room. Shot 2 [2-5s] she waves.').added, 0));
   await t('F5: a ceiling fan is not fans', () => assert.strictEqual(g.ensureCrowdMoves('Shot 1 [0-2s] [INFLUENCER] sits on the bed while a ceiling fan turns overhead. Shot 2 [2-5s] she looks at the lens.').added, 0));
   await t('F5: alone at first but a man passes later → the sentence is still added', () => assert.strictEqual(g.ensureCrowdMoves('[INFLUENCER] walks alone down the street. Shot 2 a man passes behind her.').added, 1));
+  // ⏱ v2.64.0 — every variant measured in the 12 test prompts of 2026-10-04, plus what must stay untouched.
+  const N = (x) => g.normalizeTimedLines(x).text;
+  await t('"0s–2s:" → "[0-2s]"', () => assert.strictEqual(N('0s–2s: he walks'), '[0-2s] he walks'));
+  await t('"0–3.5s]" (no opening bracket) → "[0-3.5s]"', () => assert.strictEqual(N('0–3.5s] he grips'), '[0-3.5s] he grips'));
+  await t('"0-3s:" → "[0-3s]"', () => assert.strictEqual(N('0-3s: seated'), '[0-3s] seated'));
+  await t('"[16s–20s]" → "[16-20s]"', () => assert.strictEqual(N('[16s–20s] cam'), '[16-20s] cam'));
+  await t('"Shot 2 [1.21–2.92s]" keeps its Shot label', () => assert.strictEqual(N('Shot 2 [1.21–2.92s] Hard cut'), 'Shot 2 [1.21-2.92s] Hard cut'));
+  await t('a bracketed line is unchanged', () => assert.strictEqual(g.normalizeTimedLines('[0-3s] walk').changed, 0));
+  await t('a sentence that starts with a number is NOT a timed line', () => { assert.strictEqual(N('3 women walk in'), '3 women walk in'); assert.strictEqual(N('5 seconds later he turns'), '5 seconds later he turns'); });
+  await t('a time range mid-line is left alone', () => assert.strictEqual(N('HOOK (0s–1.5s): Medium shot'), 'HOOK (0s–1.5s): Medium shot'));
+  await t('after normalising, the garment insertion sees an unbracketed close-up line', () => {
+    const p = '[INFLUENCER] wears a grey hoodie and jeans. [INFLUENCER] wears this same outfit.\n0s–2s: full body walk.\n2s–4s: close-up on face and upper chest, he nods.';
+    assert.strictEqual(g.ensureGarmentOnChest(p, 'grey hoodie').added, 0, 'unbracketed: blind (the G63 hoodie loss)');
+    assert.strictEqual(g.ensureGarmentOnChest(N(p), 'grey hoodie').added, 1, 'normalised: the hoodie is restated');
+  });
   await t('hookGuard travels in the response', () => assert.ok(/influencerInOpening,\n\s+hookGuard: hookGuard \|\| undefined,/.test(SRC)));
 
   console.log(`\n${fail ? 'x FAIL' : 'OK'} ${pass} passed, ${fail} failed`);

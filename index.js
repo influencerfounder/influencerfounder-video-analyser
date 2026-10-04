@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.63.0';
+const ANALYSER_VERSION = '2.64.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -454,7 +454,7 @@ function cloneJoinKey(b) {
     // …and so does a new-setting override (2026-10-01).
     String(b.sceneOverride || ''),
     // 🧪 frameMode changes what the writer SEES (2026-10-04 test).
-    b.frameMode === 'grid' ? 'grid' : '',
+    b.frameMode === 'frames' ? 'frames' : 'grid',
     b.shotLog === 'gemini' ? 'gemini' : '',
   ]);
 }
@@ -521,7 +521,9 @@ const cloneHandler = async (req, res) => {
     // second of every frame in it. Fits Kie's 20-image ceiling next to the 9 hook frames, and gives
     // the writer real timestamps — measured cause of the G63 take: 11 UNLABELLED frames, one per
     // 2.3 s, so every phase time after the hook was a guess that Wan then followed. Default unchanged.
-    const frameMode = req.body.frameMode === 'grid' ? 'grid' : '';
+    // ✅ DEFAULT since v2.64.0 (Mike, 2026-10-04: "yes do all", after grid beat plain frames on 3/3
+    // sources and fixed the G63 timing in a real take). 'frames' is the opt-out, kept for A/B tests.
+    const frameMode = req.body.frameMode === 'frames' ? '' : 'grid';
     // 🧪 SHOT LOG (owner test "B", 2026-10-04). Gemini watches the whole source file (8 fps, its own
     // clock, with sound) and returns a timed log of action + camera; the Claude writer gets it as
     // MEASURED data, like the cut times. Gemini never writes the prompt. Fail-open: no key, a big
@@ -986,7 +988,7 @@ const cloneHandler = async (req, res) => {
         const { spawnSync } = require('child_process');
         const GRIDS = Math.max(1, Math.min(11, 20 - hookImgCount));
         const per = Math.min(8, Math.ceil(frameFiles.length / GRIDS));
-        const parts = [{ type: 'text', text: `FULL CLIP — all ${frameFiles.length} analysis frames as contact sheets. Each sheet holds up to ${per} consecutive frames, read LEFT to RIGHT, then the next row. The exact second of every frame is listed right before its sheet — use these real times for every timestamp you write; never estimate a time from the frame order.` }];
+        const parts = [{ type: 'text', text: `FULL CLIP — all ${frameFiles.length} analysis frames as contact sheets. Each sheet holds up to ${per} consecutive frames, read LEFT to RIGHT, then the next row. The exact second of every frame is listed right before its sheet — use these real times for every timestamp you write; never estimate a time from the frame order. The sheets are SMALL: read timing, movement and camera from them, but read clothing, printed text and logos from the full-size HOOK WINDOW frames above${hookImgCount ? '' : ' (none were sent — say a print or logo only if a sheet shows it clearly)'}.` }];
         for (let g = 0, start = 0; start < frameFiles.length; g++, start += per) {
           const out = path.join(framesDir, `grid-${String(g).padStart(2, '0')}.jpg`);
           const n = Math.min(per, frameFiles.length - start);
@@ -1793,6 +1795,8 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     let hookGuard = null;
     if (promptStyle === 'hookfirst' && !isBgSwap) {
       hookGuard = { posed: false, revised: false, tempoRemoved: [] };
+      // ⏱ One timed-line format before ANY matcher reads the prompt (v2.64.0) — see normalizeTimedLines.
+      { const n = hookGuardLib.normalizeTimedLines(basePrompt); basePrompt = n.text; hookGuard.timedLinesFixed = n.changed; }
       if (influencerInOpening === true && hookContent.length && (hookGuardLib.isPosed(hookGuardLib.hookSegment(basePrompt)) || hookGuardLib.missesMeasured(hookGuardLib.hookSegment(basePrompt), hookMotion))) {
         hookGuard.missedMeasured = hookGuardLib.missesMeasured(hookGuardLib.hookSegment(basePrompt), hookMotion);
         hookGuard.posed = true;
@@ -1813,7 +1817,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
             const revised = (r.data?.content || []).filter(b => b && b.type === 'text').map(b => b.text).join('').trim();
             // A revision that ran out of room is a truncated prompt — keep the original.
             if (r.data?.stop_reason === 'max_tokens') hookGuard.rejected = 'truncated';
-            else if (hookGuardLib.acceptRevision(basePrompt, revised, undefined, hookMotion)) { basePrompt = revised; hookGuard.revised = true; }
+            else if (hookGuardLib.acceptRevision(basePrompt, revised, undefined, hookMotion)) { basePrompt = hookGuardLib.normalizeTimedLines(revised).text; hookGuard.revised = true; }
             else hookGuard.rejected = true;
           } catch (e) {
             hookGuard.error = String(e.response?.status || e.code || e.message || 'error').slice(0, 120);

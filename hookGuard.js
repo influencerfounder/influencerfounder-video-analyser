@@ -264,4 +264,24 @@ function scrubHookStillness(prompt) {
   return { text: out + p.slice(hook.length), removed };
 }
 
-module.exports = { scrubHookStillness, ensureCrowdMoves, motionNote, missesMeasured, ensureGarmentOnChest, HOOK_MIN_MOVES, hookSegment, hookMoves, isPosed, scrubPersonTempo, reviseHookInstruction, acceptRevision };
+// ⏱ ONE TIMED-LINE FORMAT (v2.64.0, 2026-10-04). The writer is asked for "[a-bs]" but drifts:
+// measured on 12 test prompts, 6 wrote "0s–2s:", "0-3s:" or "0–3.5s]". Every matcher here
+// (TIMED_LINE, hookSegment) only reads the bracket form, so on those prompts the top-garment
+// insertion saw 0 of 7 lines — and the real G63 take lost its hoodie from ~2 s. Rewritten in code,
+// at the start of a line only, and only when there is a dash, a second number, and a closing mark
+// ("s", "]" or ":") — a sentence that merely starts with a number is left alone.
+const LOOSE_TIMED = /^(\s*)(Shot\s+\d+\s*)?\[?\s*(\d+(?:\.\d+)?)\s*s?\s*[-–—]\s*(\d+(?:\.\d+)?)\s*(s\s*\]?\s*:?|\]\s*:?|:)\s*/i;
+function normalizeTimedLines(prompt) {
+  let changed = 0;
+  const out = String(prompt || '').split('\n').map(line => {
+    const m = LOOSE_TIMED.exec(line);
+    if (!m) return line;
+    const fixed = `${m[1]}${m[2] ? m[2].trim() + ' ' : ''}[${m[3]}-${m[4]}s] `;
+    const next = fixed + line.slice(m[0].length);
+    if (next !== line) changed++;
+    return next;
+  }).join('\n');
+  return { text: out, changed };
+}
+
+module.exports = { normalizeTimedLines, scrubHookStillness, ensureCrowdMoves, motionNote, missesMeasured, ensureGarmentOnChest, HOOK_MIN_MOVES, hookSegment, hookMoves, isPosed, scrubPersonTempo, reviseHookInstruction, acceptRevision };
