@@ -4582,6 +4582,15 @@ app.post('/api/text-hooks', async (req, res) => {
 // START
 // ─────────────────────────────────────────
 
+// 🧪 RECREATE v2 (2026-10-04) — a separate analysis route next to /api/clone. It shares ONLY the
+// download helpers and hookmotion.py with v1 (injected here, never copied); v1 is untouched.
+// PRD: docs/prds/RECREATE-V2-PRD.md in the InfluencerFounder docs folder.
+require('./v2/cloneV2').mount(app, {
+  downloadInstagramViaApify, downloadTikTok, detectBeats, tempVideos, cleanOldTempVideos, PYTHON,
+  ffmpegBin: SYSTEM_FFMPEG || process.env.FFMPEG_BIN || ffmpegStatic,
+  hookMotionScript: path.join(__dirname, 'hookmotion.py'),
+});
+
 app.listen(PORT, () => {
   console.log(`InfluencerFounder Video Analyser running on port ${PORT}`);
 });
