@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.61.2';
+const ANALYSER_VERSION = '2.62.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -453,6 +453,8 @@ function cloneJoinKey(b) {
     String(b.wardrobe || ''),
     // …and so does a new-setting override (2026-10-01).
     String(b.sceneOverride || ''),
+    // 🧪 frameMode changes what the writer SEES (2026-10-04 test).
+    b.frameMode === 'grid' ? 'grid' : '',
   ]);
 }
 function runRecorded(handler, req) {
@@ -513,6 +515,12 @@ const cloneHandler = async (req, res) => {
     // NOT to copy the source but to make a stronger version of it, optionally steered by improveBrief.
     // Realism is the default everywhere since 2026-09-09 (Mike) — a caller that sends nothing gets it.
     const promptStyle = ['original','realism','improve','hookfirst'].includes(req.body.promptStyle) ? req.body.promptStyle : 'realism';
+    // 🧪 FRAME MODE (owner test, 2026-10-04 — Mike: "is reading frames still the best option?").
+    // 'grid' = the same 80 analysis frames as 11 contact sheets of up to 8, each preceded by the exact
+    // second of every frame in it. Fits Kie's 20-image ceiling next to the 9 hook frames, and gives
+    // the writer real timestamps — measured cause of the G63 take: 11 UNLABELLED frames, one per
+    // 2.3 s, so every phase time after the hook was a guess that Wan then followed. Default unchanged.
+    const frameMode = req.body.frameMode === 'grid' ? 'grid' : '';
     const improveBrief = String(req.body.improveBrief || '').slice(0, 600).trim();
     // ✂️ Shot Cuts (opt-in, 2026-09-03) — see SHOT_CUTS_RULE below for why this exists.
     const shotCuts = req.body.shotCuts === true;
@@ -962,6 +970,34 @@ const cloneHandler = async (req, res) => {
       { type: 'text', text: 'FULL CLIP — evenly sampled frames covering the whole video:' },
     ] : [];
     const hookImgCount = hookContent.length ? hookFrames.length : 0;   // derive from hookContent so the bgswap gate can never desync the Kie frame budget
+
+    // 🧪 Grid frame mode — see frameMode above. Built from the files already on disk; any failure
+    // falls back to the normal frames (gridContent stays null), never to an empty view.
+    let gridContent = null;
+    if (frameMode === 'grid' && !isBgSwap && frameFiles.length) {
+      try {
+        const bin = SYSTEM_FFMPEG || process.env.FFMPEG_BIN || ffmpegStatic;
+        const { spawnSync } = require('child_process');
+        const GRIDS = Math.max(1, Math.min(11, 20 - hookImgCount));
+        const per = Math.min(8, Math.ceil(frameFiles.length / GRIDS));
+        const parts = [{ type: 'text', text: `FULL CLIP — all ${frameFiles.length} analysis frames as contact sheets. Each sheet holds up to ${per} consecutive frames, read LEFT to RIGHT, then the next row. The exact second of every frame is listed right before its sheet — use these real times for every timestamp you write; never estimate a time from the frame order.` }];
+        for (let g = 0, start = 0; start < frameFiles.length; g++, start += per) {
+          const out = path.join(framesDir, `grid-${String(g).padStart(2, '0')}.jpg`);
+          const n = Math.min(per, frameFiles.length - start);
+          const r = spawnSync(bin, ['-y', '-loglevel', 'error', '-start_number', String(start + 1), '-i', path.join(framesDir, 'frame-%03d.jpg'),
+            '-frames:v', '1', '-vf', `scale=270:-2,tile=4x${Math.ceil(per / 4)}:padding=6:color=white`, '-q:v', '3', out], { timeout: 30000 });
+          if (r.status !== 0 || !fs.existsSync(out)) throw new Error('grid ffmpeg failed: ' + String(r.stderr || '').slice(0, 200));
+          const times = Array.from({ length: n }, (_, k) => (Math.round(((start + k) / fps) * 100) / 100).toFixed(2) + 's');
+          parts.push({ type: 'text', text: `Sheet ${g + 1}: ${times.join(', ')}` });
+          parts.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: fs.readFileSync(out).toString('base64') } });
+        }
+        gridContent = parts;
+        console.log(`[clone] frameMode=grid: ${frameFiles.length} frames → ${parts.filter(x => x.type === 'image').length} sheets of ${per}`);
+      } catch (e) {
+        console.error('[clone] frameMode=grid failed, using normal frames: ' + e.message);
+        gridContent = null;
+      }
+    }
 
     const userText = transcript
       ? `These ${frameBase64s.length} frames were extracted from the viral video. Transcript: "${transcript}"\n\nCreate the ${isWan ? 'video' : 'Seedance'} prompt.`
@@ -1446,10 +1482,11 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       // sampled + 4 hook = 20, not 24. Budgeting them keeps the proven-safe total intact.
       const KIE_SAFE_FRAME_COUNT = 20;
       const n = Math.min(KIE_SAFE_FRAME_COUNT - hookImgCount, imageContent.length);
-      const subset = n === imageContent.length
+      const subset = gridContent ? gridContent
+        : n === imageContent.length
         ? imageContent
         : Array.from({ length: n }, (_, i) => imageContent[Math.round(i * (imageContent.length - 1) / (n - 1))]);
-      const note = n < imageContent.length ? ` (${n} representative frames shown, evenly sampled from the full clip.)` : '';
+      const note = (!gridContent && n < imageContent.length) ? ` (${n} representative frames shown, evenly sampled from the full clip.)` : '';
       // Budgeted, not flat — see kieClaudeTimeoutMs above. A timeout is turned into
       // a message that says what happened and what to do: nothing is wrong with the
       // video, the analysis is idempotent, click again. The raw axios text must never
@@ -1592,7 +1629,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       // it short, so the proxy's timeout spoke first and mislabelled it as a slow Instagram link.
       claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
         model: 'claude-sonnet-4-6', max_tokens: maxTok, system: sysSend,
-        messages: [{ role: 'user', content: [...hookContent, ...imageContent, { type: 'text', text: userFinal }] }]
+        messages: [{ role: 'user', content: [...hookContent, ...(gridContent || imageContent), { type: 'text', text: userFinal }] }]
       }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout: kieClaudeTimeoutMs(Date.now() - startedAt) });
     }
 
