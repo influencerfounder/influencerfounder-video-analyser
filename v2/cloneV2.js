@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-0.4.0';
+const V2_VERSION = 'v2-0.5.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -200,6 +200,21 @@ async function pickOutfit({ spec, ff, video, tmp, key, duration }) {
 function mount(app, deps) {
   const { downloadInstagramViaApify, downloadTikTok, detectBeats, tempVideos, cleanOldTempVideos, PYTHON, ffmpegBin, hookMotionScript } = deps;
   const PY = process.env.V2_PYTHON || PYTHON;
+
+  // Phase 3 (2026-10-06): compile again with the job's REFERENCE BINDINGS ("Image 1 is the opening
+  // frame…"), so the tool never writes prompt text of its own — one compiler, one set of rules.
+  // Pure and fast: no download, no model call.
+  app.post('/api/compile-v2', (req, res) => {
+    try {
+      const b = req.body || {};
+      if (!b.spec || !Array.isArray(b.spec.shots)) return res.status(400).json({ success: false, error: 'Missing spec' });
+      const refs = (Array.isArray(b.refs) ? b.refs : []).filter(r => r && typeof r.kind === 'string').slice(0, 30);
+      const out = compile(b.spec, { name: String(b.name || '').slice(0, 40), gender: ['male', 'female'].includes(b.gender) ? b.gender : null,
+        model: b.model === 'seedance' ? 'seedance' : 'wan', cuts: Array.isArray(b.cuts) ? b.cuts.map(Number).filter(Number.isFinite) : [],
+        camera: Array.isArray(b.camera) ? b.camera : null, durationSec: Number(b.durationSec) || 0, refs });
+      res.json({ success: true, version: V2_VERSION, ...out });
+    } catch (e) { res.status(500).json({ success: false, error: String(e.message || e).slice(0, 200) }); }
+  });
 
   app.post('/api/clone-v2', async (req, res) => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'clonev2-'));

@@ -184,7 +184,9 @@ function compile(spec, opts = {}) {
     if (r.kind === 'face') return `${t} shows ${name}'s face`;
     if (r.kind === 'outfit_front') return `${t} shows the outfit from the front`;
     if (r.kind === 'outfit_back') return `${t} shows the outfit from the back`;
-    if (r.kind === 'first_frame') return `${t} is the opening frame`;
+    if (r.kind === 'first_frame') return `${t} is the opening frame — the video starts exactly as this image`;
+    if (r.kind === 'dressed_front') return `${t} shows ${name} wearing the outfit, from the front`;
+    if (r.kind === 'dressed_back') return `${t} shows ${name} wearing the outfit, from the back`;
     if (r.kind === 'location') return `${t} shows the location`;
     return r.note ? `${t} shows ${clean(r.note)}` : '';
   }).filter(Boolean);

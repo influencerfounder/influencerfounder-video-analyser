@@ -164,6 +164,12 @@ t('phaseLength never merges across a measured cut', () => {
   assert.deepStrictEqual(r.segments.map(s => s.start), [0, ...CUTS]);
 });
 
+t('phase 3 bindings: opening frame, face, dressed front/back are named in order (Wan "Image N")', () => {
+  const refs = [{ kind: 'first_frame' }, { kind: 'face' }, { kind: 'dressed_front' }, { kind: 'dressed_back' }];
+  const r = compile(LOBBY, { ...base, model: 'wan', refs });
+  assert.ok(/Image 1 is the opening frame — the video starts exactly as this image; Image 2 shows Kryfex's face; Image 3 shows Kryfex wearing the outfit, from the front; Image 4 shows Kryfex wearing the outfit, from the back\./.test(r.prompt), r.prompt.slice(0, 900));
+});
+
 // ── writer contract ──
 t('writer system carries every WRITER_RULE and the persona pronouns', () => {
   const s = writerSystem({ personaGender: 'male' });
