@@ -170,6 +170,7 @@ t('writer system carries every WRITER_RULE and the persona pronouns', () => {
   assert.ok(/he\/him/.test(s) && /VIEWER'S SCREEN/.test(s) && /ONE garment/.test(s) && /Never describe MAIN's face/.test(s) && /cannot be determined/.test(s));
   assert.ok(/they\/them/.test(writerSystem({ personaGender: null })), 'unknown gender → they/them, never a default');
   assert.ok(Object.keys(WRITER_RULES).length >= 7);
+  assert.ok(/"bare_skin":\[\]/.test(writerSystem({})) && /a tank top = \["arms","shoulders"\]/.test(writerSystem({})), 'bare_skin is asked for, with the tank-top example');
 });
 t('parseSpec survives code fences; validateSpec catches a missing shot list', () => {
   assert.deepStrictEqual(parseSpec('```json\n{"a":1}\n```'), { a: 1 });
