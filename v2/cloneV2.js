@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-0.2.0';
+const V2_VERSION = 'v2-0.3.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -96,9 +96,9 @@ async function sheets(ff, video, duration, dir) {
   }));
 }
 
-async function callWriter({ system, content, key }) {
+async function callWriter({ system, content, key, maxTokens = 8000 }) {
   const body = (model) => ({
-    model, max_tokens: 8000, system,
+    model, max_tokens: maxTokens, system,
     ...(/^claude-(sonnet-5|opus-5)/.test(model) ? { thinking: { type: 'disabled' } } : { temperature: 0.2 }),
     messages: [{ role: 'user', content }],
   });
@@ -113,6 +113,88 @@ async function callWriter({ system, content, key }) {
   if (r.status !== 200) throw new Error(`writer ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}`);
   const text = (r.data.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
   return { text, model, usage: r.data.usage || null, stop: r.data.stop_reason };
+}
+
+// ── Phase 2: the OUTFIT, cut from the SOURCE itself (2026-10-06, Mike: "build it like this") ──
+// Every recreate has a different outfit, so it is built per video from the video: the clearest real
+// frame of MAIN facing the camera and the clearest from behind, cut from just below the chin down.
+// Real pixels at the source's own resolution, PNG (lossless) — no generation, no downscale (the
+// reference rule). The face is left out so the source person's identity is not handed to the model.
+const OUTFIT_PICK_SYSTEM = `You pick reference crops of ONE person's outfit from video frames. Each candidate frame has thin grid lines every 10% of its width and height. MAIN is the main person of the video (described below). Choose the best FRONT candidate (MAIN facing the camera, torso visible) and the best BACK candidate (MAIN turned away, the back of the top visible): FIRST priority: every print, logo and piece of text on the top is clearly legible (a close-up that shows the chest logo sharply beats a wide shot where it is a smudge). Then: MAIN as complete as possible (neck to feet, at least to the hips), least covered, sharpest. Give a box for MAIN only, in percent of the frame: x0,y0 = left/top, x1,y1 = right/bottom. The TOP edge (y0) sits just below the chin — never include the face, mouth or hair — but the collar/neckline and anything printed near it MUST be inside the box. Include the whole outfit down to the shoes if they are visible, both arms, and nothing of other people if avoidable. Use null when no candidate shows that side. Return ONLY JSON: {"front":{"index":0,"box":[x0,y0,x1,y1]}|null,"back":{"index":0,"box":[x0,y0,x1,y1]}|null}`;
+
+function specShotAt(spec, t) {
+  const shots = (spec && Array.isArray(spec.shots) ? spec.shots : []).slice().sort((a, b) => (+a.start || 0) - (+b.start || 0));
+  let cur = null;
+  for (const s of shots) if ((+s.start || 0) <= t + 0.001) cur = s;
+  return cur;
+}
+
+// Box (percent) → integer pixel crop inside the frame; 2 % side/bottom padding, none above (the chin).
+function cropRect(box, W, H) {
+  if (!Array.isArray(box) || box.length !== 4) return null;
+  let [x0, y0, x1, y1] = box.map(Number);
+  if (![x0, y0, x1, y1].every(Number.isFinite)) return null;
+  if (x1 <= 1 && y1 <= 1) { x0 *= 100; y0 *= 100; x1 *= 100; y1 *= 100; } // tolerate 0-1 fractions
+  x0 = Math.max(0, x0 - 2); x1 = Math.min(100, x1 + 2); y1 = Math.min(100, y1 + 2); y0 = Math.max(0, y0);
+  const px = (v, D) => Math.round((v / 100) * D);
+  const x = px(x0, W), y = px(y0, H), w = px(x1, W) - x, h = px(y1, H) - y;
+  if (w < W * 0.08 || h < H * 0.08) return null;   // a sliver is a failed pick, not a crop
+  return { x, y, w: w - (w % 2), h: h - (h % 2) };
+}
+
+async function fullFramePng(ff, video, t, out) {
+  await run(ff, ['-v', 'error', '-ss', String(Math.max(0, t)), '-i', video, '-frames:v', '1', '-y', out], { timeout: 30000 });
+  if (!fs.existsSync(out)) return null;
+  const pr = await run(ff, ['-hide_banner', '-i', out], { timeout: 10000 });
+  const m = /, (\d{2,5})x(\d{2,5})/.exec(pr.stderr);
+  return m ? { path: out, W: +m[1], H: +m[2] } : null;
+}
+
+// Candidate times come from the SPEC's phases, not from the cut-based key frames: a one-take video
+// has one measured shot and two key frames, and on G63 both fell where MAIN is side-on or gone
+// (run 1: "no shot shows MAIN front or back" although 0-4 s is front and 9-12 s is back).
+function outfitCandidateTimes(spec, duration) {
+  const shots = (spec && Array.isArray(spec.shots) ? spec.shots : []).slice().sort((a, b) => (+a.start || 0) - (+b.start || 0));
+  const out = [];
+  shots.forEach((s, i) => {
+    if (s.main_visible === false) return;
+    const side = String(s.garment_side || '').toLowerCase();
+    if (side !== 'front' && side !== 'back') return;
+    const a = +s.start || 0, b = i + 1 < shots.length ? (+shots[i + 1].start || a) : duration;
+    if (!(b > a)) return;
+    for (const f of (b - a >= 1.2 ? [0.3, 0.7] : [0.5])) out.push({ t: Math.round((a + (b - a) * f) * 100) / 100, side });
+  });
+  return out;
+}
+
+async function pickOutfit({ spec, ff, video, tmp, key, duration }) {
+  const cand = [];
+  for (const k of outfitCandidateTimes(spec, duration)) {
+    if (cand.filter(c => c.side === k.side).length >= 6) continue;   // 4 cut lobby's sharp shot-6 chest logo off the list
+    const g = path.join(tmp, `grid-${cand.length}.jpg`);
+    await run(ff, ['-v', 'error', '-ss', String(k.t), '-i', video, '-frames:v', '1', '-vf', 'scale=640:-2,drawgrid=w=iw/10:h=ih/10:t=1:c=white@0.45', '-q:v', '4', '-y', g], { timeout: 20000 });
+    if (fs.existsSync(g)) cand.push({ t: k.t, side: k.side, buf: fs.readFileSync(g) });
+  }
+  if (!cand.length) return { front: null, back: null, reason: 'no shot shows MAIN front or back' };
+  const o = spec.outfit || {};
+  const content = [{ type: 'text', text: `MAIN wears: ${o.top_name || ''} (front: ${o.top_front || 'not shown'}; back: ${o.top_back || 'not shown'}), ${o.bottom || ''}, ${o.shoes || ''}.` }];
+  cand.forEach((c, i) => { content.push({ type: 'text', text: `Candidate ${i} — ${c.side.toUpperCase()} view at ${c.t} s:` }); content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: c.buf.toString('base64') } }); });
+  const w = await callWriter({ system: OUTFIT_PICK_SYSTEM, content, key, maxTokens: 600 });
+  const pick = parseSpec(w.text) || {};
+  const out = { front: null, back: null, writer: w.model };
+  for (const side of ['front', 'back']) {
+    const p = pick[side];
+    const c = p && Number.isInteger(p.index) ? cand[p.index] : null;
+    if (!c || c.side !== side) continue;
+    const full = await fullFramePng(ff, video, c.t, path.join(tmp, `full-${side}.png`));
+    if (!full) continue;
+    const r = cropRect(p.box, full.W, full.H);
+    if (!r) continue;
+    const crop = path.join(tmp, `outfit-${side}.png`);
+    await run(ff, ['-v', 'error', '-i', full.path, '-vf', `crop=${r.w}:${r.h}:${r.x}:${r.y}`, '-y', crop], { timeout: 20000 });
+    if (fs.existsSync(crop)) out[side] = { t: c.t, box: p.box, px: r, sourceSize: [full.W, full.H], png: fs.readFileSync(crop).toString('base64') };
+  }
+  return out;
 }
 
 function mount(app, deps) {
@@ -206,6 +288,17 @@ function mount(app, deps) {
       }
       if (errs.length) return res.status(502).json({ success: false, error: 'The analysis could not be structured — try again.', detail: errs, raw: String(w.text).slice(0, 2000) });
 
+      // 4b. OUTFIT crops (phase 2) + the full-resolution opening frame for the first-frame step.
+      // Fail open: a missing crop is shown as missing in the Lab, never invented.
+      let outfit = { front: null, back: null };
+      try { outfit = await pickOutfit({ spec, ff: ffmpegBin, video, tmp, key, duration }); } catch (e) { outfit = { front: null, back: null, reason: String(e.message || e).slice(0, 160) }; }
+      mark('outfit');
+      let frame0 = null;
+      try {
+        const f0 = await fullFramePng(ffmpegBin, video, hookTs[0] || 0.05, path.join(tmp, 'frame0.png'));
+        if (f0) frame0 = { t: hookTs[0] || 0.05, size: [f0.W, f0.H], png: fs.readFileSync(f0.path).toString('base64') };
+      } catch (_) {}
+
       // 5. COMPILE for both models (no reference bindings yet — the tool adds them per job).
       const copts = { name, gender: personaGender, cuts, camera: camera && camera.segments, durationSec: duration };
       const wan = compile(spec, { ...copts, model: 'wan' });
@@ -230,6 +323,7 @@ function mount(app, deps) {
         measured: { cuts, falseCuts, camera: (camera && camera.segments) || null, hookMotion, beats },
         spec, prompts: { wan, seedance },
         keyframes: shotKeys.map(k => ({ t: k.t, shot: k.shot, dataUrl: thumb(k.b) })),
+        outfit, frame0,
         hookFrames: hook.slice(0, 1).map(h => ({ t: h.t, dataUrl: thumb(h.b) })),
         sourceVideoUrl, writer: { model: w.model, usage: w.usage, stop: w.stop }, timing,
       });
@@ -242,4 +336,4 @@ function mount(app, deps) {
   });
 }
 
-module.exports = { mount, V2_VERSION, measureCuts, FLASH_MAD };
+module.exports = { mount, V2_VERSION, measureCuts, FLASH_MAD, cropRect, specShotAt, outfitCandidateTimes };
