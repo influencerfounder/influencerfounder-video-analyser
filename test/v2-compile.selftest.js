@@ -184,5 +184,12 @@ t('parseSpec survives code fences; validateSpec catches a missing shot list', ()
   assert.deepStrictEqual(validateSpec(LOBBY), []);
 });
 
+t('a camera direction with brackets in it never throws (it used to fail the whole paid run with a 500)', () => {
+  const { cameraSentence } = require('../v2/compile');
+  for (const d of ['left)', '(screen left', '[up', 'right*'])
+    assert.doesNotThrow(() => cameraSentence({ move: 'pans', direction: d }, null, [], 1), d);
+  assert.strictEqual(cameraSentence({ move: 'pans', direction: 'left' }, null, [], 1), 'the camera pans left');
+});
+
 console.log(`\nv2-compile: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

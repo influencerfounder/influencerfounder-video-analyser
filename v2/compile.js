@@ -86,7 +86,9 @@ function cameraSentence(cam, measured, log, shotNo) {
   // writer's reasoning on lobby run 1 ("pans left background columns drift right as …").
   move = move.split(/\s+/).slice(0, 3).join(' ');
   let s = `the camera ${move}`;
-  if (dir && !new RegExp(`\\b${dir}\\b`).test(s) && /^(left|right|up|down)$/.test(dir)) s += ` ${dir}`;
+  // Whitelist FIRST (/toolscan 2026-10-09): the RegExp was built from the writer's free text before the
+  // whitelist ran, so a direction like "left)" threw and failed the whole paid run with a 500.
+  if (dir && /^(left|right|up|down)$/.test(dir) && !new RegExp(`\\b${dir}\\b`).test(s)) s += ` ${dir}`;
   return clean(s);
 }
 
