@@ -26,6 +26,14 @@ const t = async (n, fn) => { try { await fn(); pass++; console.log('  ok  ' + n)
     const a = await run(async () => null), b = await run(async () => { throw new Error('no cv2'); }), c = await run();
     for (const r of [a, b, c]) { assert.strictEqual(r.cuts.length, 1, JSON.stringify(r)); assert.strictEqual(r.motionCuts.length, 0); }
   });
+  await t('fast-action windows: the window-cleaning fall becomes ONE padded window with ~0.1 s frames', () => {
+    const { fastWindows } = require('../v2/cloneV2');
+    const w = fastWindows([{ t: 2.37 }, { t: 2.87 }, { t: 3.37 }, { t: 14.37 }, { t: 14.87 }], 15.16);
+    assert.strictEqual(w.length, 2, JSON.stringify(w));
+    assert.deepStrictEqual([w[0].from, w[0].to], [1.87, 3.77]); assert.ok(w[0].times.length === 10 && w[0].times[0] === 1.87 && w[0].times[9] === 3.77);
+    assert.ok(w[1].to <= 15.11, 'never past the end');
+    assert.deepStrictEqual(fastWindows([], 10), []);
+  });
   try { fs.unlinkSync(v); } catch (_) {}
   console.log(`\nv2-cutflow: ${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);
 })();

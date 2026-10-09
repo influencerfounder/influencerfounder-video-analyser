@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.70.0';
+const ANALYSER_VERSION = '2.71.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;

@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-0.6.0';
+const V2_VERSION = 'v2-0.7.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -83,6 +83,20 @@ async function measureBeats(ff, video, detectBeats, cuts) {
   const near = cuts.map(c => Math.min(...beats.map(b => Math.abs(b - c))));
   const onBeat = near.filter(d => d <= 0.08).length;
   return { audio: true, bpm: res.bpm, beats: beats.slice(0, 120), cutsOnBeat: onBeat, cutsTotal: cuts.length, editedToBeat: cuts.length >= 2 && onBeat / cuts.length >= 0.6 };
+}
+
+// ⚡ FAST-ACTION WINDOWS (2026-10-09). The rejected "cuts" (motionCuts) mark exactly where something
+// fast happens inside one take — the window-cleaning fall, a whip pan. The writer read that fall from
+// 240-px contact-sheet cells (the figure a few dozen pixels tall) and called a slipping stool "steps
+// down and leans over". Each window (candidates within 1 s merged, padded 0.5 s before / 0.4 s after)
+// gets up to 10 larger frames ~0.1 s apart, like the dense hook frames. At most two windows.
+function fastWindows(motionCuts, duration) {
+  const ts = (motionCuts || []).map(c => c.t).sort((a, b) => a - b), wins = [];
+  for (const t of ts) { const w = wins[wins.length - 1]; if (w && t - w.last <= 1) w.last = t; else wins.push({ first: t, last: t }); }
+  return wins.slice(0, 2).map(w => {
+    const a = Math.max(0, w.first - 0.5), b = Math.min(duration - 0.05, w.last + 0.4), n = Math.min(10, Math.max(2, Math.round((b - a) / 0.1) + 1));
+    return { from: Math.round(a * 100) / 100, to: Math.round(b * 100) / 100, times: Array.from({ length: n }, (_, i) => Math.round((a + (b - a) * i / (n - 1)) * 100) / 100) };
+  });
 }
 
 async function frameAt(ff, video, t, width, out) {
@@ -277,6 +291,8 @@ function mount(app, deps) {
       const sh = await sheets(ffmpegBin, video, duration, tmp);
       const hookTs = []; for (let t = 0; t <= Math.max(0.05, hookSecs - 0.05) && hookTs.length < 10; t += 0.15) hookTs.push(Math.round(t * 100) / 100);
       const hook = []; for (const t of hookTs) { const b = await frameAt(ffmpegBin, video, t, 640, path.join(tmp, `hook-${t}.jpg`)); if (b) hook.push({ t, b }); }
+      const fast = [];
+      for (const w of fastWindows(motionCuts, duration)) { const fr = []; for (const t of w.times) { const b = await frameAt(ffmpegBin, video, t, 480, path.join(tmp, `fast-${t}.jpg`)); if (b) fr.push({ t, b }); } if (fr.length) fast.push({ ...w, fr }); }
       const bounds = [0, ...cuts, duration];
       const shotKeys = [];
       // TWO frames per shot (at 25 % and 75 %): one middle frame of a 0.6 s shot was dark on lobby
@@ -307,6 +323,7 @@ function mount(app, deps) {
       sh.forEach((s, k) => { content.push({ type: 'text', text: `CONTACT SHEET ${k + 1} (left→right, top→bottom) at ${s.times.join(', ')} s:` }); content.push(b64(s.buf)); });
       content.push({ type: 'text', text: `DENSE HOOK FRAMES (full size), at ${hook.map(h => h.t).join(', ')} s — compare each with the next to catch every small movement:` });
       hook.forEach(h => content.push(b64(h.b)));
+      fast.forEach(w => { content.push({ type: 'text', text: `FAST ACTION ${w.from}-${w.to} s, one continuous take (no cut), frames at ${w.fr.map(f => f.t).join(', ')} s — compare each with the next and describe exactly what physically happens (what slips, falls, gets caught, which way the camera follows), never a guessed intention:` }); w.fr.forEach(f => content.push(b64(f.b))); });
       shotKeys.forEach(k => { content.push({ type: 'text', text: `SHOT ${k.shot} — full-size frame at ${k.t} s (read clothing, which side of the top faces the camera, framing):` }); content.push(b64(k.b)); });
       content.push({ type: 'text', text: 'Fill the JSON spec now. Return only JSON.' });
 
@@ -370,4 +387,4 @@ function mount(app, deps) {
   });
 }
 
-module.exports = { mount, V2_VERSION, measureCuts, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
+module.exports = { mount, V2_VERSION, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
