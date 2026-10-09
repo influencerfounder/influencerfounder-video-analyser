@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-0.5.0';
+const V2_VERSION = 'v2-0.5.1';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -139,8 +139,19 @@ function cropRect(box, W, H) {
   const px = (v, D) => Math.round((v / 100) * D);
   const x = px(x0, W), y = px(y0, H), w = px(x1, W) - x, h = px(y1, H) - y;
   if (w < W * 0.08 || h < H * 0.08) return null;   // a sliver is a failed pick, not a crop
-  return { x, y, w: w - (w % 2), h: h - (h % 2) };
+  // Wan 3.0 refuses any reference image under 240 px on a side ("reference_image_urls resolution is
+  // out of range", 2026-10-09: a slim figure in a 716 px frame gave a 156x536 front crop). Widen a
+  // short side with MORE REAL PIXELS around the box, centred and kept inside the frame — never a
+  // resize, so the crop stays the source's own bytes (the reference rule).
+  const grow = (o, len, D) => {
+    if (len >= REF_MIN_SIDE || D < REF_MIN_SIDE) return [o, len];
+    const n = REF_MIN_SIDE;
+    return [Math.min(Math.max(0, Math.round(o - (n - len) / 2)), D - n), n];
+  };
+  const [gx, gw] = grow(x, w, W), [gy, gh] = grow(y, h, H);
+  return { x: gx, y: gy, w: gw - (gw % 2), h: gh - (gh % 2) };
 }
+const REF_MIN_SIDE = 240;
 
 async function fullFramePng(ff, video, t, out) {
   await run(ff, ['-v', 'error', '-ss', String(Math.max(0, t)), '-i', video, '-frames:v', '1', '-y', out], { timeout: 30000 });

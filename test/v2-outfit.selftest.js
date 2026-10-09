@@ -11,6 +11,15 @@ t('0-1 fractions are read as percent', () => assert.deepStrictEqual(cropRect([0.
 t('the box is clamped to the frame', () => { const r = cropRect([-5, 10, 120, 110], 720, 1280); assert.ok(r.x === 0 && r.x + r.w <= 720 && r.y + r.h <= 1280); });
 t('a sliver or a broken box is refused (no crop beats a wrong crop)', () => { assert.strictEqual(cropRect([10, 10, 12, 90], 720, 1280), null); assert.strictEqual(cropRect([10, 'x', 50, 90], 720, 1280), null); assert.strictEqual(cropRect(null, 720, 1280), null); });
 t('even width/height (video filters and encoders want even sizes)', () => { const r = cropRect([13, 17, 61, 93], 721, 1279); assert.ok(r.w % 2 === 0 && r.h % 2 === 0); });
+t('a crop narrower than 240 px is widened with real pixels to 240 (Wan minimum), centred, inside the frame', () => {
+  const r = cropRect([42, 20, 62, 62], 716, 1274);          // the 2026-10-09 failure: 156 px wide
+  assert.ok(r.w >= 240 && r.h >= 240, JSON.stringify(r));
+  assert.ok(r.x >= 0 && r.x + r.w <= 716, JSON.stringify(r));
+  const old = { x: Math.round(0.40 * 716), w: Math.round(0.64 * 716) - Math.round(0.40 * 716) };
+  assert.ok(r.x <= old.x && r.x + r.w >= old.x + old.w, 'still contains the picked box');
+  const edge = cropRect([90, 20, 100, 62], 716, 1274);     // at the right edge: grows inward
+  assert.ok(edge.w >= 240 && edge.x + edge.w <= 716, JSON.stringify(edge));
+});
 t('specShotAt picks the phase that covers a time', () => {
   const spec = { shots: [{ start: 0, garment_side: 'back' }, { start: 1.21, garment_side: 'front' }, { start: 5.08, main_visible: false }] };
   assert.strictEqual(specShotAt(spec, 0.5).garment_side, 'back');
