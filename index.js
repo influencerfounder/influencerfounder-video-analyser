@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.71.0';
+const ANALYSER_VERSION = '2.71.1';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -1001,7 +1001,10 @@ const cloneHandler = async (req, res) => {
           const out = path.join(framesDir, `grid-${String(g).padStart(2, '0')}.jpg`);
           const n = Math.min(per, frameFiles.length - start);
           const r = spawnSync(bin, ['-y', '-loglevel', 'error', '-start_number', String(start + 1), '-i', path.join(framesDir, 'frame-%03d.jpg'),
-            '-frames:v', '1', '-vf', `scale=270:-2,tile=4x${Math.ceil(per / 4)}:padding=6:color=white`, '-q:v', '3', out], { timeout: 30000 });
+            '-frames:v', '1', '-vf', `scale=270:-2,tile=4x${Math.ceil(n / 4)}:nb_frames=${n}:padding=6:color=white`, '-q:v', '3', out], { timeout: 30000 });
+          // ⚠️ nb_frames=n (/toolscan 2026-10-09): `tile` fills EVERY cell of its grid, so a 4x2 tile took 8 frames
+          // while only n were labelled — with per=5 each sheet showed 3 unlabelled frames that the next sheet
+          // repeated (measured with numbered test frames). The sheet must hold exactly the frames it names.
           if (r.status !== 0 || !fs.existsSync(out)) throw new Error('grid ffmpeg failed: ' + String(r.stderr || '').slice(0, 200));
           const times = Array.from({ length: n }, (_, k) => (Math.round(((start + k) / fps) * 100) / 100).toFixed(2) + 's');
           parts.push({ type: 'text', text: `Sheet ${g + 1}: ${times.join(', ')}` });
