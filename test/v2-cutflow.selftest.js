@@ -22,6 +22,13 @@ const t = async (n, fn) => { try { await fn(); pass++; console.log('  ok  ' + n)
     const r = await run(async (ts) => ({ ratios: Object.fromEntries(ts.map(x => [String(x), 0.3])) }));
     assert.strictEqual(r.cuts.length, 0, JSON.stringify(r)); assert.strictEqual(r.motionCuts.length, 1); assert.strictEqual(r.motionCuts[0].flow, 0.3);
   });
+  await t('a whole-second candidate still gets its verdict when Python keys it "2.0" (str(float))', async () => {
+    const py = (x) => (Number.isInteger(x) ? x.toFixed(1) : String(x));   // what cutflow.py's str(float(t)) prints
+    let asked = null;
+    const r = await run(async (ts) => { asked = ts; return { ratios: Object.fromEntries(ts.map(x => [py(x), 0.3])) }; });
+    assert.ok(asked && asked.some(Number.isInteger), 'fixture must produce a whole-second candidate: ' + JSON.stringify(asked));
+    assert.strictEqual(r.cuts.length, 0, JSON.stringify(r)); assert.strictEqual(r.motionCuts.length, 1);
+  });
   await t('no python / a failed check fails OPEN: judged as before', async () => {
     const a = await run(async () => null), b = await run(async () => { throw new Error('no cv2'); }), c = await run();
     for (const r of [a, b, c]) { assert.strictEqual(r.cuts.length, 1, JSON.stringify(r)); assert.strictEqual(r.motionCuts.length, 0); }

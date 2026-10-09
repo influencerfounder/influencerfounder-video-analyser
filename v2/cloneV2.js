@@ -58,7 +58,11 @@ async function measureCuts(ff, video, duration, flowCheck) {
   const flow = typeof flowCheck === 'function' && cand.length ? await flowCheck(cand).catch(() => null) : null;
   const ratios = (flow && flow.ratios) || {};
   for (const t of cand) {
-    const fr = ratios[String(t)];
+    // Matched by VALUE, not by string (/toolscan 2026-10-09): JS sends String(2) = "2" but cutflow.py keys
+    // its reply str(float("2")) = "2.0", so every whole-second candidate missed its verdict and motion
+    // there was judged a cut again.
+    const fk = Object.keys(ratios).find(k => Math.abs(Number(k) - t) < 0.005);
+    const fr = fk === undefined ? undefined : ratios[fk];
     if (typeof fr === 'number' && fr < CUT_FLOW_RATIO) { motionCuts.push({ t, flow: fr }); continue; }
     const a = await grey32(ff, video, t - 0.2), b = await grey32(ff, video, t + 0.3);
     if (a && b) {
