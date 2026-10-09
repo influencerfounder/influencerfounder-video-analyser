@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-0.5.1';
+const V2_VERSION = 'v2-0.6.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -44,14 +44,22 @@ async function grey32(ff, video, t) {
   return r.stdout && r.stdout.length === 1024 ? r.stdout : null;
 }
 const FLASH_MAD = 14;
+// 🎞 MOTION IS NOT A CUT (2026-10-09) — see cutflow.py. Below this share of unexplained difference the
+// "cut" is a camera move or fast action (window-cleaning fall: five fake cuts in a ZERO-cut source).
+const CUT_FLOW_RATIO = 0.665;
 
-async function measureCuts(ff, video, duration) {
+async function measureCuts(ff, video, duration, flowCheck) {
   const r = await run(ff, ['-hide_banner', '-i', video, '-an', '-vf', "select='gt(scene,0.2)',showinfo", '-f', 'null', '-'], { timeout: 90000 });
   const raw = [...String(r.stderr).matchAll(/pts_time:([0-9.]+)/g)].map(m => Number(m[1])).filter(t => t > 0.15 && t < duration - 0.15);
   const cand = [];
   for (const t of raw) if (!cand.length || t - cand[cand.length - 1] >= 0.3) cand.push(Math.round(t * 100) / 100);
-  const cuts = [], falseCuts = [];
+  const cuts = [], falseCuts = [], motionCuts = [];
+  // One python call for every candidate; null (no python / cv2 / timeout) = judged as before (fails open).
+  const flow = typeof flowCheck === 'function' && cand.length ? await flowCheck(cand).catch(() => null) : null;
+  const ratios = (flow && flow.ratios) || {};
   for (const t of cand) {
+    const fr = ratios[String(t)];
+    if (typeof fr === 'number' && fr < CUT_FLOW_RATIO) { motionCuts.push({ t, flow: fr }); continue; }
     const a = await grey32(ff, video, t - 0.2), b = await grey32(ff, video, t + 0.3);
     if (a && b) {
       let s = 0; for (let i = 0; i < 1024; i++) s += Math.abs(a[i] - b[i]);
@@ -60,7 +68,7 @@ async function measureCuts(ff, video, duration) {
     }
     cuts.push(t);
   }
-  return { cuts, falseCuts };
+  return { cuts, falseCuts, motionCuts };
 }
 
 async function measureBeats(ff, video, detectBeats, cuts) {
@@ -259,7 +267,7 @@ function mount(app, deps) {
       const duration = dm ? (+dm[1]) * 3600 + (+dm[2]) * 60 + parseFloat(dm[3]) : 15;
 
       // 2. MEASURE.
-      const { cuts, falseCuts } = await measureCuts(ffmpegBin, video, duration); mark('cuts');
+      const { cuts, falseCuts, motionCuts } = await measureCuts(ffmpegBin, video, duration, (ts) => py(PY, path.join(__dirname, 'cutflow.py'), [video, ts.join(',')], 60000)); mark('cuts');
       const camera = await py(PY, path.join(__dirname, 'cameramotion.py'), [video, cuts.join(',')], 120000); mark('camera');
       const hookSecs = Math.min(1.5, cuts.length ? cuts[0] : 1.5);
       const hookMotion = await py(PY, hookMotionScript, [video, String(hookSecs)], 45000); mark('hookmotion');
@@ -288,7 +296,7 @@ function mount(app, deps) {
         : 'not measured';
       const facts = [
         `DURATION: ${Math.round(duration * 100) / 100} s.`,
-        `MEASURED CUTS (shots must start exactly here): ${cuts.length ? cuts.join(', ') + ' s' : 'none — one continuous take'}.${falseCuts.length ? ` (Rejected as flashes, NOT cuts: ${falseCuts.map(f => f.t).join(', ')} s.)` : ''}`,
+        `MEASURED CUTS (shots must start exactly here): ${cuts.length ? cuts.join(', ') + ' s' : 'none — one continuous take'}.${motionCuts.length ? ` (Rejected as camera moves or fast action inside ONE continuous take, NOT cuts: ${motionCuts.map(c => c.t).join(', ')} s — write those moments as continuous motion, never as Hard cut.)` : ''}${falseCuts.length ? ` (Rejected as flashes, NOT cuts: ${falseCuts.map(f => f.t).join(', ')} s.)` : ''}`,
         `MEASURED CAMERA (optical flow on the background, screen directions): ${camLine}.`,
         hookMotion && hookMotion.head >= 0 ? `MEASURED HOOK MOTION in the first ${hookMotion.seconds} s (camera removed, px per 0.1 s): head ${hookMotion.head}, middle ${hookMotion.middle}, bottom ${hookMotion.bottom}. A band moving much more than the head is a movement you must list.` : '',
         beats && beats.audio && beats.bpm ? `MUSIC: ~${beats.bpm} BPM; ${beats.cutsOnBeat}/${beats.cutsTotal} cuts land on a beat${beats.editedToBeat ? ' (edited to the beat)' : ''}.` : '',
@@ -346,7 +354,7 @@ function mount(app, deps) {
       const thumb = (buf) => 'data:image/jpeg;base64,' + buf.toString('base64');
       res.json({
         success: true, version: V2_VERSION, durationSec: Math.round(duration * 100) / 100,
-        measured: { cuts, falseCuts, camera: (camera && camera.segments) || null, hookMotion, beats },
+        measured: { cuts, falseCuts, motionCuts, camera: (camera && camera.segments) || null, hookMotion, beats },
         spec, prompts: { wan, seedance },
         keyframes: shotKeys.map(k => ({ t: k.t, shot: k.shot, dataUrl: thumb(k.b) })),
         outfit, frame0,
@@ -362,4 +370,4 @@ function mount(app, deps) {
   });
 }
 
-module.exports = { mount, V2_VERSION, measureCuts, FLASH_MAD, cropRect, specShotAt, outfitCandidateTimes };
+module.exports = { mount, V2_VERSION, measureCuts, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
