@@ -270,7 +270,7 @@ function scrubHookStillness(prompt) {
 // insertion saw 0 of 7 lines — and the real G63 take lost its hoodie from ~2 s. Rewritten in code,
 // at the start of a line only, and only when there is a dash, a second number, and a closing mark
 // ("s", "]" or ":") — a sentence that merely starts with a number is left alone.
-const LOOSE_TIMED = /^(\s*)(Shot\s+\d+\s*)?\[?\s*(\d+(?:\.\d+)?)\s*s?\s*[-–—]\s*(\d+(?:\.\d+)?)\s*(s\s*\]?\s*:?|\]\s*:?|:)\s*/i;
+const LOOSE_TIMED = /^(\s*)(Shot\s+\d+\s*)?\[?\s*(\d+(?:\.\d+)?)\s*s?\s*[-–—]\s*(\d+(?:\.\d+)?)\s*(s(?![a-z])\s*\]?\s*:?|\]\s*:?|:)\s*/i;   // s(?![a-z]): '2-3 seconds later' is prose, not '[2-3s]' + 'econds' (/toolscan 2026-10-09)
 function normalizeTimedLines(prompt) {
   let changed = 0;
   const out = String(prompt || '').split('\n').map(line => {
