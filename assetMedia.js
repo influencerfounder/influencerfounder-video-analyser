@@ -59,7 +59,7 @@ async function probe(file) {
 
 // Scene cuts → clips. The same scene-score filter the clone path uses for cut detection.
 async function sceneClips(file, duration) {
-  const r = await run(ffmpegStatic, ['-hide_banner', '-i', file, '-an', '-vf', "select='gt(scene,0.3)',showinfo", '-f', 'null', '-'], { timeout: 300000 });
+  const r = await run(ffmpegStatic, ['-hide_banner', '-i', file, '-an', '-vf', "scale=320:-2,select='gt(scene,0.3)',showinfo", '-f', 'null', '-'], { timeout: 900000 });
   const cuts = [...r.err.matchAll(/pts_time:([0-9.]+)/g)].map((m) => Number(m[1])).filter((t) => t > 0.3 && t < duration - 0.3);
   const edges = [0];
   for (const c of cuts) if (c - edges[edges.length - 1] >= MIN_CLIP) edges.push(c);
@@ -128,31 +128,46 @@ function clipAudio(clip, segments, rms) {
 // The analyser has no auth (TOOL-CLEANUP I19). This route downloads up to 1 GB and spends Groq, so
 // it only ever fetches from OUR Blob store (the store id is the public hostname — CLAUDE.md), and
 // runs at most two jobs at once so a burst cannot fill Railway's disk.
+// ASYNC (review 2026-10-10): Railway's edge drops requests after ~2–3 min, so POST starts a job and
+// returns its id at once; GET /api/asset-media/:id reports it. A busy service answers 429 and the
+// tool simply asks again later. The slot is freed in `finally`, never on the HTTP connection.
 const OWN_BLOB = /^https:\/\/awn0zbclt6wlzynd\.public\.blob\.vercel-storage\.com\//i;
-let running = 0;
 const MAX_RUNNING = 2;
+const jobs = new Map();   // id → { status, startedAt, result?, error? } — kept 2 h
+let running = 0;
 
 function mount(app) {
-  app.post('/api/asset-media', async (req, res) => {
+  app.post('/api/asset-media', (req, res) => {
     const { url, kind } = req.body || {};
     if (!url || !OWN_BLOB.test(url)) return res.status(400).json({ success: false, error: 'Only files in our own storage can be analysed' });
-    if (running >= MAX_RUNNING) return res.status(429).json({ success: false, error: 'Busy — two assets are being analysed, try again in a minute' });
+    if (running >= MAX_RUNNING) return res.status(429).json({ success: false, error: 'busy' });
+    const id = require('crypto').randomBytes(8).toString('hex');
+    jobs.set(id, { status: 'running', startedAt: Date.now() });
     running++;
-    res.on('close', () => { running = Math.max(0, running - 1); });
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'asset-'));
-    const file = path.join(tmp, 'in');
-    const t0 = Date.now();
-    try {
-      const bytes = await download(url, file);
-      const out = await analyzeFile(file, tmp, kind);
-      console.log(`[asset-media] ${Math.round(bytes / 1e6)} MB, ${out.duration.toFixed(1)} s, ${out.clips.length} clip(s), ${out.cutCount} cut(s), speech ${out.segments.length} seg, ${Date.now() - t0} ms`);
-      res.json({ success: true, bytes, ...out });
-    } catch (e) {
-      console.error('[asset-media] error', e.message);
-      res.status(500).json({ success: false, error: e.message });
-    } finally {
-      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
-    }
+    res.json({ success: true, jobId: id });
+    (async () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'asset-'));
+      const file = path.join(tmp, 'in');
+      const t0 = Date.now();
+      try {
+        const bytes = await download(url, file);
+        const out = await analyzeFile(file, tmp, kind);
+        console.log(`[asset-media] ${id}: ${Math.round(bytes / 1e6)} MB, ${out.duration.toFixed(1)} s, ${out.clips.length} clip(s), ${out.cutCount} cut(s), speech ${out.segments.length} seg, ${Date.now() - t0} ms`);
+        jobs.set(id, { status: 'done', startedAt: t0, result: { bytes, ...out } });
+      } catch (e) {
+        console.error('[asset-media] error', id, e.message);
+        jobs.set(id, { status: 'failed', startedAt: t0, error: e.message });
+      } finally {
+        running = Math.max(0, running - 1);
+        try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
+        for (const [k, j] of jobs) if (Date.now() - j.startedAt > 2 * 3600 * 1000) jobs.delete(k);
+      }
+    })();
+  });
+  app.get('/api/asset-media/:id', (req, res) => {
+    const j = jobs.get(String(req.params.id));
+    if (!j) return res.status(404).json({ success: false, error: 'unknown job (the analyser may have restarted)' });
+    res.json({ success: true, status: j.status, ...(j.result || {}), error: j.error || '' });
   });
 }
 
