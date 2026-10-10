@@ -122,18 +122,31 @@ async function sheets(ff, video, duration, dir) {
   }));
 }
 
-async function callWriter({ system, content, key, maxTokens = 8000 }) {
+// ⏱ RUN BUDGET (/toolscan 2026-10-09). The tool waits 290 s for this route (recreate-v2/analyse), but
+// the writer alone could take 240 s + a 240 s fallback + a repair round + the outfit pick — paid calls
+// on the owner's Anthropic key that kept running for minutes after the Lab had shown "failed". Every
+// call now gets only what is left of V2_BUDGET_MS, and none starts with less than WRITER_MIN_MS left.
+// ⚠️ The tool's axios timeout must stay above this — test/v2-budget.selftest.js reads both files.
+const V2_BUDGET_MS = 270000;
+const WRITER_MIN_MS = 20000;
+function outOfTime() { const e = new Error('The analysis ran out of time — try again.'); e.code = 'out_of_time'; return e; }
+async function callWriter({ system, content, key, maxTokens = 8000, deadline = 0 }) {
+  const timeoutFor = () => {
+    const left = deadline ? deadline - Date.now() : 240000;
+    if (left < WRITER_MIN_MS) throw outOfTime();
+    return Math.min(240000, left);
+  };
   const body = (model) => ({
     model, max_tokens: maxTokens, system,
     ...(/^claude-(sonnet-5|opus-5)/.test(model) ? { thinking: { type: 'disabled' } } : { temperature: 0.2 }),
     messages: [{ role: 'user', content }],
   });
   const headers = { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' };
-  let r = await axios.post('https://api.anthropic.com/v1/messages', body(WRITER_MODEL), { headers, timeout: 240000, validateStatus: () => true });
+  let r = await axios.post('https://api.anthropic.com/v1/messages', body(WRITER_MODEL), { headers, timeout: timeoutFor(), validateStatus: () => true });
   let model = WRITER_MODEL;
   if (r.status !== 200) {
     console.warn(`[clone-v2] writer ${WRITER_MODEL} → ${r.status} ${JSON.stringify(r.data).slice(0, 200)} — falling back to ${FALLBACK_MODEL}`);
-    r = await axios.post('https://api.anthropic.com/v1/messages', body(FALLBACK_MODEL), { headers, timeout: 240000, validateStatus: () => true });
+    r = await axios.post('https://api.anthropic.com/v1/messages', body(FALLBACK_MODEL), { headers, timeout: timeoutFor(), validateStatus: () => true });
     model = FALLBACK_MODEL;
   }
   if (r.status !== 200) throw new Error(`writer ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}`);
@@ -204,7 +217,7 @@ function outfitCandidateTimes(spec, duration) {
   return out;
 }
 
-async function pickOutfit({ spec, ff, video, tmp, key, duration }) {
+async function pickOutfit({ spec, ff, video, tmp, key, duration, deadline = 0 }) {
   const cand = [];
   for (const k of outfitCandidateTimes(spec, duration)) {
     if (cand.filter(c => c.side === k.side).length >= 6) continue;   // 4 cut lobby's sharp shot-6 chest logo off the list
@@ -216,7 +229,7 @@ async function pickOutfit({ spec, ff, video, tmp, key, duration }) {
   const o = spec.outfit || {};
   const content = [{ type: 'text', text: `MAIN wears: ${o.top_name || ''} (front: ${o.top_front || 'not shown'}; back: ${o.top_back || 'not shown'}), ${o.bottom || ''}, ${o.shoes || ''}.` }];
   cand.forEach((c, i) => { content.push({ type: 'text', text: `Candidate ${i} — ${c.side.toUpperCase()} view at ${c.t} s:` }); content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: c.buf.toString('base64') } }); });
-  const w = await callWriter({ system: OUTFIT_PICK_SYSTEM, content, key, maxTokens: 600 });
+  const w = await callWriter({ system: OUTFIT_PICK_SYSTEM, content, key, maxTokens: 600, deadline });
   const pick = parseSpec(w.text) || {};
   const out = { front: null, back: null, writer: w.model };
   for (const side of ['front', 'back']) {
@@ -253,9 +266,10 @@ function mount(app, deps) {
     } catch (e) { res.status(500).json({ success: false, error: String(e.message || e).slice(0, 200) }); }
   });
 
-  app.post('/api/clone-v2', async (req, res) => {
+  const cloneV2Handler = async (req, res) => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'clonev2-'));
     const t0 = Date.now();
+    const deadline = t0 + V2_BUDGET_MS;
     const timing = {};
     const mark = (k) => { timing[k] = Math.round((Date.now() - t0) / 100) / 10; };
     try {
@@ -333,11 +347,11 @@ function mount(app, deps) {
 
       // 4. WRITE the spec (one repair attempt on invalid JSON).
       const system = writerSystem({ personaGender });
-      let w = await callWriter({ system, content, key }); mark('writer');
+      let w = await callWriter({ system, content, key, deadline }); mark('writer');
       let spec = parseSpec(w.text), errs = spec ? validateSpec(spec) : ['no JSON'];
       if (errs.length) {
         console.warn(`[clone-v2] spec invalid (${errs.join('; ')}) — one repair attempt`);
-        w = await callWriter({ system, key, content: [...content, { type: 'text', text: `Your previous answer was invalid (${errs.join('; ')}). Return the complete JSON spec only.` }] });
+        w = await callWriter({ system, key, deadline, content: [...content, { type: 'text', text: `Your previous answer was invalid (${errs.join('; ')}). Return the complete JSON spec only.` }] });
         spec = parseSpec(w.text); errs = spec ? validateSpec(spec) : ['no JSON'];
         mark('writer-repair');
       }
@@ -346,7 +360,7 @@ function mount(app, deps) {
       // 4b. OUTFIT crops (phase 2) + the full-resolution opening frame for the first-frame step.
       // Fail open: a missing crop is shown as missing in the Lab, never invented.
       let outfit = { front: null, back: null };
-      try { outfit = await pickOutfit({ spec, ff: ffmpegBin, video, tmp, key, duration }); } catch (e) { outfit = { front: null, back: null, reason: String(e.message || e).slice(0, 160) }; }
+      try { outfit = await pickOutfit({ spec, ff: ffmpegBin, video, tmp, key, duration, deadline }); } catch (e) { outfit = { front: null, back: null, reason: String(e.message || e).slice(0, 160) }; }
       mark('outfit');
       let frame0 = null;
       try {
@@ -384,11 +398,36 @@ function mount(app, deps) {
       });
     } catch (e) {
       console.error('[clone-v2] failed:', e.message);
-      res.status(500).json({ success: false, error: String(e.message || e).slice(0, 300) });
+      res.status(e && e.code === 'out_of_time' ? 504 : 500).json({ success: false, error: String(e.message || e).slice(0, 300) });
     } finally {
       try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
     }
-  });
+  };
+  app.post('/api/clone-v2', joinIdentical(cloneV2Handler, deps.runRecorded));
 }
 
-module.exports = { mount, V2_VERSION, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
+// 🔁 JOIN DUPLICATES + 3-MIN RESULT CACHE — v1's rule for /api/clone (2026-09-09), now on v2 too
+// (/toolscan 2026-10-09). Railway's edge has been measured re-sending a long POST mid-request and
+// answering the caller 502 while the work went on, and a Lab user who sees "failed" clicks Analyse
+// again: each was a second full run (Apify download + every Claude call). An identical request now
+// joins the run in progress, and a finished success is served for 3 minutes. Errors never cached.
+const V2_RECENT_TTL_MS = 180000;
+function v2JoinKey(b) {
+  return JSON.stringify([String(b.locationId || ''), String(b.videoUrl || ''), String(b.name || ''), b.personaGender || '']);
+}
+function joinIdentical(handler, runRecorded, { inflight = new Map(), recent = new Map(), now = () => Date.now() } = {}) {
+  return async (req, res) => {
+    const key = v2JoinKey(req.body || {});
+    for (const [k, v] of recent) if (now() - v.at > V2_RECENT_TTL_MS) recent.delete(k);
+    const hit = recent.get(key);
+    if (hit) { console.log('[clone-v2] identical request — served from the 3-min result cache (no new analysis)'); return res.status(200).json(hit.body); }
+    let run = inflight.get(key);
+    if (run) console.log('[clone-v2] identical request while one is running — joined it (no new analysis)');
+    else { run = runRecorded(handler, req).finally(() => inflight.delete(key)); inflight.set(key, run); }
+    const { status, body } = await run;
+    if (status === 200 && body && body.success !== false) recent.set(key, { at: now(), body });
+    res.status(status).json(body);
+  };
+}
+
+module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };

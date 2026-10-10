@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.71.1';
+const ANALYSER_VERSION = '2.72.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -4589,7 +4589,7 @@ app.post('/api/text-hooks', async (req, res) => {
 // download helpers and hookmotion.py with v1 (injected here, never copied); v1 is untouched.
 // PRD: docs/prds/RECREATE-V2-PRD.md in the InfluencerFounder docs folder.
 require('./v2/cloneV2').mount(app, {
-  downloadInstagramViaApify, downloadTikTok, detectBeats, tempVideos, cleanOldTempVideos, PYTHON,
+  downloadInstagramViaApify, downloadTikTok, detectBeats, tempVideos, cleanOldTempVideos, PYTHON, runRecorded,
   ffmpegBin: SYSTEM_FFMPEG || process.env.FFMPEG_BIN || ffmpegStatic,
   hookMotionScript: path.join(__dirname, 'hookmotion.py'),
 });
