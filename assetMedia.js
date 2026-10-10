@@ -103,7 +103,11 @@ async function transcribe(file, tmp) {
   const r = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', form, { headers: { Authorization: `Bearer ${key}`, ...form.getHeaders() }, timeout: 120000 });
   // Same hallucination filter as /api/clone: Whisper invents text on music and silence.
   const ok = (s) => (s.no_speech_prob ?? 0) < 0.6 && (s.avg_logprob ?? 0) > -1.0 && (s.compression_ratio ?? 1) < 2.4;
-  const segs = (r.data.segments || []).filter(ok).map((s) => ({ start: s.start, end: s.end, text: String(s.text || '').trim() })).filter((s) => s.text);
+  // Whisper's stock phantom lines on music/ambience ("Thank you.", "Thanks for watching!") pass the
+  // confidence filter — measured 2026-10-10 on a music-only clip. A segment that is ONLY one of
+  // these is dropped; the same words inside real speech are kept.
+  const PHANTOM = /^(thank you\.?|thanks( for watching)?[.!]?|thank you for watching[.!]?|you\.?|bye[.!]?|\.+|♪+|music)$/i;
+  const segs = (r.data.segments || []).filter(ok).map((s) => ({ start: s.start, end: s.end, text: String(s.text || '').trim() })).filter((s) => s.text && !PHANTOM.test(s.text));
   return { transcript: segs.map((s) => s.text).join(' ').trim(), segments: segs, language: r.data.language || '' };
 }
 
