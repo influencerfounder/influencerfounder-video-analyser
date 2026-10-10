@@ -125,10 +125,20 @@ function clipAudio(clip, segments, rms) {
   };
 }
 
+// The analyser has no auth (TOOL-CLEANUP I19). This route downloads up to 1 GB and spends Groq, so
+// it only ever fetches from OUR Blob store (the store id is the public hostname — CLAUDE.md), and
+// runs at most two jobs at once so a burst cannot fill Railway's disk.
+const OWN_BLOB = /^https:\/\/awn0zbclt6wlzynd\.public\.blob\.vercel-storage\.com\//i;
+let running = 0;
+const MAX_RUNNING = 2;
+
 function mount(app) {
   app.post('/api/asset-media', async (req, res) => {
     const { url, kind } = req.body || {};
-    if (!url || !/^https:\/\//.test(url)) return res.status(400).json({ success: false, error: 'Missing https url' });
+    if (!url || !OWN_BLOB.test(url)) return res.status(400).json({ success: false, error: 'Only files in our own storage can be analysed' });
+    if (running >= MAX_RUNNING) return res.status(429).json({ success: false, error: 'Busy — two assets are being analysed, try again in a minute' });
+    running++;
+    res.on('close', () => { running = Math.max(0, running - 1); });
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'asset-'));
     const file = path.join(tmp, 'in');
     const t0 = Date.now();
