@@ -80,7 +80,7 @@ const t = async (n, fn) => { try { await fn(); pass++; console.log('  ok  ' + n)
     const src = fs.readFileSync(SRC, 'utf8'), idx = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
     assert.ok(/app\.post\('\/api\/clone-v2', joinIdentical\(cloneV2Handler, deps\.runRecorded\)\)/.test(src));
     assert.ok(/cleanOldTempVideos, PYTHON, runRecorded,/.test(idx));
-    for (const re of [/callWriter\(\{ system, content, key, deadline \}\)/, /callWriter\(\{ system, key, deadline, content:/, /pickOutfit\(\{ spec, ff: ffmpegBin, video, tmp, key, duration, deadline \}\)/, /maxTokens: 600, deadline \}\)/])
+    for (const re of [/callWriter\(\{ system, content, key, kieKey, deadline \}\)/, /callWriter\(\{ system, key, kieKey, deadline, content:/, /pickOutfit\(\{ spec, ff: ffmpegBin, video, tmp, key, kieKey, duration, deadline \}\)/, /maxTokens: kieKey \? 3000 : 600, deadline \}\)/])
       assert.ok(re.test(src), 'a paid call skips the deadline: ' + re);
   });
   console.log(`\nv2-budget: ${pass} pass, ${fail} fail`);
