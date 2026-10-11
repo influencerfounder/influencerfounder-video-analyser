@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.74.0';
+const ANALYSER_VERSION = '2.74.1';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -1064,10 +1064,11 @@ const cloneHandler = async (req, res) => {
         .filter(r => r && typeof r === 'object' && r.driver)
         .map(r => {
           const d = String(r.driver).slice(0, 40);
-          const n = Number(r.n) || 0;
+          // nOutcome = OUR posted videos behind the median (the tool's results are own-only since 2026-10-11).
+          const n = Number(r.nOutcome ?? r.n) || 0;
           const m = Number(r.medianMultiplier);
           const perf = Number.isFinite(m) ? `${Math.round(m * 10) / 10}x normal views` : 'no outcome data yet';
-          return `- ${d}: ${perf} (measured across ${n} video${n === 1 ? '' : 's'})`;
+          return `- ${d}: ${perf} (measured across ${n} posted video${n === 1 ? '' : 's'})`;
         });
       if (lines.length) {
         priorsBlock = `\n\nWHAT THIS ACCOUNT HAS ALREADY LEARNED \u2014 measured outcomes of its own analysed and posted videos, not theory. Only mechanisms with enough evidence to be worth trusting are listed:\n${lines.join('\n')}\n\nUse this when writing PLAN: if the source's driver has performed well here, lean into it harder. If it has performed poorly, say so plainly in PLAN and shift the improvement toward a mechanism that HAS worked \u2014 without abandoning the source's core idea, and never by inventing something the frames cannot support.`;
