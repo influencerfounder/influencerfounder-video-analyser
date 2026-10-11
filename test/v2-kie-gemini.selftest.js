@@ -52,12 +52,18 @@ const t = async (n, fn) => { try { calls.length = 0; await fn(); pass++; console
     const c = await v2.refineHookViaKieClaude({ system: 'S', facts: 'F', sheets, hookFrames, spec: SPEC, kieKey: 'k', deadline: Date.now() + 20000, hookSecs: 1.5, duration: 23 });
     assert.strictEqual(c.spec, null); assert.strictEqual(calls.length, 0, 'no pass started with too little time left');
   });
+  await t('an outfit pick as Gemini writes it (string index, 0-1 box) is understood', () => {
+    assert.deepStrictEqual(v2.normPick({ index: '3', box: [0.2, 0.15, 0.8, 0.95] }), { index: 3, box: [20, 15, 80, 95] });
+    assert.deepStrictEqual(v2.normPick({ index: 1, box: [20, 15, 80, 95] }), { index: 1, box: [20, 15, 80, 95] });
+    assert.strictEqual(v2.normPick({ index: 'x', box: [1, 2, 3, 4] }), null); assert.strictEqual(v2.normPick(null), null);
+  });
   await t('the handler: Gemini spec + hook pass on Kie, the owner\'s single Claude call unchanged; outfit pick on Gemini for students', () => {
     const src = require('fs').readFileSync(process.argv[2] ? path.resolve(process.argv[2]) : path.join(__dirname, '..', 'v2/cloneV2.js'), 'utf8');
     assert.ok(/if \(kieKey\) \{[\s\S]{0,400}w = await callGeminiKie\(\{ system, content, kieKey, deadline \}\);/.test(src));
     assert.ok(/refineHookViaKieClaude\(\{ system, facts, sheets: sh, hookFrames: hook, spec, kieKey, deadline, hookSecs, duration \}\)/.test(src));
     assert.ok(/w = await callWriter\(\{ system, content, key, kieKey, deadline \}\); mark\('writer'\);/.test(src), 'owner path changed');
-    assert.ok(/const w = kieKey \? await callGeminiKie\(\{ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline \}\)/.test(src));
+    assert.ok(/let w = kieKey \? await callGeminiKie\(\{ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline \}\)/.test(src));
+    assert.ok(/if \(kieKey && !usable\(pick\)\)[\s\S]{0,300}callWriter\(\{ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 600, deadline \}\)/.test(src), 'no Claude fallback for an unusable Gemini pick');
   });
   console.log(`\nv2-kie-gemini: ${pass} pass, ${fail} fail`);
   process.exit(fail ? 1 : 0);

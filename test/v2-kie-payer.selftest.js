@@ -49,7 +49,7 @@ const t = async (n, fn) => { try { calls.length = 0; await fn(); pass++; console
   await t('the analysis route takes the key from the request and only falls back to the owner key without one', () => {
     const src = require('fs').readFileSync(process.argv[2] ? path.resolve(process.argv[2]) : path.join(__dirname, '..', 'v2/cloneV2.js'), 'utf8');
     assert.ok(/const key = kieKey \? '' : process\.env\.ANTHROPIC_API_KEY;/.test(src));
-    for (const re of [/callWriter\(\{ system, content, key, kieKey, deadline \}\)/, /callWriter\(\{ system, key, kieKey, deadline, content:/, /pickOutfit\(\{ spec, ff: ffmpegBin, video, tmp, key, kieKey, duration, deadline \}\)/, /OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline/])
+    for (const re of [/callWriter\(\{ system, content, key, kieKey, deadline \}\)/, /callWriter\(\{ system, key, kieKey, deadline, content:/, /pickOutfit\(\{ spec, ff: ffmpegBin, video, tmp, key, kieKey, duration, deadline \}\)/, /OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 600, deadline/])
       assert.ok(re.test(src), 'a paid call does not pass the student key: ' + re);
   });
   console.log(`\nv2-kie-payer: ${pass} pass, ${fail} fail`);

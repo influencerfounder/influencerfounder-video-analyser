@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-1.0.0';
+const V2_VERSION = 'v2-1.0.1';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -309,6 +309,17 @@ function outfitCandidateTimes(spec, duration) {
   return out;
 }
 
+// A pick as models actually write it: the index may arrive as a numeric string, the box in 0–1 fractions instead
+// of percent (Gemini on Kie, 2026-10-11). Normalised to {index: integer, box: [x0,y0,x1,y1] in percent}, or null.
+function normPick(p) {
+  if (!p || typeof p !== 'object') return null;
+  const index = Number(p.index);
+  if (!Number.isInteger(index) || index < 0) return null;
+  let box = Array.isArray(p.box) ? p.box.map(Number) : null;
+  if (!box || box.length !== 4 || box.some((x) => !Number.isFinite(x))) return null;
+  if (box.every((x) => x >= 0 && x <= 1)) box = box.map((x) => Math.round(x * 1000) / 10);
+  return { index, box };
+}
 async function pickOutfit({ spec, ff, video, tmp, key, kieKey = '', duration, deadline = 0 }) {
   const cand = [];
   for (const k of outfitCandidateTimes(spec, duration)) {
@@ -321,14 +332,22 @@ async function pickOutfit({ spec, ff, video, tmp, key, kieKey = '', duration, de
   const o = spec.outfit || {};
   const content = [{ type: 'text', text: `MAIN wears: ${o.top_name || ''} (front: ${o.top_front || 'not shown'}; back: ${o.top_back || 'not shown'}), ${o.bottom || ''}, ${o.shoes || ''}.` }];
   cand.forEach((c, i) => { content.push({ type: 'text', text: `Candidate ${i} — ${c.side.toUpperCase()} view at ${c.t} s:` }); content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: c.buf.toString('base64') } }); });
-  // A student's own Kie key: Gemini (reliable on Kie); the owner's: Claude on Anthropic, as before.
-  const w = kieKey ? await callGeminiKie({ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline })
+  // A student's own Kie key: Gemini (reliable on Kie), with a short Claude-on-Kie call as the fallback when
+  // Gemini's pick cannot be used (the first live student run, 2026-10-11, returned no usable crop from it);
+  // the owner's: Claude on Anthropic, as before.
+  const usable = (pk) => ['front', 'back'].some((sd) => { const q = normPick(pk && pk[sd]); return q && cand[q.index] && cand[q.index].side === sd; });
+  let w = kieKey ? await callGeminiKie({ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline }).catch((e) => ({ text: '', model: KIE_GEMINI_MODEL, error: e.message }))
     : await callWriter({ system: OUTFIT_PICK_SYSTEM, content, key, maxTokens: 600, deadline });
-  const pick = parseSpec(w.text) || {};
+  let pick = parseSpec(w.text) || {};
+  if (kieKey && !usable(pick)) {
+    console.warn(`[clone-v2] Gemini outfit pick unusable (${String(w.error || w.text || '').replace(/\s+/g, ' ').slice(0, 300)}) — trying Claude on Kie`);
+    try { w = await callWriter({ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 600, deadline }); pick = parseSpec(w.text) || {}; } catch (e) { w = { ...w, error: e.message }; }
+  }
   const out = { front: null, back: null, writer: w.model };
+  if (!usable(pick)) out.reason = 'the outfit pick returned no usable crop — use Replace to upload the outfit, or analyse again';
   for (const side of ['front', 'back']) {
-    const p = pick[side];
-    const c = p && Number.isInteger(p.index) ? cand[p.index] : null;
+    const p = normPick(pick[side]);
+    const c = p ? cand[p.index] : null;
     if (!c || c.side !== side) continue;
     const full = await fullFramePng(ff, video, c.t, path.join(tmp, `full-${side}.png`));
     if (!full) continue;
@@ -547,4 +566,4 @@ function joinIdentical(handler, runRecorded, { inflight = new Map(), recent = ne
   };
 }
 
-module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
+module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, normPick, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
