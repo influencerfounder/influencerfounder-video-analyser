@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.74.1';
+const ANALYSER_VERSION = '2.75.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -457,6 +457,7 @@ function cloneJoinKey(b) {
     b.frameMode === 'frames' ? 'frames' : 'grid',
     b.shotLog === 'gemini' ? 'gemini' : '',
     b.dirMode === 'off' ? 'off' : 'screen',
+    b.measureOnly === true ? 'measure' : '',   // measure-only = no prompt in the body
   ]);
 }
 function runRecorded(handler, req) {
@@ -502,6 +503,7 @@ const cloneHandler = async (req, res) => {
     // have duplicated all of that — the duplication class this codebase keeps paying
     // for. Default '' keeps every existing caller byte-identical.
     const { videoUrl, locationId, kieApiKey, mode, bgBrief, hookReport, driverPriors } = req.body;
+    const measureOnly = req.body.measureOnly === true;
     // 👕 WARDROBE OVERRIDE (2026-10-01): a garment the influencer wears INSTEAD of the source's top
     // (Mike's own brand pieces). Plain text from the tool's garment set; capped, never required.
     const wardrobe = String(req.body.wardrobe || '').replace(/\s+/g, ' ').trim().slice(0, 500);
@@ -893,6 +895,9 @@ const cloneHandler = async (req, res) => {
     // away" — which is what a student was wrongly told on 2026-09-13.
     let transcriptLowConfidence = '';
     let transcriptRejected = 0;
+    // 📏 For measure-only (2026-10-11): when the first CONFIDENT speech starts, and whether there is audio at all.
+    let firstSpeechS = null;
+    let audioPresent = false;
     const GROQ_API_KEY = process.env.GROQ_API_KEY;
     if (!GROQ_API_KEY) {
       transcriptError = 'GROQ_API_KEY not configured on the analyser service';
@@ -917,6 +922,7 @@ const cloneHandler = async (req, res) => {
         });
 
         if (fs.existsSync(audioPath) && fs.statSync(audioPath).size > 1000) {
+          audioPresent = true;
           const form = new FormData();
           form.append('file', fs.createReadStream(audioPath), { filename: 'audio.mp3', contentType: 'audio/mpeg' });
           form.append('model', 'whisper-large-v3-turbo');
@@ -941,6 +947,8 @@ const cloneHandler = async (req, res) => {
             ].filter(Boolean);
             const speechSegments = segments.filter(s => failedRules(s).length === 0);
             transcript = speechSegments.map(s => (s.text || '').trim()).filter(Boolean).join(' ').trim();
+            const firstSeg = speechSegments.find(s => (s.text || '').trim());
+            if (firstSeg && Number.isFinite(Number(firstSeg.start))) firstSpeechS = Math.round(Number(firstSeg.start) * 100) / 100;
             if (!transcript && segments.length) {
               // ⚠️ SAY WHICH RULE FIRED AND WHAT WHISPER HEARD. The old line logged only the
               // count, so when a student's talking-head reel came back as "nobody is talking
@@ -962,6 +970,43 @@ const cloneHandler = async (req, res) => {
       } catch (err) {
         transcriptError = err.response?.data?.error?.message || err.message || 'Whisper transcription failed';
       }
+    }
+
+    // 📏 MEASURE ONLY (2026-10-11, Mike — My Videos Analyser v2 building blocks). Everything the scorecard
+    // needs (frames, the dense hook frames, the transcript) plus what we can MEASURE on the file — real
+    // cuts (with the v2 flash/motion filter), the camera's move, how much the subject moves in the hook,
+    // when speech starts — and NO prompt writing: the writer is the expensive part and a posted video
+    // does not need a recreate prompt. Measured values never pass through a model, so they cannot be
+    // hallucinated. Every measurement fails open (null) rather than failing the request.
+    if (measureOnly) {
+      const v2lib = require('./v2/cloneV2');
+      const ffBin = SYSTEM_FFMPEG || process.env.FFMPEG_BIN || ffmpegStatic;
+      const pyJson = (script, args, timeout) => new Promise((resolve) => require('child_process').execFile(PYTHON, [script, ...args], { timeout },
+        (e, so) => { if (e) return resolve(null); try { resolve(JSON.parse(String(so).trim().split('\n').pop())); } catch (_) { resolve(null); } }));
+      let mCuts = null, camera = null, motion = null;
+      try {
+        const r = await v2lib.measureCuts(ffBin, videoPath, duration, (ts) => pyJson(path.join(__dirname, 'v2', 'cutflow.py'), [videoPath, ts.join(',')], 60000));
+        mCuts = r.cuts;
+      } catch (e) { console.warn('[measure] cuts failed:', e.message); }
+      try { camera = await pyJson(path.join(__dirname, 'v2', 'cameramotion.py'), [videoPath, (mCuts || []).join(',')], 120000); } catch (_) {}
+      try {
+        const hookSecs = Math.min(1.5, (mCuts && mCuts.length) ? mCuts[0] : 1.5);
+        motion = await pyJson(path.join(__dirname, 'hookmotion.py'), [videoPath, String(hookSecs)], 45000);
+      } catch (_) {}
+      const words = transcript ? transcript.split(/\s+/).filter(Boolean).length : 0;
+      console.log(`[measure] ${Math.round(duration * 10) / 10}s cuts=${mCuts ? mCuts.length : 'n/a'} camera=${camera && camera.segments ? camera.segments.length + ' seg' : 'n/a'} motion=${motion ? JSON.stringify(motion) : 'n/a'} speech@${firstSpeechS} words=${words} audio=${audioPresent}`);
+      return res.json({
+        success: true, measureOnly: true,
+        frames: frameDataUrls, frameTimestamps, hookFrames,
+        durationSec: Math.round(duration * 10) / 10,
+        transcript, transcriptError: transcriptError || undefined,
+        measures: {
+          cuts: mCuts, camera: (camera && Array.isArray(camera.segments)) ? camera.segments : null, hookMotion: motion,
+          // speechOk=false: transcription FAILED (no key, Groq/ffmpeg error) — "no speech" would then be a guess.
+          firstSpeechS, words, hasAudio: audioPresent, speechOk: !transcriptError, durationSec: Math.round(duration * 100) / 100,
+        },
+        analyserVersion: ANALYSER_VERSION,
+      });
     }
 
     // 5. Send frames + transcript to Claude vision
