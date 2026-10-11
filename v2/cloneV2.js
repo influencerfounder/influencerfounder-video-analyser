@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-1.0.2';
+const V2_VERSION = 'v2-1.0.3';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -218,32 +218,34 @@ async function callGeminiKie({ system, content, kieKey, maxTokens = 16000, deadl
   }
   return { text: String(ch.message.content || ''), model, usage: d.usage || null, stop: ch.finish_reason || null, credits: d.credits_consumed ?? null, payer: 'kie' };
 }
-// The hook stretch: shot 1 (the hook, 0 → hookSecs) and the phase(s) up to Gemini's next shot, rewritten by Claude
-// with the dense hook frames + the contact sheets of that stretch (<= 20 images, a short answer). Returns the new
-// spec, or null when the pass failed or returned nothing usable (the caller keeps Gemini's hook).
-async function refineHookViaKieClaude({ system, facts, sheets, hookFrames, spec, kieKey, deadline, hookSecs, duration }) {
+// The HOOK pass: ONE short Claude call rewrites only SHOT 1's movement list (+ its size, angle, camera, end
+// state) from the dense hook frames. The answer must stay small: a first version asked for the whole stretch to
+// Gemini's next shot with every field (~4,000 tokens) and Kie's Claude writes slowly — 76 s, then a 110 s
+// timeout on the third live run (2026-10-11). ~500 tokens now. Everything after the hook stays Gemini's.
+// Returns { spec } with shot 1 replaced, or { spec: null } when the pass failed (the caller keeps Gemini's).
+async function refineHookViaKieClaude({ system, facts, sheets, hookFrames, spec, kieKey, deadline, hookSecs }) {
   if (!deadline || deadline - Date.now() < 45000) return { spec: null, error: 'not enough time left for the hook pass' };
   const shots = Array.isArray(spec.shots) ? spec.shots : [];
-  const next = shots.find((x, i) => i > 0 && Number(x.start) > hookSecs + 0.05);
-  const until = Math.round((next ? Number(next.start) : Number(duration) || hookSecs + 3) * 100) / 100;
+  if (!shots.length) return { spec: null, error: 'no shots' };
   const img = (buf) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: buf.toString('base64') } });
-  const usedSheets = (sheets || []).filter((x) => Number(x.times[0]) < until).slice(0, 9);
-  const header = { ...spec }; delete header.shots;
+  const end = shots[1] ? Number(shots[1].start) : hookSecs;
+  const usedSheets = (sheets || []).filter((x) => Number(x.times[0]) < Math.max(end, hookSecs)).slice(0, 3);
   const content = [{ type: 'text', text: facts }];
   usedSheets.forEach((x, k) => { content.push({ type: 'text', text: `CONTACT SHEET ${k + 1} (left→right, top→bottom) at ${x.times.join(', ')} s:` }); content.push(img(x.buf)); });
   content.push({ type: 'text', text: `DENSE HOOK FRAMES (full size), at ${hookFrames.map((h) => h.t).join(', ')} s — compare each with the next to catch every small movement:` });
   hookFrames.forEach((h) => content.push(img(h.b)));
-  content.push({ type: 'text', text: `HOOK PASS. Another analyst wrote this spec (header fixed — keep these cast ids, labels and outfit): ${JSON.stringify(header)}. Its shots before ${until} s were: ${JSON.stringify(shots.filter((x) => Number(x.start) < until - 0.05))}. `
-    + `Rewrite ONLY the stretch from 0 s to ${until} s with the full care of rule 4: shot 1 is the HOOK (0 to ${hookSecs} s) and lists EVERY movement of MAIN, in order, from the dense hook frames (small ones too: a hand to the face, a head turn, a wave); then the phase(s) from ${hookSecs} s up to ${until} s. `
-    + `Return ONLY {"shots":[...]} with the shots that start before ${until} s, all shot fields of the full spec.` });
+  content.push({ type: 'text', text: `HOOK PASS. Another analyst's shot 1 (0 to ${end} s) is: ${JSON.stringify(shots[0])}. Its cast: ${JSON.stringify(spec.cast || [])}. `
+    + `Rewrite ONLY shot 1 with the full care of rule 4: list EVERY movement of MAIN from 0 to ${end} s, in order, from the dense hook frames (small ones too: a hand to the face, a head turn, a wave). `
+    + 'Return ONLY {"main_events":[...],"size":"","angle":"","camera":{"move":"","direction":""},"end_state":""} — nothing else.' });
   let w;
-  try { w = await callWriter({ system, content, kieKey, deadline, maxTokens: 2500 }); }
+  try { w = await callWriter({ system, content, kieKey, deadline, maxTokens: 1200 }); }
   catch (e) { return { spec: null, error: String(e.message || e).slice(0, 160) }; }
   const j = parseSpec(w.text);
-  const fresh = j && Array.isArray(j.shots) ? j.shots.filter((x) => x && Number(x.start) >= 0 && Number(x.start) < until - 0.05 && Array.isArray(x.main_events)) : [];
-  if (!fresh.length || Number(fresh[0].start) > 0.05) return { spec: null, error: 'the hook pass returned no usable hook', w };
-  fresh.sort((a, b2) => Number(a.start) - Number(b2.start));
-  return { spec: { ...spec, shots: [...fresh, ...shots.filter((x) => Number(x.start) >= until - 0.05)] }, w };
+  if (!j || !Array.isArray(j.main_events) || !j.main_events.length) return { spec: null, error: 'the hook pass returned no usable hook', w };
+  const s1 = { ...shots[0], main_events: j.main_events.map(String) };
+  for (const k of ['size', 'angle', 'end_state']) if (j[k]) s1[k] = String(j[k]);
+  if (j.camera && typeof j.camera === 'object' && j.camera.move) s1.camera = { move: String(j.camera.move), direction: String(j.camera.direction || '') };
+  return { spec: { ...spec, shots: [s1, ...shots.slice(1)] }, w };
 }
 
 // ── Phase 2: the OUTFIT, cut from the SOURCE itself (2026-10-06, Mike: "build it like this") ──
@@ -333,16 +335,16 @@ async function pickOutfit({ spec, ff, video, tmp, key, kieKey = '', duration, de
   const o = spec.outfit || {};
   const content = [{ type: 'text', text: `MAIN wears: ${o.top_name || ''} (front: ${o.top_front || 'not shown'}; back: ${o.top_back || 'not shown'}), ${o.bottom || ''}, ${o.shoes || ''}.` }];
   cand.forEach((c, i) => { content.push({ type: 'text', text: `Candidate ${i} — ${c.side.toUpperCase()} view at ${c.t} s:` }); content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: c.buf.toString('base64') } }); });
-  // A student's own Kie key: Claude on Kie first — a SHORT call (~12 images, a tiny answer), the shape Kie's
-  // Claude handles, and the prompt was written for Claude — with Gemini as the fallback. Two live student runs
-  // on 2026-10-11 got no crop from Gemini first (its boxes are 0-1000 by nature). Owner: Claude on Anthropic.
+  // A student's own Kie key: Gemini first (~10 s; its native 0-1000 boxes are read by normPick), with a short
+  // Claude-on-Kie call as the fallback only while time is left (Kie's Claude is slow: 2026-10-11 it timed out
+  // the hook pass and left the pick no time). Owner: Claude on Anthropic, as before.
   const usable = (pk) => ['front', 'back'].some((sd) => { const q = normPick(pk && pk[sd]); return q && cand[q.index] && cand[q.index].side === sd; });
-  let w = kieKey ? await callWriter({ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 600, deadline }).catch((e) => ({ text: '', model: 'claude (Kie)', error: e.message }))
+  let w = kieKey ? await callGeminiKie({ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline }).catch((e) => ({ text: '', model: KIE_GEMINI_MODEL, error: e.message }))
     : await callWriter({ system: OUTFIT_PICK_SYSTEM, content, key, maxTokens: 600, deadline });
   let pick = parseSpec(w.text) || {};
-  if (kieKey && !usable(pick)) {
-    console.warn(`[clone-v2] Claude-on-Kie outfit pick unusable (${String(w.error || w.text || '').replace(/\s+/g, ' ').slice(0, 200)}) — trying Gemini`);
-    try { w = await callGeminiKie({ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline }); pick = parseSpec(w.text) || {}; } catch (e) { w = { ...w, error: e.message }; }
+  if (kieKey && !usable(pick) && deadline - Date.now() > 60000) {
+    console.warn(`[clone-v2] Gemini outfit pick unusable (${String(w.error || w.text || '').replace(/\s+/g, ' ').slice(0, 200)}) — trying Claude on Kie`);
+    try { w = await callWriter({ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 600, deadline }); pick = parseSpec(w.text) || {}; } catch (e) { w = { ...w, error: e.message }; }
   }
   const out = { front: null, back: null, writer: w.model };
   if (!usable(pick)) out.reason = 'the outfit pick returned no usable crop — use Replace to upload the outfit, or analyse again';
@@ -481,7 +483,7 @@ function mount(app, deps) {
         mark('writer');
         w.hook = 'gemini';
         if (!errs.length) {
-          const h = await refineHookViaKieClaude({ system, facts, sheets: sh, hookFrames: hook, spec, kieKey, deadline, hookSecs, duration });
+          const h = await refineHookViaKieClaude({ system, facts, sheets: sh, hookFrames: hook, spec, kieKey, deadline, hookSecs });
           if (h.spec && !validateSpec(h.spec).length) { spec = h.spec; w.hook = 'claude'; w.hookUsage = h.w && h.w.usage; }
           else { w.hookError = h.error || 'invalid'; console.warn(`[clone-v2] hook pass skipped: ${w.hookError}`); }
           mark('hook');

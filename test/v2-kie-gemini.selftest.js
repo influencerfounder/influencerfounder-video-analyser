@@ -31,25 +31,25 @@ const t = async (n, fn) => { try { calls.length = 0; await fn(); pass++; console
     answer = () => ({ status: 200, data: { code: 500, msg: 'Internal error' } });
     await assert.rejects(v2.callGeminiKie({ system: 'S', content: [], kieKey: 'k', deadline: Date.now() + 200000 }), /busy/);
   });
-  await t('the hook pass is ONE short Claude call (<= 20 images) and replaces only the stretch up to Gemini\'s next shot', async () => {
-    answer = (url) => cla(JSON.stringify({ shots: [{ start: 0, main_events: ['walks', 'covers mouth', 'lowers hand', 'covers again', 'waves'] }, { start: 1.5, main_events: ['keeps walking'] }] }));
-    const h = await v2.refineHookViaKieClaude({ system: 'S', facts: 'F', sheets, hookFrames, spec: SPEC, kieKey: 'kie-STUDENT', deadline: Date.now() + 200000, hookSecs: 1.5, duration: 23 });
+  await t('the hook pass is ONE short Claude call (<= 20 images, a small answer) and replaces only shot 1\'s movements', async () => {
+    answer = () => cla(JSON.stringify({ main_events: ['walks', 'covers mouth', 'lowers hand', 'covers again', 'waves'], camera: { move: 'pulls back', direction: 'out' } }));
+    const h = await v2.refineHookViaKieClaude({ system: 'S', facts: 'F', sheets, hookFrames, spec: SPEC, kieKey: 'kie-STUDENT', deadline: Date.now() + 200000, hookSecs: 1.5 });
     assert.strictEqual(calls.length, 1); assert.strictEqual(calls[0].url, 'https://api.kie.ai/claude/v1/messages');
     const imgs = calls[0].body.messages[0].content.filter((c) => c.type === 'image').length;
-    assert.ok(imgs <= 20, imgs + ' images'); assert.ok(calls[0].body.max_tokens <= 3000);
-    assert.deepStrictEqual(h.spec.shots.map((x) => x.start), [0, 1.5, 3.5, 8], 'hook stretch replaced, the rest kept');
-    assert.strictEqual(h.spec.shots[0].main_events.length, 5);
-    assert.strictEqual(h.spec.outfit.top_name, 'a dress');
+    assert.ok(imgs <= 20, imgs + ' images'); assert.ok(calls[0].body.max_tokens <= 1500, 'the answer must stay small: ' + calls[0].body.max_tokens);
+    assert.deepStrictEqual(h.spec.shots.map((x) => x.start), [0, 3.5, 8], 'only shot 1 changes');
+    assert.strictEqual(h.spec.shots[0].main_events.length, 5); assert.strictEqual(h.spec.shots[0].camera.move, 'pulls back');
+    assert.deepStrictEqual(h.spec.shots[1].main_events, ['shakes hands'], 'Gemini keeps the rest');
   });
   await t('a failed or unusable hook pass returns null — the caller keeps Gemini\'s hook', async () => {
     answer = () => ({ status: 500, data: { type: 'error', error: { message: 'Server exception' } } });
-    const a = await v2.refineHookViaKieClaude({ system: 'S', facts: 'F', sheets, hookFrames, spec: SPEC, kieKey: 'k', deadline: Date.now() + 200000, hookSecs: 1.5, duration: 23 });
+    const a = await v2.refineHookViaKieClaude({ system: 'S', facts: 'F', sheets, hookFrames, spec: SPEC, kieKey: 'k', deadline: Date.now() + 200000, hookSecs: 1.5 });
     assert.strictEqual(a.spec, null);
     answer = () => cla('sorry');
-    const b = await v2.refineHookViaKieClaude({ system: 'S', facts: 'F', sheets, hookFrames, spec: SPEC, kieKey: 'k', deadline: Date.now() + 200000, hookSecs: 1.5, duration: 23 });
+    const b = await v2.refineHookViaKieClaude({ system: 'S', facts: 'F', sheets, hookFrames, spec: SPEC, kieKey: 'k', deadline: Date.now() + 200000, hookSecs: 1.5 });
     assert.strictEqual(b.spec, null);
     calls.length = 0;
-    const c = await v2.refineHookViaKieClaude({ system: 'S', facts: 'F', sheets, hookFrames, spec: SPEC, kieKey: 'k', deadline: Date.now() + 20000, hookSecs: 1.5, duration: 23 });
+    const c = await v2.refineHookViaKieClaude({ system: 'S', facts: 'F', sheets, hookFrames, spec: SPEC, kieKey: 'k', deadline: Date.now() + 20000, hookSecs: 1.5 });
     assert.strictEqual(c.spec, null); assert.strictEqual(calls.length, 0, 'no pass started with too little time left');
   });
   await t('an outfit pick as Gemini writes it (string index, 0-1 box) is understood', () => {
@@ -61,10 +61,10 @@ const t = async (n, fn) => { try { calls.length = 0; await fn(); pass++; console
   await t('the handler: Gemini spec + hook pass on Kie, the owner\'s single Claude call unchanged; outfit pick on Gemini for students', () => {
     const src = require('fs').readFileSync(process.argv[2] ? path.resolve(process.argv[2]) : path.join(__dirname, '..', 'v2/cloneV2.js'), 'utf8');
     assert.ok(/if \(kieKey\) \{[\s\S]{0,400}w = await callGeminiKie\(\{ system, content, kieKey, deadline \}\);/.test(src));
-    assert.ok(/refineHookViaKieClaude\(\{ system, facts, sheets: sh, hookFrames: hook, spec, kieKey, deadline, hookSecs, duration \}\)/.test(src));
+    assert.ok(/refineHookViaKieClaude\(\{ system, facts, sheets: sh, hookFrames: hook, spec, kieKey, deadline, hookSecs \}\)/.test(src));
     assert.ok(/w = await callWriter\(\{ system, content, key, kieKey, deadline \}\); mark\('writer'\);/.test(src), 'owner path changed');
-    assert.ok(/let w = kieKey \? await callWriter\(\{ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 600, deadline \}\)/.test(src), 'students: Claude on Kie first');
-    assert.ok(/if \(kieKey && !usable\(pick\)\)[\s\S]{0,300}callGeminiKie\(\{ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline \}\)/.test(src), 'no Gemini fallback');
+    assert.ok(/let w = kieKey \? await callGeminiKie\(\{ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline \}\)/.test(src), 'students: Gemini first');
+    assert.ok(/if \(kieKey && !usable\(pick\) && deadline - Date\.now\(\) > 60000\)[\s\S]{0,300}callWriter\(\{ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 600, deadline \}\)/.test(src), 'Claude fallback only with time left');
   });
   console.log(`\nv2-kie-gemini: ${pass} pass, ${fail} fail`);
   process.exit(fail ? 1 : 0);
