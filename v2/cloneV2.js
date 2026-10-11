@@ -265,7 +265,8 @@ RULES
 Return ONLY JSON: {"shots":[{"start":<the shot's start, exactly as given>,"main_events":[the shot's FULL list with your additions inserted in the right order]}],"added":[{"start":<shot start>,"event":"the added action"}]}. Shots you do not change are left out. If nothing is missing, return {"shots":[],"added":[]}.`;
 async function secondOpinionMerge({ spec, log, sheets, hookFrames, key, deadline }) {
   if (!log || !Array.isArray(log.timeline)) return { spec: null, added: [], error: 'no Gemini timeline' };
-  if (!deadline || deadline - Date.now() < 40000) return { spec: null, added: [], error: 'not enough time left for the judge' };
+  // 80 s: the judge stops 60 s before the deadline and needs ~20 s itself — below that, skip it plainly.
+  if (!deadline || deadline - Date.now() < 80000) return { spec: null, added: [], error: 'not enough time left for the judge' };
   const shots = Array.isArray(spec.shots) ? spec.shots : [];
   const img = (buf) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: buf.toString('base64') } });
   const mainRows = log.timeline.filter((r) => r && /^main$/i.test(String(r.who || 'MAIN'))).map((r) => ({ start: r.start, end: r.end, action: r.action }));
@@ -286,7 +287,7 @@ async function secondOpinionMerge({ spec, log, sheets, hookFrames, key, deadline
   // never on a shot where MAIN is not visible; at most SECOND_OPINION_MAX per video.
   const norm = (x) => String(x).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const castWords = (Array.isArray(spec.cast) ? spec.cast : []).map((c) => norm(c && c.label)).filter((x) => x.length > 3);
-  const otherPerson = (e) => /\bP\d+\b/.test(e) || castWords.some((c) => norm(e).includes(c));
+  const otherPerson = (e) => /\bP\d+\b/i.test(e) || castWords.some((c) => norm(e).includes(c));
   let budget = SECOND_OPINION_MAX; const added = []; const out = shots.map((x) => ({ ...x }));
   for (const cs of j.shots) {
     const i = out.findIndex((x) => Math.abs(Number(x.start) - Number(cs && cs.start)) < 0.05);

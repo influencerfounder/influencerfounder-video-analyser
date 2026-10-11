@@ -36,6 +36,7 @@ const t = async (n, fn) => { try { await fn(); pass++; console.log('  ok  ' + n)
   });
   await t('an addition about another person is refused', async () => {
     assert.strictEqual((await run({ shots: [{ start: 0, main_events: ['walks toward the camera', 'covers the mouth', 'P1 opens the door behind MAIN'] }] })).spec, null);
+    assert.strictEqual((await run({ shots: [{ start: 0, main_events: ['walks toward the camera', 'covers the mouth', 'nods at p1'] }] })).spec, null, 'lower-case p1');
   });
   await t('never more than 4 additions per video', async () => {
     const many = ['a', 'b', 'c', 'd', 'e'].map((x) => 'extra ' + x);
