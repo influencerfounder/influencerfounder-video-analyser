@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-1.0.3';
+const V2_VERSION = 'v2-1.1.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -248,6 +248,52 @@ async function refineHookViaKieClaude({ system, facts, sheets, hookFrames, spec,
   return { spec: { ...spec, shots: [s1, ...shots.slice(1)] }, w };
 }
 
+// 🔎 SECOND OPINION — owner only (Mike, 2026-10-11: "Don't need to be a tick can do this as default owner only").
+// Gemini watches the SOURCE VIDEO itself (the 2026-10-04 shot logger, owner's GEMINI_API_KEY, ~$0.03) in parallel
+// with the writer; then ONE short Claude call is the JUDGE: it sees the shot list, Gemini's MAIN actions and the
+// contact sheets + hook frames, and adds only moments that are clearly visible AND missing — never a duplicate in
+// other words, never a new person or prop — at most 4 per video (the guards: doubled actions break the hook's
+// timing, an invented moment makes the video do something the original never did, every word dilutes the rest).
+// What it added is returned (secondOpinion.added) and shown in the Lab. Fail-open: any failure = the spec as written.
+const SECOND_OPINION_MAX = 4;
+const JUDGE_SYSTEM = `You are the second-opinion judge of a video-recreation tool. An analyst wrote a shot list (each shot: start time + MAIN's actions, in order). A second analyst (who watched the video itself) logged a timeline of actions. Your job: find MAIN's movements that the shot list MISSED, check each against the frames, and add only those that are clearly visible.
+RULES
+1. Add only a movement of MAIN that is clearly visible in the frames AND not already in that shot's list in other words ("covers mouth" = "hand over the mouth" — that is a duplicate, never add it).
+2. Never add a new person, prop, location, camera move or anything the frames do not show. Never remove or reword existing actions.
+3. At most ${SECOND_OPINION_MAX} additions in total, most important first (the hook — shot 1 — matters most).
+4. Short present-tense actions with simple verbs; LEFT/RIGHT = the viewer's screen; refer to the person as MAIN.
+Return ONLY JSON: {"shots":[{"start":<the shot's start, exactly as given>,"main_events":[the shot's FULL list with your additions inserted in the right order]}],"added":[{"start":<shot start>,"event":"the added action"}]}. Shots you do not change are left out. If nothing is missing, return {"shots":[],"added":[]}.`;
+async function secondOpinionMerge({ spec, log, sheets, hookFrames, key, deadline }) {
+  if (!log || !Array.isArray(log.timeline)) return { spec: null, added: [], error: 'no Gemini timeline' };
+  if (!deadline || deadline - Date.now() < 40000) return { spec: null, added: [], error: 'not enough time left for the judge' };
+  const shots = Array.isArray(spec.shots) ? spec.shots : [];
+  const img = (buf) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: buf.toString('base64') } });
+  const mainRows = log.timeline.filter((r) => r && /^main$/i.test(String(r.who || 'MAIN'))).map((r) => ({ start: r.start, end: r.end, action: r.action }));
+  const content = [{ type: 'text', text: `THE SHOT LIST (start s → MAIN's actions): ${JSON.stringify(shots.map((x) => ({ start: x.start, main_events: x.main_events || [] })))}` },
+    { type: 'text', text: `THE SECOND ANALYST'S TIMELINE OF MAIN: ${JSON.stringify(mainRows).slice(0, 6000)}` }];
+  (sheets || []).slice(0, 12).forEach((x) => { content.push({ type: 'text', text: `CONTACT SHEET at ${x.times.join(', ')} s:` }); content.push(img(x.buf)); });
+  if ((hookFrames || []).length) { content.push({ type: 'text', text: `DENSE HOOK FRAMES at ${hookFrames.map((h) => h.t).join(', ')} s:` }); hookFrames.slice(0, 8).forEach((h) => content.push(img(h.b))); }
+  content.push({ type: 'text', text: 'Judge now. Return only JSON.' });
+  let w;
+  try { w = await callWriter({ system: JUDGE_SYSTEM, content, key, deadline, maxTokens: 1500 }); }
+  catch (e) { return { spec: null, added: [], error: String(e.message || e).slice(0, 160) }; }
+  const j = parseSpec(w.text);
+  if (!j || !Array.isArray(j.shots)) return { spec: null, added: [], error: 'the judge returned no JSON', w };
+  // Apply: a changed shot must KEEP every original action (additions only) and grow by at most the remaining budget.
+  let budget = SECOND_OPINION_MAX; const added = []; const out = shots.map((x) => ({ ...x }));
+  for (const cs of j.shots) {
+    const i = out.findIndex((x) => Math.abs(Number(x.start) - Number(cs && cs.start)) < 0.05);
+    if (i < 0 || !Array.isArray(cs.main_events)) continue;
+    const before = (out[i].main_events || []).map(String), after = cs.main_events.map(String);
+    const keepsAll = before.every((e) => after.includes(e));
+    const fresh = after.filter((e) => !before.includes(e));
+    if (!keepsAll || !fresh.length || fresh.length > budget) continue;
+    out[i].main_events = after; budget -= fresh.length;
+    fresh.forEach((e) => added.push({ start: Number(out[i].start), event: e }));
+  }
+  return { spec: added.length ? { ...spec, shots: out } : null, added, w };
+}
+
 // ── Phase 2: the OUTFIT, cut from the SOURCE itself (2026-10-06, Mike: "build it like this") ──
 // Every recreate has a different outfit, so it is built per video from the video: the clearest real
 // frame of MAIN facing the camera and the clearest from behind, cut from just below the chin down.
@@ -368,7 +414,7 @@ async function pickOutfit({ spec, ff, video, tmp, key, kieKey = '', duration, de
 }
 
 function mount(app, deps) {
-  const { downloadInstagramViaApify, downloadTikTok, detectBeats, tempVideos, cleanOldTempVideos, PYTHON, ffmpegBin, hookMotionScript } = deps;
+  const { downloadInstagramViaApify, downloadTikTok, detectBeats, tempVideos, cleanOldTempVideos, PYTHON, ffmpegBin, hookMotionScript, geminiShotLog } = deps;
   const PY = process.env.V2_PYTHON || PYTHON;
 
   // Phase 3 (2026-10-06): compile again with the job's REFERENCE BINDINGS ("Image 1 is the opening
@@ -467,6 +513,9 @@ function mount(app, deps) {
       shotKeys.forEach(k => { content.push({ type: 'text', text: `SHOT ${k.shot} — full-size frame at ${k.t} s (read clothing, which side of the top faces the camera, framing):` }); content.push(b64(k.b)); });
       content.push({ type: 'text', text: 'Fill the JSON spec now. Return only JSON.' });
 
+      // 🔎 Second opinion (owner only): Gemini watches the video while the writer works (see secondOpinionMerge).
+      const secondP = (!kieKey && typeof geminiShotLog === 'function') ? geminiShotLog(video).catch((e) => ({ ok: false, error: String(e.message || e) })) : null;
+
       // 4. WRITE the spec (one repair attempt on invalid JSON).
       const system = writerSystem({ personaGender });
       let w, spec, errs;
@@ -499,6 +548,18 @@ function mount(app, deps) {
         mark('writer-repair');
       }
       if (errs.length) return res.status(502).json({ success: false, error: 'The analysis could not be structured — try again.', detail: errs, raw: String((w && w.text) || '').slice(0, 2000) });
+
+      let secondOpinion = null;
+      if (secondP) {
+        const g = await secondP;
+        if (g && g.ok) {
+          const m = await secondOpinionMerge({ spec, log: g.log, sheets: sh, hookFrames: hook, key, deadline });
+          if (m.spec && !validateSpec(m.spec).length) spec = m.spec;
+          secondOpinion = { model: g.model, geminiSecs: g.secs, added: m.spec ? m.added : [], error: m.error || null };
+        } else secondOpinion = { model: null, added: [], error: (g && g.error) || 'Gemini did not answer' };
+        console.log(`[clone-v2] second opinion: ${secondOpinion.added.length} added${secondOpinion.error ? ' (' + secondOpinion.error + ')' : ''}`);
+        mark('second');
+      }
 
       // 4b. OUTFIT crops (phase 2) + the full-resolution opening frame for the first-frame step.
       // Fail open: a missing crop is shown as missing in the Lab, never invented.
@@ -537,7 +598,7 @@ function mount(app, deps) {
         keyframes: shotKeys.map(k => ({ t: k.t, shot: k.shot, dataUrl: thumb(k.b) })),
         outfit, frame0,
         hookFrames: hook.slice(0, 1).map(h => ({ t: h.t, dataUrl: thumb(h.b) })),
-        sourceVideoUrl, writer: { model: w.model, usage: w.usage, stop: w.stop, payer: w.payer, hook: w.hook || null, hookError: w.hookError || null, hookUsage: w.hookUsage || null, credits: w.credits ?? null }, timing,
+        sourceVideoUrl, secondOpinion, writer: { model: w.model, usage: w.usage, stop: w.stop, payer: w.payer, hook: w.hook || null, hookError: w.hookError || null, hookUsage: w.hookUsage || null, credits: w.credits ?? null }, timing,
       });
     } catch (e) {
       console.error('[clone-v2] failed:', e.message);
@@ -573,4 +634,4 @@ function joinIdentical(handler, runRecorded, { inflight = new Map(), recent = ne
   };
 }
 
-module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, normPick, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
+module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, normPick, secondOpinionMerge, SECOND_OPINION_MAX, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
