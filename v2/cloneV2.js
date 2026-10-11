@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-0.9.0';
+const V2_VERSION = 'v2-1.0.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -186,57 +186,64 @@ async function callWriter({ system, content, key, kieKey = '', maxTokens = 8000,
   return { text, model, usage: r.data.usage || null, stop: r.data.stop_reason, payer: viaKie ? 'kie' : 'owner' };
 }
 
-// ✂️ KIE WRITES IN SHORT PARTS (Mike, 2026-10-11: "So this would work and fix it? If yes build it"). Kie's
-// Claude gateway fails any answer that takes longer than ~80–110 s to WRITE — measured the same day: a long
-// answer died at 95 s (502) with 42 images and at 111 s (500 "Server exception") with none, while 42 images
-// in with a short answer came back in 10 s. A whole shot list is such a long answer. So on the Kie path the
-// spec is written in parts that each stay short (the classic Kie path caps answers at 2,600 tokens and works):
-// 1. the HEADER (look, setting, outfit, cast, hook) — one short call;
-// 2. the SHOTS, one call per ~8 s window (edges snapped to measured cuts), all in parallel, each given the
-//    header so the cast ids, labels and outfit are identical; then merged in time order.
-// Every call sees the full image set. The owner's Anthropic path stays one call.
-const KIE_WINDOW_S = 8;
-function kieWindows(duration, cuts = []) {
-  const d = Math.max(0.5, Number(duration) || 0);
-  const n = Math.max(1, Math.ceil(d / KIE_WINDOW_S));
-  const edges = [0];
-  for (let k = 1; k < n; k++) {
-    const target = (d * k) / n, prev = edges[edges.length - 1];
-    const near = (cuts || []).map(Number).filter((c) => c > prev + 1 && c < d - 1 && Math.abs(c - target) <= 1.5)
-      .sort((x, y) => Math.abs(x - target) - Math.abs(y - target))[0];
-    edges.push(Math.round((near !== undefined ? near : target) * 100) / 100);
+// 🔀 STUDENT WRITER = GEMINI ON KIE + A CLAUDE HOOK PASS (Mike, 2026-10-11: "Yes" to "Gemini for the shot list,
+// Claude for the hook only"; "Doesn't matter that it doesn't match mine"). Measured the same day on the master Kie
+// key: Kie's Claude gateway fails long answers (500 "Server exception" at 95–111 s, `no_available_account`) and
+// refused parts of a split spec, while Kie's Gemini 3.8 Flash took the same 42 images + facts and wrote a full
+// spec every time (6/6, 22–25 s, ~$0.012). Gemini's hook was coarser (3 movements vs Claude's 5 on the same
+// facts), so one SHORT Claude call — the shape Kie's Claude handles (classic path, test T1) — rewrites the hook
+// stretch from the dense hook frames. If that call fails, Gemini's hook stays: the analysis never breaks on it.
+const KIE_GEMINI_MODEL = process.env.V2_KIE_WRITER_MODEL || 'gemini-3-8-flash-openai';
+function toOpenAiContent(content) {
+  return (content || []).map((c) => {
+    if (!c) return null;
+    if (c.type === 'text') return { type: 'text', text: c.text };
+    if (c.type === 'image' && c.source) return { type: 'image_url', image_url: { url: c.source.type === 'base64' ? `data:${c.source.media_type || 'image/jpeg'};base64,${c.source.data}` : c.source.url } };
+    return null;
+  }).filter(Boolean);
+}
+async function callGeminiKie({ system, content, kieKey, maxTokens = 16000, deadline = 0, model = KIE_GEMINI_MODEL }) {
+  const left = deadline ? deadline - Date.now() : 240000;
+  if (left < WRITER_MIN_MS) throw outOfTime();
+  const url = `https://api.kie.ai/${model}/v1/chat/completions`;
+  const body = { messages: [{ role: 'system', content: system }, { role: 'user', content: toOpenAiContent(content) }], stream: false, max_tokens: maxTokens, reasoning_effort: 'low' };
+  const r = await axios.post(url, body, { headers: { Authorization: `Bearer ${kieKey}`, 'Content-Type': 'application/json' }, timeout: Math.min(240000, left), validateStatus: () => true, maxBodyLength: Infinity, maxContentLength: Infinity });
+  const d = r.data || {};
+  const ch = (Array.isArray(d.choices) ? d.choices : [])[0];
+  // Kie answers errors as HTTP 200 + {code, msg} (docs.kie.ai).
+  if (r.status !== 200 || !ch || !ch.message) {
+    const e = kieWriterError(Number(d.code) || r.status, d);
+    if (e) throw e;
+    throw Object.assign(new Error('Kie.ai\'s AI is busy right now — try again in a minute.'), { detail: JSON.stringify(d).slice(0, 200) });
   }
-  return edges.map((a, i) => ({ from: a, to: i + 1 < edges.length ? edges[i + 1] : Math.round(d * 100) / 100 }));
+  return { text: String(ch.message.content || ''), model, usage: d.usage || null, stop: ch.finish_reason || null, credits: d.credits_consumed ?? null, payer: 'kie' };
 }
-function sumUsage(list) {
-  const u = {};
-  for (const w of list) for (const [k, v] of Object.entries((w && w.usage) || {})) if (typeof v === 'number') u[k] = (u[k] || 0) + v;
-  return u;
-}
-async function writeSpecViaKie({ system, content, kieKey, deadline, duration, cuts }) {
-  const head = await callWriter({ system, kieKey, deadline, maxTokens: 1500, content: [...content, { type: 'text', text:
-    'THIS ANSWER IS PART 1: return ONLY the spec header JSON, WITHOUT the "shots" array: {"look","setting","outfit","cast","people_move","overlay_text","hook"} — every rule above applies. The shots are asked for separately.' }] });
-  const header = parseSpec(head.text);
-  if (!header || !header.outfit || typeof header.outfit !== 'object') throw Object.assign(new Error('The analysis could not be structured — try again.'), { code: 'kie_parts' });
-  delete header.shots;
-  const wins = kieWindows(duration, cuts);
-  const parts = await Promise.all(wins.map((w) => callWriter({ system, kieKey, deadline, maxTokens: 3000, content: [...content, { type: 'text', text:
-    `THIS ANSWER IS ONE PART OF THE SHOT LIST: the shots from ${w.from} s to ${w.to} s only. The spec header is FIXED — use exactly these cast ids, labels and outfit: ${JSON.stringify(header)}. `
-    + `Return ONLY {"shots":[...]} with every shot or phase that STARTS at or after ${w.from} s and before ${w.to} s, with all the shot fields of the full spec. `
-    + (w.from === 0 ? 'The first shot starts at 0 and is the HOOK (rule 4: every movement of MAIN, in order). ' : `The first one starts at ${w.from} s; "cut_before" is true only where a MEASURED CUT is. `)
-    + 'Never describe a shot that starts outside this window.' }] })));
-  let shots = [];
-  parts.forEach((p, i) => {
-    const j = parseSpec(p.text);
-    if (!j || !Array.isArray(j.shots)) throw Object.assign(new Error('The analysis could not be structured — try again.'), { code: 'kie_parts', detail: `part ${i + 2} returned no shots` });
-    const w = wins[i];
-    shots.push(...j.shots.filter((x) => Number(x && x.start) >= w.from - 0.05 && Number(x.start) < w.to - 0.05));
-  });
-  shots.sort((a, b) => Number(a.start) - Number(b.start));
-  shots = shots.filter((x, i) => i === 0 || Math.abs(Number(x.start) - Number(shots[i - 1].start)) > 0.05);
-  if (shots.length) shots[0].start = 0;
-  const all = [head, ...parts];
-  return { spec: { ...header, shots }, w: { text: '', model: head.model, usage: sumUsage(all), stop: all.map((x) => x.stop).join(','), payer: 'kie', parts: all.length } };
+// The hook stretch: shot 1 (the hook, 0 → hookSecs) and the phase(s) up to Gemini's next shot, rewritten by Claude
+// with the dense hook frames + the contact sheets of that stretch (<= 20 images, a short answer). Returns the new
+// spec, or null when the pass failed or returned nothing usable (the caller keeps Gemini's hook).
+async function refineHookViaKieClaude({ system, facts, sheets, hookFrames, spec, kieKey, deadline, hookSecs, duration }) {
+  if (!deadline || deadline - Date.now() < 45000) return { spec: null, error: 'not enough time left for the hook pass' };
+  const shots = Array.isArray(spec.shots) ? spec.shots : [];
+  const next = shots.find((x, i) => i > 0 && Number(x.start) > hookSecs + 0.05);
+  const until = Math.round((next ? Number(next.start) : Number(duration) || hookSecs + 3) * 100) / 100;
+  const img = (buf) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: buf.toString('base64') } });
+  const usedSheets = (sheets || []).filter((x) => Number(x.times[0]) < until).slice(0, 9);
+  const header = { ...spec }; delete header.shots;
+  const content = [{ type: 'text', text: facts }];
+  usedSheets.forEach((x, k) => { content.push({ type: 'text', text: `CONTACT SHEET ${k + 1} (left→right, top→bottom) at ${x.times.join(', ')} s:` }); content.push(img(x.buf)); });
+  content.push({ type: 'text', text: `DENSE HOOK FRAMES (full size), at ${hookFrames.map((h) => h.t).join(', ')} s — compare each with the next to catch every small movement:` });
+  hookFrames.forEach((h) => content.push(img(h.b)));
+  content.push({ type: 'text', text: `HOOK PASS. Another analyst wrote this spec (header fixed — keep these cast ids, labels and outfit): ${JSON.stringify(header)}. Its shots before ${until} s were: ${JSON.stringify(shots.filter((x) => Number(x.start) < until - 0.05))}. `
+    + `Rewrite ONLY the stretch from 0 s to ${until} s with the full care of rule 4: shot 1 is the HOOK (0 to ${hookSecs} s) and lists EVERY movement of MAIN, in order, from the dense hook frames (small ones too: a hand to the face, a head turn, a wave); then the phase(s) from ${hookSecs} s up to ${until} s. `
+    + `Return ONLY {"shots":[...]} with the shots that start before ${until} s, all shot fields of the full spec.` });
+  let w;
+  try { w = await callWriter({ system, content, kieKey, deadline, maxTokens: 2500 }); }
+  catch (e) { return { spec: null, error: String(e.message || e).slice(0, 160) }; }
+  const j = parseSpec(w.text);
+  const fresh = j && Array.isArray(j.shots) ? j.shots.filter((x) => x && Number(x.start) >= 0 && Number(x.start) < until - 0.05 && Array.isArray(x.main_events)) : [];
+  if (!fresh.length || Number(fresh[0].start) > 0.05) return { spec: null, error: 'the hook pass returned no usable hook', w };
+  fresh.sort((a, b2) => Number(a.start) - Number(b2.start));
+  return { spec: { ...spec, shots: [...fresh, ...shots.filter((x) => Number(x.start) >= until - 0.05)] }, w };
 }
 
 // ── Phase 2: the OUTFIT, cut from the SOURCE itself (2026-10-06, Mike: "build it like this") ──
@@ -314,7 +321,9 @@ async function pickOutfit({ spec, ff, video, tmp, key, kieKey = '', duration, de
   const o = spec.outfit || {};
   const content = [{ type: 'text', text: `MAIN wears: ${o.top_name || ''} (front: ${o.top_front || 'not shown'}; back: ${o.top_back || 'not shown'}), ${o.bottom || ''}, ${o.shoes || ''}.` }];
   cand.forEach((c, i) => { content.push({ type: 'text', text: `Candidate ${i} — ${c.side.toUpperCase()} view at ${c.t} s:` }); content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: c.buf.toString('base64') } }); });
-  const w = await callWriter({ system: OUTFIT_PICK_SYSTEM, content, key, kieKey, maxTokens: kieKey ? 3000 : 600, deadline });
+  // A student's own Kie key: Gemini (reliable on Kie); the owner's: Claude on Anthropic, as before.
+  const w = kieKey ? await callGeminiKie({ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline })
+    : await callWriter({ system: OUTFIT_PICK_SYSTEM, content, key, maxTokens: 600, deadline });
   const pick = parseSpec(w.text) || {};
   const out = { front: null, back: null, writer: w.model };
   for (const side of ['front', 'back']) {
@@ -436,9 +445,23 @@ function mount(app, deps) {
       const system = writerSystem({ personaGender });
       let w, spec, errs;
       if (kieKey) {
-        // A student's own Kie key: the spec is written in short parts (see writeSpecViaKie).
-        ({ spec, w } = await writeSpecViaKie({ system, content, kieKey, deadline, duration, cuts })); mark('writer');
-        errs = validateSpec(spec);
+        // A student's own Kie key: Gemini writes the spec (one retry on an unreadable answer), then a short
+        // Claude pass rewrites the hook stretch (refineHookViaKieClaude); Gemini's hook stays if it fails.
+        w = await callGeminiKie({ system, content, kieKey, deadline });
+        spec = parseSpec(w.text); errs = spec ? validateSpec(spec) : ['no JSON'];
+        if (errs.length) {
+          console.warn(`[clone-v2] Gemini spec invalid (${errs.join('; ')}) — one retry`);
+          w = await callGeminiKie({ system, kieKey, deadline, content: [...content, { type: 'text', text: `Your previous answer was invalid (${errs.join('; ')}). Return the complete JSON spec only.` }] });
+          spec = parseSpec(w.text); errs = spec ? validateSpec(spec) : ['no JSON'];
+        }
+        mark('writer');
+        w.hook = 'gemini';
+        if (!errs.length) {
+          const h = await refineHookViaKieClaude({ system, facts, sheets: sh, hookFrames: hook, spec, kieKey, deadline, hookSecs, duration });
+          if (h.spec && !validateSpec(h.spec).length) { spec = h.spec; w.hook = 'claude'; w.hookUsage = h.w && h.w.usage; }
+          else { w.hookError = h.error || 'invalid'; console.warn(`[clone-v2] hook pass skipped: ${w.hookError}`); }
+          mark('hook');
+        }
       } else {
         w = await callWriter({ system, content, key, kieKey, deadline }); mark('writer');
         spec = parseSpec(w.text); errs = spec ? validateSpec(spec) : ['no JSON'];
@@ -488,7 +511,7 @@ function mount(app, deps) {
         keyframes: shotKeys.map(k => ({ t: k.t, shot: k.shot, dataUrl: thumb(k.b) })),
         outfit, frame0,
         hookFrames: hook.slice(0, 1).map(h => ({ t: h.t, dataUrl: thumb(h.b) })),
-        sourceVideoUrl, writer: { model: w.model, usage: w.usage, stop: w.stop, payer: w.payer, parts: w.parts || 1 }, timing,
+        sourceVideoUrl, writer: { model: w.model, usage: w.usage, stop: w.stop, payer: w.payer, hook: w.hook || null, hookError: w.hookError || null, hookUsage: w.hookUsage || null, credits: w.credits ?? null }, timing,
       });
     } catch (e) {
       console.error('[clone-v2] failed:', e.message);
@@ -524,4 +547,4 @@ function joinIdentical(handler, runRecorded, { inflight = new Map(), recent = ne
   };
 }
 
-module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, writeSpecViaKie, kieWindows, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
+module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
