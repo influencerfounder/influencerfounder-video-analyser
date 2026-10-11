@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-0.7.0';
+const V2_VERSION = 'v2-0.8.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -130,28 +130,55 @@ async function sheets(ff, video, duration, dir) {
 const V2_BUDGET_MS = 270000;
 const WRITER_MIN_MS = 20000;
 function outOfTime() { const e = new Error('The analysis ran out of time — try again.'); e.code = 'out_of_time'; return e; }
-async function callWriter({ system, content, key, maxTokens = 8000, deadline = 0 }) {
+// 💳 WHO PAYS (Mike, 2026-10-11: "build it and open the tool for everyone"). A student's analysis runs on
+// THEIR Kie.ai credits through Kie's Claude gateway (the classic /api/clone path has done this since
+// 2026-07-17); only the owner's own account uses the owner's ANTHROPIC_API_KEY. There is no fallback from a
+// student's Kie call onto the owner's key. Kie took the full image set in one call (test A, 2026-10-11:
+// 42 images / 4.15 MB → 200 in 31 s), so students get the same images as the owner.
+const KIE_CLAUDE_URL = 'https://api.kie.ai/claude/v1/messages';
+function kieWriterError(status, data) {
+  const code = Number((data && (data.code || (data.error && data.error.status))) || status) || status;
+  const msg = String((data && (data.msg || data.message || (data.error && data.error.message))) || '').slice(0, 160);
+  if (code === 401 || code === 403) return Object.assign(new Error('Your Kie.ai key was refused — check it in the tool (🔑 Kie.ai key) and try again.'), { code: 'kie_key' });
+  if (code === 402 || /credit|balance|insufficient/i.test(msg)) return Object.assign(new Error('Your Kie.ai balance is too low for this analysis — top up at kie.ai and try again.'), { code: 'kie_balance' });
+  return null;
+}
+async function callWriter({ system, content, key, kieKey = '', maxTokens = 8000, deadline = 0 }) {
   const timeoutFor = () => {
     const left = deadline ? deadline - Date.now() : 240000;
     if (left < WRITER_MIN_MS) throw outOfTime();
     return Math.min(240000, left);
   };
-  const body = (model) => ({
+  const viaKie = !!kieKey;
+  const body = (model, noThinking) => ({
     model, max_tokens: maxTokens, system,
-    ...(/^claude-(sonnet-5|opus-5)/.test(model) ? { thinking: { type: 'disabled' } } : { temperature: 0.2 }),
+    ...(/^claude-(sonnet-5|opus-5)/.test(model) ? (noThinking ? {} : { thinking: { type: 'disabled' } }) : { temperature: 0.2 }),
     messages: [{ role: 'user', content }],
   });
-  const headers = { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' };
-  let r = await axios.post('https://api.anthropic.com/v1/messages', body(WRITER_MODEL), { headers, timeout: timeoutFor(), validateStatus: () => true });
+  const url = viaKie ? KIE_CLAUDE_URL : 'https://api.anthropic.com/v1/messages';
+  const headers = viaKie ? { Authorization: `Bearer ${kieKey}`, 'Content-Type': 'application/json' }
+    : { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' };
+  const send = async (model) => {
+    const opts = { headers, timeout: timeoutFor(), validateStatus: () => true, maxBodyLength: Infinity, maxContentLength: Infinity };
+    let r = await axios.post(url, body(model), opts);
+    // Kie's relay may not pass Anthropic's `thinking` field — one retry without it (a Sonnet 5 call then
+    // thinks adaptively, which the 8000-token budget absorbs).
+    if (viaKie && r.status === 400 && /thinking/i.test(JSON.stringify(r.data || {}))) r = await axios.post(url, body(model, true), { ...opts, timeout: timeoutFor() });
+    // Kie answers 200 with the error in the body (reference_kie_200_with_error_body): no content = a failure.
+    if (viaKie && r.status === 200 && !Array.isArray(r.data && r.data.content)) r = { status: Number(r.data && r.data.code) || 502, data: r.data };
+    if (viaKie && r.status !== 200) { const e = kieWriterError(r.status, r.data); if (e) throw e; }
+    return r;
+  };
+  let r = await send(WRITER_MODEL);
   let model = WRITER_MODEL;
   if (r.status !== 200) {
-    console.warn(`[clone-v2] writer ${WRITER_MODEL} → ${r.status} ${JSON.stringify(r.data).slice(0, 200)} — falling back to ${FALLBACK_MODEL}`);
-    r = await axios.post('https://api.anthropic.com/v1/messages', body(FALLBACK_MODEL), { headers, timeout: timeoutFor(), validateStatus: () => true });
+    console.warn(`[clone-v2] writer ${WRITER_MODEL}${viaKie ? ' (Kie)' : ''} → ${r.status} ${JSON.stringify(r.data).slice(0, 200)} — falling back to ${FALLBACK_MODEL}`);
+    r = await send(FALLBACK_MODEL);
     model = FALLBACK_MODEL;
   }
-  if (r.status !== 200) throw new Error(`writer ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}`);
+  if (r.status !== 200) throw Object.assign(new Error(viaKie ? 'Kie.ai\'s AI is busy right now — try again in a minute.' : `writer ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}`), { detail: JSON.stringify(r.data).slice(0, 200) });
   const text = (r.data.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
-  return { text, model, usage: r.data.usage || null, stop: r.data.stop_reason };
+  return { text, model, usage: r.data.usage || null, stop: r.data.stop_reason, payer: viaKie ? 'kie' : 'owner' };
 }
 
 // ── Phase 2: the OUTFIT, cut from the SOURCE itself (2026-10-06, Mike: "build it like this") ──
@@ -217,7 +244,7 @@ function outfitCandidateTimes(spec, duration) {
   return out;
 }
 
-async function pickOutfit({ spec, ff, video, tmp, key, duration, deadline = 0 }) {
+async function pickOutfit({ spec, ff, video, tmp, key, kieKey = '', duration, deadline = 0 }) {
   const cand = [];
   for (const k of outfitCandidateTimes(spec, duration)) {
     if (cand.filter(c => c.side === k.side).length >= 6) continue;   // 4 cut lobby's sharp shot-6 chest logo off the list
@@ -229,7 +256,7 @@ async function pickOutfit({ spec, ff, video, tmp, key, duration, deadline = 0 })
   const o = spec.outfit || {};
   const content = [{ type: 'text', text: `MAIN wears: ${o.top_name || ''} (front: ${o.top_front || 'not shown'}; back: ${o.top_back || 'not shown'}), ${o.bottom || ''}, ${o.shoes || ''}.` }];
   cand.forEach((c, i) => { content.push({ type: 'text', text: `Candidate ${i} — ${c.side.toUpperCase()} view at ${c.t} s:` }); content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: c.buf.toString('base64') } }); });
-  const w = await callWriter({ system: OUTFIT_PICK_SYSTEM, content, key, maxTokens: 600, deadline });
+  const w = await callWriter({ system: OUTFIT_PICK_SYSTEM, content, key, kieKey, maxTokens: kieKey ? 3000 : 600, deadline });
   const pick = parseSpec(w.text) || {};
   const out = { front: null, back: null, writer: w.model };
   for (const side of ['front', 'back']) {
@@ -276,9 +303,11 @@ function mount(app, deps) {
       const { videoUrl } = req.body || {};
       const personaGender = ['male', 'female'].includes(req.body.personaGender) ? req.body.personaGender : null;
       const name = String(req.body.name || '').replace(/[^\p{L}\p{N} ._'-]/gu, '').slice(0, 40) || 'the main person';
-      const key = process.env.ANTHROPIC_API_KEY;
+      // A student's own Kie key pays (the tool sends it for every account but the owner's); else the owner's Anthropic key.
+      const kieKey = typeof req.body.kieApiKey === 'string' ? req.body.kieApiKey.trim().slice(0, 200) : '';
+      const key = kieKey ? '' : process.env.ANTHROPIC_API_KEY;
       if (!videoUrl) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
-      if (!key) return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY not configured' });
+      if (!key && !kieKey) return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY not configured' });
       console.log(`[clone-v2] ${V2_VERSION} lid=${req.body.locationId || '?'} url=${String(videoUrl).slice(0, 200)}`);
 
       // 1. Download (same helpers as v1).
@@ -347,11 +376,11 @@ function mount(app, deps) {
 
       // 4. WRITE the spec (one repair attempt on invalid JSON).
       const system = writerSystem({ personaGender });
-      let w = await callWriter({ system, content, key, deadline }); mark('writer');
+      let w = await callWriter({ system, content, key, kieKey, deadline }); mark('writer');
       let spec = parseSpec(w.text), errs = spec ? validateSpec(spec) : ['no JSON'];
       if (errs.length) {
         console.warn(`[clone-v2] spec invalid (${errs.join('; ')}) — one repair attempt`);
-        w = await callWriter({ system, key, deadline, content: [...content, { type: 'text', text: `Your previous answer was invalid (${errs.join('; ')}). Return the complete JSON spec only.` }] });
+        w = await callWriter({ system, key, kieKey, deadline, content: [...content, { type: 'text', text: `Your previous answer was invalid (${errs.join('; ')}). Return the complete JSON spec only.` }] });
         spec = parseSpec(w.text); errs = spec ? validateSpec(spec) : ['no JSON'];
         mark('writer-repair');
       }
@@ -360,7 +389,7 @@ function mount(app, deps) {
       // 4b. OUTFIT crops (phase 2) + the full-resolution opening frame for the first-frame step.
       // Fail open: a missing crop is shown as missing in the Lab, never invented.
       let outfit = { front: null, back: null };
-      try { outfit = await pickOutfit({ spec, ff: ffmpegBin, video, tmp, key, duration, deadline }); } catch (e) { outfit = { front: null, back: null, reason: String(e.message || e).slice(0, 160) }; }
+      try { outfit = await pickOutfit({ spec, ff: ffmpegBin, video, tmp, key, kieKey, duration, deadline }); } catch (e) { outfit = { front: null, back: null, reason: String(e.message || e).slice(0, 160) }; }
       mark('outfit');
       let frame0 = null;
       try {
@@ -398,7 +427,7 @@ function mount(app, deps) {
       });
     } catch (e) {
       console.error('[clone-v2] failed:', e.message);
-      res.status(e && e.code === 'out_of_time' ? 504 : 500).json({ success: false, error: String(e.message || e).slice(0, 300) });
+      res.status(e && e.code === 'out_of_time' ? 504 : e && (e.code === 'kie_key' || e.code === 'kie_balance') ? 402 : 500).json({ success: false, error: String(e.message || e).slice(0, 300), ...(e && e.code ? { code: e.code } : {}) });
     } finally {
       try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
     }
