@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-0.8.0';
+const V2_VERSION = 'v2-0.8.1';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -150,8 +150,13 @@ async function callWriter({ system, content, key, kieKey = '', maxTokens = 8000,
     return Math.min(240000, left);
   };
   const viaKie = !!kieKey;
-  const body = (model, noThinking) => ({
-    model, max_tokens: maxTokens, system,
+  // On Kie the `thinking` field is NEVER sent (2026-10-11): the live student run with thinking:{disabled}
+  // got 500 "Server exception" from Kie on both models, and every Kie path that works in production (classic
+  // /api/clone, the Scorecard, test A) sends none. Sonnet 5 then thinks adaptively, so the budget is raised
+  // to make room for that thinking; output is billed by what is used, to the student.
+  const tokens = viaKie ? Math.max(maxTokens, 16000) : maxTokens;
+  const body = (model, noThinking = viaKie) => ({
+    model, max_tokens: tokens, system,
     ...(/^claude-(sonnet-5|opus-5)/.test(model) ? (noThinking ? {} : { thinking: { type: 'disabled' } }) : { temperature: 0.2 }),
     messages: [{ role: 'user', content }],
   });
@@ -175,6 +180,7 @@ async function callWriter({ system, content, key, kieKey = '', maxTokens = 8000,
     console.warn(`[clone-v2] writer ${WRITER_MODEL}${viaKie ? ' (Kie)' : ''} → ${r.status} ${JSON.stringify(r.data).slice(0, 200)} — falling back to ${FALLBACK_MODEL}`);
     r = await send(FALLBACK_MODEL);
     model = FALLBACK_MODEL;
+    if (r.status !== 200) console.warn(`[clone-v2] writer ${FALLBACK_MODEL}${viaKie ? ' (Kie)' : ''} → ${r.status} ${JSON.stringify(r.data).slice(0, 200)}`);
   }
   if (r.status !== 200) throw Object.assign(new Error(viaKie ? 'Kie.ai\'s AI is busy right now — try again in a minute.' : `writer ${r.status}: ${JSON.stringify(r.data).slice(0, 200)}`), { detail: JSON.stringify(r.data).slice(0, 200) });
   const text = (r.data.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
