@@ -55,6 +55,7 @@ const t = async (n, fn) => { try { calls.length = 0; await fn(); pass++; console
   await t('an outfit pick as Gemini writes it (string index, 0-1 box) is understood', () => {
     assert.deepStrictEqual(v2.normPick({ index: '3', box: [0.2, 0.15, 0.8, 0.95] }), { index: 3, box: [20, 15, 80, 95] });
     assert.deepStrictEqual(v2.normPick({ index: 1, box: [20, 15, 80, 95] }), { index: 1, box: [20, 15, 80, 95] });
+    assert.deepStrictEqual(v2.normPick({ index: 0, box: [200, 150, 800, 950] }), { index: 0, box: [20, 15, 80, 95] }, 'Gemini 0-1000 boxes');
     assert.strictEqual(v2.normPick({ index: 'x', box: [1, 2, 3, 4] }), null); assert.strictEqual(v2.normPick(null), null);
   });
   await t('the handler: Gemini spec + hook pass on Kie, the owner\'s single Claude call unchanged; outfit pick on Gemini for students', () => {
@@ -62,8 +63,8 @@ const t = async (n, fn) => { try { calls.length = 0; await fn(); pass++; console
     assert.ok(/if \(kieKey\) \{[\s\S]{0,400}w = await callGeminiKie\(\{ system, content, kieKey, deadline \}\);/.test(src));
     assert.ok(/refineHookViaKieClaude\(\{ system, facts, sheets: sh, hookFrames: hook, spec, kieKey, deadline, hookSecs, duration \}\)/.test(src));
     assert.ok(/w = await callWriter\(\{ system, content, key, kieKey, deadline \}\); mark\('writer'\);/.test(src), 'owner path changed');
-    assert.ok(/let w = kieKey \? await callGeminiKie\(\{ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline \}\)/.test(src));
-    assert.ok(/if \(kieKey && !usable\(pick\)\)[\s\S]{0,300}callWriter\(\{ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 600, deadline \}\)/.test(src), 'no Claude fallback for an unusable Gemini pick');
+    assert.ok(/let w = kieKey \? await callWriter\(\{ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 600, deadline \}\)/.test(src), 'students: Claude on Kie first');
+    assert.ok(/if \(kieKey && !usable\(pick\)\)[\s\S]{0,300}callGeminiKie\(\{ system: OUTFIT_PICK_SYSTEM, content, kieKey, maxTokens: 3000, deadline \}\)/.test(src), 'no Gemini fallback');
   });
   console.log(`\nv2-kie-gemini: ${pass} pass, ${fail} fail`);
   process.exit(fail ? 1 : 0);
