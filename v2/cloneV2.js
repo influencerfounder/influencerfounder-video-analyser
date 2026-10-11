@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-0.8.1';
+const V2_VERSION = 'v2-0.8.2';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -150,12 +150,11 @@ async function callWriter({ system, content, key, kieKey = '', maxTokens = 8000,
     return Math.min(240000, left);
   };
   const viaKie = !!kieKey;
-  // On Kie the `thinking` field is NEVER sent (2026-10-11): the live student run with thinking:{disabled}
-  // got 500 "Server exception" from Kie on both models, and every Kie path that works in production (classic
-  // /api/clone, the Scorecard, test A) sends none. Sonnet 5 then thinks adaptively, so the budget is raised
-  // to make room for that thinking; output is billed by what is used, to the student.
-  const tokens = viaKie ? Math.max(maxTokens, 16000) : maxTokens;
-  const body = (model, noThinking = viaKie) => ({
+  // thinking:{disabled} IS sent to Kie (2026-10-11): the classic /api/clone Kie path sends it in production. A
+  // first guess that it caused Kie's 500 "Server exception" was disproven — the re-run without it got the same
+  // 500 — so it stays off, which also keeps the answer short.
+  const tokens = maxTokens;
+  const body = (model, noThinking = false) => ({
     model, max_tokens: tokens, system,
     ...(/^claude-(sonnet-5|opus-5)/.test(model) ? (noThinking ? {} : { thinking: { type: 'disabled' } }) : { temperature: 0.2 }),
     messages: [{ role: 'user', content }],

@@ -36,18 +36,15 @@ const t = async (n, fn) => { try { calls.length = 0; await fn(); pass++; console
     calls.length = 0; replies = [{ status: 200, data: { code: 402, msg: 'Credits insufficient' } }];
     await assert.rejects(v2.callWriter({ system: 's', content: [], kieKey: 'k' }), (e) => e.code === 'kie_balance'); assert.strictEqual(calls.length, 1);
   });
-  await t('on Kie the thinking field is never sent, and the budget makes room for adaptive thinking', async () => {
+  await t('thinking stays off on Kie too, as the classic Kie path sends it', async () => {
     replies = [OK];
-    await v2.callWriter({ system: 's', content: [], kieKey: 'k', maxTokens: 600 });
-    assert.ok(!('thinking' in calls[0].body), 'thinking was sent to Kie'); assert.ok(calls[0].body.max_tokens >= 16000);
-    calls.length = 0; replies = [OK];
-    await v2.callWriter({ system: 's', content: [], key: 'sk' });
-    assert.deepStrictEqual(calls[0].body.thinking, { type: 'disabled' }, 'the owner path keeps thinking off');
+    await v2.callWriter({ system: 's', content: [], kieKey: 'k' });
+    assert.deepStrictEqual(calls[0].body.thinking, { type: 'disabled' });
   });
   await t('a relay that refuses `thinking` gets one retry without it', async () => {
-    replies = [(body) => (body.thinking ? { status: 400, data: { error: { message: 'Unknown field: thinking' } } } : OK)];
+    replies = [{ status: 400, data: { error: { message: 'Unknown field: thinking' } } }, (body) => (body.thinking ? { status: 400, data: {} } : OK)];
     const w = await v2.callWriter({ system: 's', content: [], kieKey: 'k' });
-    assert.strictEqual(calls.length, 1, 'no thinking field is sent, so there is nothing to retry'); assert.strictEqual(w.text, '{"ok":1}');
+    assert.strictEqual(calls.length, 2); assert.ok(!('thinking' in calls[1].body)); assert.strictEqual(w.text, '{"ok":1}');
   });
   await t('the analysis route takes the key from the request and only falls back to the owner key without one', () => {
     const src = require('fs').readFileSync(process.argv[2] ? path.resolve(process.argv[2]) : path.join(__dirname, '..', 'v2/cloneV2.js'), 'utf8');
