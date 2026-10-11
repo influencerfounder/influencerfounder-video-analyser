@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-1.1.0';
+const V2_VERSION = 'v2-1.1.1';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -275,19 +275,29 @@ async function secondOpinionMerge({ spec, log, sheets, hookFrames, key, deadline
   if ((hookFrames || []).length) { content.push({ type: 'text', text: `DENSE HOOK FRAMES at ${hookFrames.map((h) => h.t).join(', ')} s:` }); hookFrames.slice(0, 8).forEach((h) => content.push(img(h.b))); }
   content.push({ type: 'text', text: 'Judge now. Return only JSON.' });
   let w;
-  try { w = await callWriter({ system: JUDGE_SYSTEM, content, key, deadline, maxTokens: 1500 }); }
+  // The judge must finish 60 s before the run's deadline, so the outfit pick that follows keeps its time.
+  try { w = await callWriter({ system: JUDGE_SYSTEM, content, key, deadline: deadline - 60000, maxTokens: 1500 }); }
   catch (e) { return { spec: null, added: [], error: String(e.message || e).slice(0, 160) }; }
   const j = parseSpec(w.text);
   if (!j || !Array.isArray(j.shots)) return { spec: null, added: [], error: 'the judge returned no JSON', w };
-  // Apply: a changed shot must KEEP every original action (additions only) and grow by at most the remaining budget.
+  // Apply, guarded IN CODE (reviewer 2026-10-11): the original actions must stay in their ORIGINAL ORDER and
+  // COUNT (additions are only slotted between them — a reorder would move the hook's timing); an addition may not
+  // repeat itself or an original, name another person (P1… or a cast label) or be longer than a short action;
+  // never on a shot where MAIN is not visible; at most SECOND_OPINION_MAX per video.
+  const norm = (x) => String(x).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const castWords = (Array.isArray(spec.cast) ? spec.cast : []).map((c) => norm(c && c.label)).filter((x) => x.length > 3);
+  const otherPerson = (e) => /\bP\d+\b/.test(e) || castWords.some((c) => norm(e).includes(c));
   let budget = SECOND_OPINION_MAX; const added = []; const out = shots.map((x) => ({ ...x }));
   for (const cs of j.shots) {
     const i = out.findIndex((x) => Math.abs(Number(x.start) - Number(cs && cs.start)) < 0.05);
-    if (i < 0 || !Array.isArray(cs.main_events)) continue;
+    if (i < 0 || !Array.isArray(cs.main_events) || out[i].main_visible === false) continue;
     const before = (out[i].main_events || []).map(String), after = cs.main_events.map(String);
-    const keepsAll = before.every((e) => after.includes(e));
-    const fresh = after.filter((e) => !before.includes(e));
-    if (!keepsAll || !fresh.length || fresh.length > budget) continue;
+    let p = 0; const fresh = [];
+    for (const e of after) { if (p < before.length && e === before[p]) p++; else fresh.push(e); }
+    if (p !== before.length || !fresh.length || fresh.length > budget) continue;   // order/count kept, something new
+    const seen = new Set(before.map(norm));
+    const bad = fresh.some((e) => { const n = norm(e); const dup = !n || seen.has(n); seen.add(n); return dup || e.length > 120 || otherPerson(e); });
+    if (bad) continue;
     out[i].main_events = after; budget -= fresh.length;
     fresh.forEach((e) => added.push({ start: Number(out[i].start), event: e }));
   }
@@ -551,11 +561,13 @@ function mount(app, deps) {
 
       let secondOpinion = null;
       if (secondP) {
-        const g = await secondP;
+        // Never wait for Gemini past 90 s before the deadline (the outfit pick still has to run).
+        const g = await Promise.race([secondP, new Promise((r) => setTimeout(() => r({ ok: false, error: 'Gemini took too long' }), Math.max(0, deadline - 90000 - Date.now())))]);
         if (g && g.ok) {
           const m = await secondOpinionMerge({ spec, log: g.log, sheets: sh, hookFrames: hook, key, deadline });
-          if (m.spec && !validateSpec(m.spec).length) spec = m.spec;
-          secondOpinion = { model: g.model, geminiSecs: g.secs, added: m.spec ? m.added : [], error: m.error || null };
+          const applied = !!(m.spec && !validateSpec(m.spec).length);
+          if (applied) spec = m.spec;
+          secondOpinion = { model: g.model, geminiSecs: g.secs, added: applied ? m.added : [], error: m.error || null };
         } else secondOpinion = { model: null, added: [], error: (g && g.error) || 'Gemini did not answer' };
         console.log(`[clone-v2] second opinion: ${secondOpinion.added.length} added${secondOpinion.error ? ' (' + secondOpinion.error + ')' : ''}`);
         mark('second');

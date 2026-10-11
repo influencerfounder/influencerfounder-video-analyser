@@ -28,6 +28,15 @@ const t = async (n, fn) => { try { await fn(); pass++; console.log('  ok  ' + n)
     const r = await run({ shots: [{ start: 0, main_events: ['walks', 'waves'] }] });
     assert.strictEqual(r.spec, null); assert.deepStrictEqual(r.added, []);
   });
+  await t('the judge cannot reorder or double the original actions (the hook\'s timing)', async () => {
+    assert.strictEqual((await run({ shots: [{ start: 0, main_events: ['covers the mouth', 'walks toward the camera', 'waves'] }] })).spec, null, 'reordered');
+    assert.strictEqual((await run({ shots: [{ start: 0, main_events: ['walks toward the camera', 'walks toward the camera', 'covers the mouth', 'waves'] }] })).spec, null, 'original doubled');
+    assert.strictEqual((await run({ shots: [{ start: 0, main_events: ['walks toward the camera', 'covers the mouth', 'waves', 'waves'] }] })).spec, null, 'addition doubled');
+    assert.strictEqual((await run({ shots: [{ start: 0, main_events: ['walks toward the camera', 'Covers the mouth!', 'covers the mouth'] }] })).spec, null, 'an original re-added in other casing');
+  });
+  await t('an addition about another person is refused', async () => {
+    assert.strictEqual((await run({ shots: [{ start: 0, main_events: ['walks toward the camera', 'covers the mouth', 'P1 opens the door behind MAIN'] }] })).spec, null);
+  });
   await t('never more than 4 additions per video', async () => {
     const many = ['a', 'b', 'c', 'd', 'e'].map((x) => 'extra ' + x);
     const r = await run({ shots: [{ start: 0, main_events: ['walks toward the camera', 'covers the mouth', ...many] }] });
