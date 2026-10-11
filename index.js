@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.76.1';
+const ANALYSER_VERSION = '2.77.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -2161,7 +2161,24 @@ app.post('/api/temp-video', async (req, res) => {
 
     if (isInstagram) {
       console.log(`[tempvid:${token}] downloading via Apify: ${videoUrl.slice(0, 60)}`);
-      await downloadInstagramViaApify(videoUrl, outputPath);
+      const igDl = await downloadInstagramViaApify(videoUrl, outputPath);
+      // A licensed-music reel: the high-quality rendition has NO audio stream (measured 2026-09-13,
+      // see downloadInstagramViaApify) and the sound sits in the other rendition. /api/clone already
+      // uses that file as its audio source; this route used to ignore it, so a saved reel's kept copy
+      // (savedLinkMedia.js, 2026-10-11) played silent and its script came back empty. Mux it in with
+      // `-c copy` — both streams untouched, nothing re-encoded.
+      if (igDl && igDl.audioPath) {
+        const muxed = outputPath + '.mux.mp4';
+        try {
+          await new Promise((resolve, reject) => {
+            ffmpeg(outputPath).input(igDl.audioPath)
+              .outputOptions(['-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', '-shortest', '-movflags', '+faststart'])
+              .output(muxed).on('end', resolve).on('error', reject).run();
+          });
+          if (fs.existsSync(muxed) && fs.statSync(muxed).size > 1000) { fs.renameSync(muxed, outputPath); console.log(`[tempvid:${token}] audio muxed in from the other rendition`); }
+        } catch (e) { console.warn(`[tempvid:${token}] audio mux failed, keeping the silent file: ${e.message}`); }
+        finally { try { fs.unlinkSync(igDl.audioPath); } catch (_) {} try { fs.unlinkSync(muxed); } catch (_) {} }
+      }
     } else {
       const { execFile } = require('child_process');
       const { promisify } = require('util');
