@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-1.1.3';
+const V2_VERSION = 'v2-1.1.4';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -570,7 +570,9 @@ function mount(app, deps) {
           if (applied) spec = m.spec;
           secondOpinion = { model: g.model, geminiSecs: g.secs, added: applied ? m.added : [], error: m.error || null };
         } else secondOpinion = { model: null, added: [], error: (g && g.error) || 'Gemini did not answer' };
-        console.log(`[clone-v2] second opinion: ${secondOpinion.added.length} added${secondOpinion.error ? ' (' + secondOpinion.error + ')' : ''}`);
+        // WHAT it added, not only how many (Mike, 2026-10-12: is the second opinion improving the workflow? — judge
+        // the additions over the next ~10 remakes). One line per addition: the shot start and the added moment.
+        console.log(`[clone-v2] second opinion: ${secondOpinion.added.length} added${secondOpinion.error ? ' (' + secondOpinion.error + ')' : ''}${secondOpinion.added.length ? ' — ' + secondOpinion.added.map((a) => `[${a.start}s] ${String(a.event || '').replace(/\s+/g, ' ').slice(0, 160)}`).join(' | ') : ''}`);
         mark('second');
       }
 
