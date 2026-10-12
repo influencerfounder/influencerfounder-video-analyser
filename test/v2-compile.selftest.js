@@ -62,6 +62,10 @@ t('outfitOnce: one outfit sentence with front AND back, "same outfit … every s
   assert.ok(/Kryfex wears a black crew-neck T-shirt \(front: .*; back: .*INK ADDICT.*\), black slim joggers/.test(head), head);
   assert.ok(/the same outfit, fully dressed, in every shot/.test(head));
 });
+t('identity refs (a tattooed influencer\'s own masters) are bound by name (2026-10-12)', () => {
+  const r = compile(LOBBY, { ...base, model: 'wan', refs: [{ kind: 'first_frame' }, { kind: 'identity' }, { kind: 'identity' }] });
+  assert.ok(/Image 2 shows Kryfex — the face, hair, body and every tattoo; Image 3 shows Kryfex — the face, hair, body and every tattoo/.test(r.prompt), r.prompt.slice(0, 900));
+});
 t('bareTop: a shirtless source is said as shirtless, never "fully dressed" (2026-10-12)', () => {
   const SHIRTLESS = { ...LOBBY, outfit: { top_name: 'no top worn, shirtless', top_front: 'not shown, bare chest', top_back: 'not shown, bare back', bottom: 'black athletic shorts', shoes: 'black sneakers', accessories: 'black duffel bag carried with shoulder strap', bare_skin: ['arms', 'shoulders', 'chest', 'belly', 'back', 'legs'] } };
   const head = compile(SHIRTLESS, { ...base, model: 'wan' }).prompt.split('\n\n')[0];

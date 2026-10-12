@@ -195,6 +195,8 @@ function compile(spec, opts = {}) {
   const bind = refs.map((r, i) => {
     const t = tag(i + 1);
     if (r.kind === 'face') return `${t} shows ${name}'s face`;
+    // 2026-10-12: a tattooed influencer's own master photos (the Classic recreate's video references).
+    if (r.kind === 'identity') return `${t} shows ${name} — the face, hair, body and every tattoo`;
     if (r.kind === 'outfit_front') return `${t} shows the outfit from the front`;
     if (r.kind === 'outfit_back') return `${t} shows the outfit from the back`;
     if (r.kind === 'first_frame') return `${t} is the opening frame — the video starts exactly as this image`;
