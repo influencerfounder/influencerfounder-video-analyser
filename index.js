@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.82.0';
+const ANALYSER_VERSION = '2.82.1';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -3036,7 +3036,8 @@ function adAssembleFilter({ W, H, dur, caps, capFiles, fontPath, hasLogo, logoPo
   }
   const lw = Math.round(W * 0.2), pad = Math.round(W * 0.05);
   if (hasLogo) {
-    parts.push(`[1:v]scale=${lw}:-1,format=rgba,split=2[lg1][lg2]`);
+    // Two copies only when the end card uses the second — an unconnected split output fails the whole graph (reviewer 2026-10-12).
+    parts.push(end ? `[1:v]scale=${lw}:-1,format=rgba,split=2[lg1][lg2]` : `[1:v]scale=${lw}:-1,format=rgba[lg1]`);
     const x = /l$/.test(logoPos) ? `${pad}` : `W-w-${pad}`, y = /^b/.test(logoPos) ? `H-h-${pad}` : `${pad}`;
     parts.push(`[${cur}][lg1]overlay=x=${x}:y=${y}[vl]`); cur = 'vl';
   }
