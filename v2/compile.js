@@ -175,8 +175,19 @@ function compile(spec, opts = {}) {
   const top = known(outfit.top_name);
   const sides = [known(outfit.top_front) && `front: ${clean(outfit.top_front)}`, known(outfit.top_back) && `back: ${clean(outfit.top_back)}`].filter(Boolean);
   const rest = [known(stripIdentity(outfit.bottom)), known(stripIdentity(outfit.shoes)), known(stripIdentity(outfit.accessories))].filter(Boolean);
-  if (top || rest.length) {
-    parts.push(sentence(`${name} wears ${top || 'the outfit'}${sides.length ? ` (${sides.join('; ')})` : ''}${rest.length ? `, ${rest.join(', ')}` : ''} — the same outfit, fully dressed, in every shot`));
+  // RULE bareTop (2026-10-12): a SHIRTLESS source was compiled as "Kryfex wears no top worn, shirtless (front: not
+  // shown, bare chest …) — the same outfit, fully dressed, in every shot": the prompt contradicted itself on every
+  // bare-torso video. A shirtless outfit is said as such; any other outfit that leaves torso or legs bare drops
+  // "fully dressed" (it still says "same outfit in every shot").
+  const skin = Array.isArray(outfit.bare_skin) ? outfit.bare_skin.map(x => String(x).toLowerCase()) : [];
+  const BARE_TOP = /\b(shirtless|topless|no top|bare[- ]chest(ed)?|bare[- ]torso)\b/i;
+  const bareTop = BARE_TOP.test(`${outfit.top_name || ''} ${outfit.top_front || ''}`) || (!top && skin.some(x => x === 'chest' || x === 'belly'));
+  const bareSome = bareTop || skin.some(x => ['shoulders', 'chest', 'belly', 'back', 'legs', 'feet'].includes(x));
+  if (bareTop) {
+    parts.push(sentence(`${name} is shirtless${rest.length ? `, wearing ${rest.join(', ')}` : ''} — the same in every shot, the bare chest, belly and back showing ${name}'s own skin from the reference images`));
+    log.push({ rule: 'bareTop' });
+  } else if (top || rest.length) {
+    parts.push(sentence(`${name} wears ${top || 'the outfit'}${sides.length ? ` (${sides.join('; ')})` : ''}${rest.length ? `, ${rest.join(', ')}` : ''} — the same outfit${bareSome ? '' : ', fully dressed,'} in every shot`));
   }
   // References — bindings come from the caller (phase 2+): Wan "Image N", Seedance "@Image N".
   const tag = (n) => (model === 'seedance' ? `@Image ${n}` : `Image ${n}`);

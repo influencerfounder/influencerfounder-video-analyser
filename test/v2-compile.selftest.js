@@ -62,6 +62,15 @@ t('outfitOnce: one outfit sentence with front AND back, "same outfit … every s
   assert.ok(/Kryfex wears a black crew-neck T-shirt \(front: .*; back: .*INK ADDICT.*\), black slim joggers/.test(head), head);
   assert.ok(/the same outfit, fully dressed, in every shot/.test(head));
 });
+t('bareTop: a shirtless source is said as shirtless, never "fully dressed" (2026-10-12)', () => {
+  const SHIRTLESS = { ...LOBBY, outfit: { top_name: 'no top worn, shirtless', top_front: 'not shown, bare chest', top_back: 'not shown, bare back', bottom: 'black athletic shorts', shoes: 'black sneakers', accessories: 'black duffel bag carried with shoulder strap', bare_skin: ['arms', 'shoulders', 'chest', 'belly', 'back', 'legs'] } };
+  const head = compile(SHIRTLESS, { ...base, model: 'wan' }).prompt.split('\n\n')[0];
+  assert.ok(/Kryfex is shirtless, wearing black athletic shorts, black sneakers, black duffel bag carried with shoulder strap — the same in every shot/.test(head), head);
+  assert.ok(!/fully dressed/.test(head) && !/wears no top/.test(head), head);
+  const SHORTS = { ...LOBBY, outfit: { ...LOBBY.outfit, bare_skin: ['arms', 'legs'] } };
+  const h2 = compile(SHORTS, { ...base, model: 'wan' }).prompt.split('\n\n')[0];
+  assert.ok(/the same outfit in every shot/.test(h2) && !/fully dressed/.test(h2), 'bare legs: same outfit, not "fully dressed": ' + h2);
+});
 t('measuredCamera: the writer\'s "pans right" is flipped to the measured LEFT and logged', () => {
   const r = compile(LOBBY, { ...base, model: 'wan' });
   const l3 = r.prompt.split('\n').find(l => l.startsWith('Shot 3'));
