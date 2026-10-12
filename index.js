@@ -3017,6 +3017,100 @@ app.post('/api/audio-split', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────
+// AD ASSEMBLE (2026-10-12, Ad Spy → Video Ads, Phase 1) — the brand layer on a joined, silent ad:
+// timed captions (our own text per shot, never the reference's), the brand logo in a corner, an
+// optional end card (logo + headline + CTA on a brand colour) and an optional music track (looped,
+// faded out). One ffmpeg pass; drawtext needs the system ffmpeg (libfreetype). Captions go through
+// textfile= (no escaping failure mode) and wrapHookText (drawtext cannot wrap).
+// Body: { videoUrl, captions:[{start,end,text,position}], logoUrl?, logoPos?('tl'|'tr'|'bl'|'br'),
+//         endCard?:{seconds, headline, cta, color}, musicUrl?, musicVolume? }
+// ─────────────────────────────────────────
+function adAssembleFilter({ W, H, dur, caps, capFiles, fontPath, hasLogo, logoPos, end, endFiles }) {
+  const fs_ = Math.round(H * 0.034);
+  const parts = [`[0:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p[v0]`];
+  let cur = 'v0';
+  if (caps.length) {
+    const dt = caps.map((c, i) => drawtextCue({ file: capFiles[i], fontPath, fontSize: fs_, color: 'white', edge: 'outline', y: captionYExpr(c.position || 'upper'), start: c.start, end: c.end }));
+    parts.push(`[${cur}]${dt.join(',')}[vc]`); cur = 'vc';
+  }
+  const lw = Math.round(W * 0.2), pad = Math.round(W * 0.05);
+  if (hasLogo) {
+    parts.push(`[1:v]scale=${lw}:-1,format=rgba,split=2[lg1][lg2]`);
+    const x = /l$/.test(logoPos) ? `${pad}` : `W-w-${pad}`, y = /^b/.test(logoPos) ? `H-h-${pad}` : `${pad}`;
+    parts.push(`[${cur}][lg1]overlay=x=${x}:y=${y}[vl]`); cur = 'vl';
+  }
+  if (end) {
+    const ei = hasLogo ? 2 : 1;
+    let ec = `[${ei}:v]format=yuv420p[ec0]`; let e = 'ec0';
+    parts.push(ec);
+    if (hasLogo) {
+      parts.push(`[lg2]scale=${Math.round(W * 0.45)}:-1[lgb]`);
+      parts.push(`[${e}][lgb]overlay=x=(W-w)/2:y=H*0.30-h/2[ec1]`); e = 'ec1';
+    }
+    const dt = [];
+    if (endFiles.headline) dt.push(drawtextCue({ file: endFiles.headline, fontPath, fontSize: Math.round(H * 0.04), color: 'white', edge: 'none', y: 'h*0.50', start: 0, end: end.seconds + 1 }));
+    if (endFiles.cta) dt.push(drawtextCue({ file: endFiles.cta, fontPath, fontSize: Math.round(H * 0.03), color: '0xECC932', edge: 'none', y: 'h*0.64', start: 0, end: end.seconds + 1 }));
+    if (dt.length) { parts.push(`[${e}]${dt.join(',')}[ec2]`); e = 'ec2'; }
+    parts.push(`[${cur}][${e}]concat=n=2:v=1:a=0[vout]`); cur = 'vout';
+  }
+  return { filter: parts.join(';'), out: cur };
+}
+app.post('/api/ad-assemble', async (req, res) => {
+  const b = req.body || {};
+  if (typeof b.videoUrl !== 'string' || !/^https:\/\//.test(b.videoUrl)) return res.status(400).json({ success: false, error: 'videoUrl (https) required' });
+  const FF = SYSTEM_FFMPEG || process.env.FFMPEG_BIN;   // FFMPEG_BIN: local runs only
+  if (!FF) return res.status(500).json({ success: false, error: 'drawtext needs the system ffmpeg' });
+  const token = `ad_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'adasm-'));
+  const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+  try {
+    const dl = async (url, name, max) => { const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 90000, maxContentLength: max }); const f = path.join(tmp, name); fs.writeFileSync(f, Buffer.from(r.data)); return f; };
+    const vid = await dl(b.videoUrl, 'in.mp4', 400 * 1024 * 1024);
+    const { width, height } = await getVideoDimensions(vid);
+    const W = Math.round(width / 2) * 2, H = Math.round(height / 2) * 2;
+    const dur = await probeDuration(vid);
+    const fontPath = captionFontPath('strong');
+    const maxChars = Math.max(10, Math.floor((W * 0.86) / (H * 0.034 * 0.62)));
+    const caps = (Array.isArray(b.captions) ? b.captions : []).slice(0, 40)
+      .map((c) => ({ text: String(c.text || '').trim().slice(0, 160), start: Number(c.start), end: Number(c.end), position: ['upper', 'middle', 'lower', 'bottom'].includes(c.position) ? c.position : 'upper' }))
+      .filter((c) => c.text && Number.isFinite(c.start) && Number.isFinite(c.end) && c.end > c.start);
+    const capFiles = caps.map((c, i) => { const f = path.join(tmp, `c${i}.txt`); fs.writeFileSync(f, wrapHookText(c.text, maxChars), 'utf8'); return f; });
+    const logo = typeof b.logoUrl === 'string' && /^https:\/\//.test(b.logoUrl) ? await dl(b.logoUrl, 'logo.img', 20 * 1024 * 1024) : null;
+    const ec = b.endCard && Number(b.endCard.seconds) > 0 ? { seconds: Math.min(5, Math.max(1, Number(b.endCard.seconds))), headline: String(b.endCard.headline || '').slice(0, 80), cta: String(b.endCard.cta || '').slice(0, 40), color: /^#?[0-9a-f]{6}$/i.test(b.endCard.color || '') ? String(b.endCard.color).replace('#', '') : '000000' } : null;
+    const endFiles = {};
+    if (ec && ec.headline) { endFiles.headline = path.join(tmp, 'eh.txt'); fs.writeFileSync(endFiles.headline, wrapHookText(ec.headline, maxChars), 'utf8'); }
+    if (ec && ec.cta) { endFiles.cta = path.join(tmp, 'ecta.txt'); fs.writeFileSync(endFiles.cta, ec.cta, 'utf8'); }
+    const music = typeof b.musicUrl === 'string' && /^https:\/\//.test(b.musicUrl) ? await dl(b.musicUrl, 'music.bin', 60 * 1024 * 1024) : null;
+    const total = dur + (ec ? ec.seconds : 0);
+    const { filter, out } = adAssembleFilter({ W, H, dur, caps, capFiles, fontPath, hasLogo: !!logo, logoPos: ['tl', 'tr', 'bl', 'br'].includes(b.logoPos) ? b.logoPos : 'tr', end: ec, endFiles });
+    const args = ['-hide_banner', '-loglevel', 'error', '-y', '-i', vid];
+    if (logo) args.push('-i', logo);
+    if (ec) args.push('-f', 'lavfi', '-i', `color=c=0x${ec.color}:s=${W}x${H}:r=24:d=${ec.seconds}`);
+    const vol = Math.max(0, Math.min(1, Number(b.musicVolume) || 0.8));
+    let fc = filter;
+    if (music) {
+      const mi = 1 + (logo ? 1 : 0) + (ec ? 1 : 0);
+      args.push('-stream_loop', '-1', '-i', music);
+      const fadeAt = Math.max(0, total - 1.5);
+      fc += `;[${mi}:a]atrim=0:${total.toFixed(3)},asetpts=PTS-STARTPTS,volume=${vol},afade=t=in:st=0:d=0.3,afade=t=out:st=${fadeAt.toFixed(3)}:d=1.5[aout]`;
+    }
+    args.push('-filter_complex', fc, '-map', `[${out}]`);
+    if (music) args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '192k');
+    args.push('-t', total.toFixed(3), '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-threads', '2', outputPath);
+    const { execFile } = require('child_process');
+    await new Promise((resolve, reject) => execFile(FF, args, { timeout: 280000, maxBuffer: 8 * 1024 * 1024 }, (err, so, se) => err ? reject(new Error(String(se || err.message).slice(-600))) : resolve()));
+    tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
+    console.log(`[ad-assemble:${token}] ${W}x${H} ${total.toFixed(1)}s caps=${caps.length} logo=${!!logo} end=${!!ec} music=${!!music}`);
+    res.json({ success: true, videoUrl: `${req.protocol}://${req.get('host')}/api/temp-video/${token}`, token, width: W, height: H, seconds: Number(total.toFixed(2)), captions: caps.length });
+  } catch (err) {
+    console.error(`[ad-assemble:${token}] error:`, err.message);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
 app.post('/api/stitch', async (req, res) => {
   const { videoUrls, width, height } = req.body;
   // 2026-09-15 (long-form talking head): `trimTo[i]` cuts clip i to that many seconds before
