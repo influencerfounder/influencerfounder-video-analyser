@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.80.2';
+const ANALYSER_VERSION = '2.81.0';
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -3030,7 +3030,10 @@ app.post('/api/stitch', async (req, res) => {
   if (!Array.isArray(videoUrls) || videoUrls.length < 2) {
     return res.status(400).json({ success: false, error: 'Need at least 2 video URLs to stitch' });
   }
-  const urls = videoUrls.filter(u => typeof u === 'string' && u.trim()).slice(0, 6); // cap at 6 (~90s)
+  // Cap 6 (~90s) by default; the Ad Spy Video Ads remake (2026-10-12) sends one clip per shot of the
+  // reference ad and asks for up to 16 with `maxClips` — clips are processed one at a time, so RAM stays flat.
+  const clipCap = Math.min(16, Math.max(6, Number(req.body.maxClips) || 6));
+  const urls = videoUrls.filter(u => typeof u === 'string' && u.trim()).slice(0, clipCap);
   if (urls.length < 2) return res.status(400).json({ success: false, error: 'Need at least 2 valid video URLs' });
 
   // Output canvas. Defaults to 1080x1920 — Sequence Clips' original hardcoded
@@ -4358,7 +4361,9 @@ app.post('/api/extract-frames', async (req, res) => {
         await new Promise((resolve, reject) => {
           ffmpeg(inputPath)
             .seekInput(stamps[i].toFixed(3))
-            .outputOptions(['-frames:v', '1', '-vf', 'scale=512:-2', '-q:v', '4'])
+            // `full`: the untouched frame size at near-lossless JPEG — the Ad Spy Video Ads remake edits
+            // these frames into keyframes, so a 512 px copy would degrade the reference (2026-10-12).
+            .outputOptions(req.body?.full ? ['-frames:v', '1', '-q:v', '2'] : ['-frames:v', '1', '-vf', 'scale=512:-2', '-q:v', '4'])
             .output(outPath)
             .on('end', resolve)
             .on('error', reject)
