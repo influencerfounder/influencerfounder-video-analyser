@@ -190,6 +190,13 @@ t('writer system carries every WRITER_RULE and the persona pronouns', () => {
   assert.ok(/they\/them/.test(writerSystem({ personaGender: null })), 'unknown gender → they/them, never a default');
   assert.ok(Object.keys(WRITER_RULES).length >= 7);
   assert.ok(/"bare_skin":\[\]/.test(writerSystem({})) && /a tank top = \["arms","shoulders"\]/.test(writerSystem({})), 'bare_skin is asked for, with the tank-top example');
+  // 🎯 2026-10-13: Dorzy was swapped onto the foreground man; MAIN was the tiny grandmother at the back.
+  const ws = writerSystem({});
+  assert.ok(/"opening":\{"main_in_first_frame":"clear\|small\|absent","main_where":""\}/.test(ws), 'the spec asks where MAIN is in the first frame');
+  assert.ok(/Decide who MAIN is from the WHOLE video first: the person filling the opening is often a bystander\./.test(ws), 'MAIN is decided from the whole video, not the opening');
+  assert.ok(WRITER_RULES.openingWhere, 'recorded in the rules list');
+  const parsed = parseSpec(JSON.stringify({ outfit: {}, opening: { main_in_first_frame: 'small', main_where: 'seated at a table at the back' }, shots: [{ start: 0, main_events: [] }] }));
+  assert.strictEqual(parsed.opening.main_where, 'seated at a table at the back', 'the field survives parsing');
 });
 t('parseSpec survives code fences; validateSpec catches a missing shot list', () => {
   assert.deepStrictEqual(parseSpec('```json\n{"a":1}\n```'), { a: 1 });
