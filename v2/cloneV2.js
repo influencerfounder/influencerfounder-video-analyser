@@ -14,7 +14,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-1.2.0';
+const V2_VERSION = 'v2-1.3.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -438,7 +438,8 @@ function mount(app, deps) {
       const refs = (Array.isArray(b.refs) ? b.refs : []).filter(r => r && typeof r.kind === 'string').slice(0, 30);
       const out = compile(b.spec, { name: String(b.name || '').slice(0, 40), gender: ['male', 'female'].includes(b.gender) ? b.gender : null,
         model: b.model === 'seedance' ? 'seedance' : 'wan', cuts: Array.isArray(b.cuts) ? b.cuts.map(Number).filter(Number.isFinite) : [],
-        camera: Array.isArray(b.camera) ? b.camera : null, durationSec: Number(b.durationSec) || 0, refs });
+        camera: Array.isArray(b.camera) ? b.camera : null, durationSec: Number(b.durationSec) || 0, refs,
+        unfocus: b.unfocus === true, focus: Array.isArray(b.focus) ? b.focus.slice(0, 10) : [] });
       res.json({ success: true, version: V2_VERSION, ...out });
     } catch (e) { res.status(500).json({ success: false, error: String(e.message || e).slice(0, 200) }); }
   });
@@ -480,6 +481,10 @@ function mount(app, deps) {
       // 2. MEASURE.
       const { cuts, falseCuts, motionCuts } = await measureCuts(ffmpegBin, video, duration, (ts) => py(PY, path.join(__dirname, 'cutflow.py'), [video, ts.join(',')], 60000)); mark('cuts');
       const camera = await py(PY, path.join(__dirname, 'cameramotion.py'), [video, cuts.join(',')], 120000); mark('camera');
+      // 🔍 where the source's autofocus loses and finds focus — used only by the Real Unfocus Look switch.
+      // Only when the Real Unfocus Look switch is on (owner test) — a measurement nothing else reads costs every
+      // other analysis time inside the 270 s budget (reviewer, 2026-10-13).
+      const focusM = req.body && req.body.unfocus === true ? await py(PY, path.join(__dirname, '..', 'focusshift.py'), [video, cuts.join(',')], 60000) : null; mark('focus');
       const hookSecs = Math.min(1.5, cuts.length ? cuts[0] : 1.5);
       const hookMotion = await py(PY, hookMotionScript, [video, String(hookSecs)], 45000); mark('hookmotion');
       const beats = await measureBeats(ffmpegBin, video, detectBeats, cuts).catch(() => null); mark('beats');
@@ -608,7 +613,7 @@ function mount(app, deps) {
       const thumb = (buf) => 'data:image/jpeg;base64,' + buf.toString('base64');
       res.json({
         success: true, version: V2_VERSION, durationSec: Math.round(duration * 100) / 100,
-        measured: { cuts, falseCuts, motionCuts, camera: (camera && camera.segments) || null, hookMotion, beats },
+        measured: { cuts, falseCuts, motionCuts, camera: (camera && camera.segments) || null, hookMotion, beats, focus: (focusM && Array.isArray(focusM.events)) ? focusM.events : [] },
         spec, prompts: { wan, seedance },
         keyframes: shotKeys.map(k => ({ t: k.t, shot: k.shot, dataUrl: thumb(k.b) })),
         outfit, frame0,
@@ -632,7 +637,7 @@ function mount(app, deps) {
 // joins the run in progress, and a finished success is served for 3 minutes. Errors never cached.
 const V2_RECENT_TTL_MS = 180000;
 function v2JoinKey(b) {
-  return JSON.stringify([String(b.locationId || ''), String(b.videoUrl || ''), String(b.name || ''), b.personaGender || '']);
+  return JSON.stringify([String(b.locationId || ''), String(b.videoUrl || ''), String(b.name || ''), b.personaGender || '', b.unfocus === true]);   // unfocus: the focus dips are only measured when on
 }
 function joinIdentical(handler, runRecorded, { inflight = new Map(), recent = new Map(), now = () => Date.now() } = {}) {
   return async (req, res) => {

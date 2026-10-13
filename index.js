@@ -10,7 +10,8 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.83.0';
+const ANALYSER_VERSION = '2.84.0';
+const unfocusLib = require('./unfocus');
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -446,6 +447,8 @@ function cloneJoinKey(b) {
     String(b.locationId || ''), String(b.videoUrl || ''), b.mode || '', b.promptStyle || '', b.targetModel || '',
     String(b.improveBrief || ''), b.shotCuts === true, b.personaGender || '', b.bgBrief || '',
     b.hookReport || null, b.driverPriors || null,
+    // 🔍 Real Unfocus Look changes the returned prompt, so on and off must never share a cached answer (reviewer).
+    b.unfocus === true,
     // elementTypes changes the SYSTEM prompt, so a cached answer built without it is the wrong
     // answer — the 3-minute join/cache would otherwise serve a prompt that still names the breed.
     Array.isArray(b.elementTypes) ? b.elementTypes.slice().sort().join(',') : '',
@@ -519,6 +522,8 @@ const cloneHandler = async (req, res) => {
     // NOT to copy the source but to make a stronger version of it, optionally steered by improveBrief.
     // Realism is the default everywhere since 2026-09-09 (Mike) — a caller that sends nothing gets it.
     const promptStyle = ['original','realism','improve','hookfirst'].includes(req.body.promptStyle) ? req.body.promptStyle : 'realism';
+    // 🔍 Real Unfocus Look (2026-10-13) — the tool sends it only for the owner tier; see unfocus.js.
+    const unfocus = req.body.unfocus === true;
     // 🧪 FRAME MODE (owner test, 2026-10-04 — Mike: "is reading frames still the best option?").
     // 'grid' = the same 80 analysis frames as 11 contact sheets of up to 8, each preceded by the exact
     // second of every frame in it. Fits Kie's 20-image ceiling next to the 9 hook frames, and gives
@@ -699,6 +704,40 @@ const cloneHandler = async (req, res) => {
         console.warn('[clone] hook motion measure failed:', e.message);
         hookMotion = null;
       }
+    }
+
+    // 🔍 MEASURED FOCUS (Real Unfocus Look only) — focusshift.py: where the source's autofocus loses and finds
+    // focus. Fails open to [] (then one natural moment is written instead).
+    let focusEvents = [];
+    // The cuts, so a cut is never read as a focus dip and the hook ends at the first cut (reviewer, 2026-10-13:
+    // measuredCuts is only filled on hookfirst, and on a realism run two of seven 'dips' were cuts). The SAME
+    // scene detection as the hookfirst block above (threshold 0.2, cuts < 0.3 s apart merged) — that block is
+    // pinned by test/hook-first.selftest.js, so it is called again here rather than refactored.
+    let focusCuts = measuredCuts;
+    if (unfocus && mode !== 'bgswap' && !focusCuts) {
+      try {
+        const bin = SYSTEM_FFMPEG || process.env.FFMPEG_BIN || ffmpegStatic;
+        const out = await new Promise((resolve) => {
+          const pr = require('child_process').spawn(bin, ['-hide_banner', '-i', videoPath, '-an', '-vf', "select='gt(scene,0.2)',showinfo", '-f', 'null', '-']);
+          let err = '';
+          pr.stderr.on('data', (d) => { err += d.toString(); if (err.length > 2e6) err = err.slice(-1e6); });
+          pr.on('close', () => resolve(err)); pr.on('error', () => resolve(''));
+        });
+        const raw = [...out.matchAll(/pts_time:([0-9.]+)/g)].map(m => Number(m[1])).filter(t => t > 0.15 && t < duration - 0.15);
+        focusCuts = [];
+        for (const t of raw) if (!focusCuts.length || t - focusCuts[focusCuts.length - 1] >= 0.3) focusCuts.push(Math.round(t * 100) / 100);
+      } catch (_) { focusCuts = null; }
+    }
+    if (unfocus && mode !== 'bgswap') {
+      try {
+        const out = await new Promise((resolve) => {
+          require('child_process').execFile(PYTHON, [path.join(__dirname, 'focusshift.py'), videoPath, (focusCuts || []).join(',')], { timeout: 60000 },
+            (err, stdout) => resolve(err ? '' : String(stdout || '')));
+        });
+        const j = out ? JSON.parse(out.trim().split('\n').pop()) : null;
+        focusEvents = j && Array.isArray(j.events) ? j.events : [];
+        console.log(`[clone] unfocus measured focus: ${JSON.stringify(focusEvents)}`);
+      } catch (e) { console.warn('[clone] focus measure failed:', e.message); focusEvents = []; }
     }
 
     // 2b. Keep a short-lived PLAYABLE copy of the source video, so the Studio can
@@ -1898,6 +1937,12 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
     }
 
     const clonePrompt = (promptStyle === 'realism' || promptStyle === 'improve' || promptStyle === 'hookfirst') ? `${basePrompt} ${LANE_LAYERS[lane]}` : basePrompt;
+    // 🔍 Real Unfocus Look replaces the lane layer (the HIGH-END cinema layer included) with the old-phone layer
+    // and adds the timed autofocus moments — in every style, since the switch is an explicit per-remake choice.
+    const unfocusText = unfocus && mode !== 'bgswap'
+      ? `${unfocusLib.UNFOCUS_LAYER} ${unfocusLib.focusSentences(focusEvents, { hookEnd: (focusCuts && focusCuts.length) ? focusCuts[0] : 0, durationSec: duration, who: '[INFLUENCER]' })}`
+      : '';
+    const sentPrompt = unfocusText ? `${basePrompt} ${unfocusText}` : clonePrompt;
 
     res.json({
       success: true,
@@ -1920,6 +1965,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       influencerInOpening,
       hookGuard: hookGuard || undefined,
       hookMotion: hookMotion || undefined,
+      unfocus: unfocusText ? { events: focusEvents, cuts: focusCuts || [], layer: unfocusLib.UNFOCUS_LAYER } : undefined,
       lane,
       laneLayers: LANE_LAYERS,
       analyserVersion: ANALYSER_VERSION,
@@ -1935,7 +1981,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       elementTypes: (OWN_SUBJECT_RULE && !isBgSwap) ? elementTypes : [],
       viralReport,
       viralDrivers: VIRAL_DRIVERS,
-      clonePrompt,
+      clonePrompt: sentPrompt,   // 🔍 the Real Unfocus Look version when the switch is on
       ...(fallbackInfo ? { fallback: fallbackInfo } : {}),
     });
 
