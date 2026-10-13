@@ -32,7 +32,9 @@ function focusSentences(events, { hookEnd = 0, durationSec = 0, who = 'the main 
     out.push(`At ${r1(e.from)}s the phone's autofocus loses focus — the image goes ${deep ? 'very blurry' : 'soft'} — and finds it again by ${r1(e.to)}s.`);
   }
   if (!later.length) {
-    out.push(`Once, after the first two seconds, at a natural moment such as someone passing close to the lens or the phone moving closer, the autofocus briefly hunts: the image goes soft for about half a second, then snaps sharp again on ${who}.`);
+    // No examples of WHY it hunts: "or the phone moving closer" was acted out as a push-in the source does not
+    // have (Dorzy church take, 2026-10-13) — naming a cause draws the cause.
+    out.push(`Once, after the first two seconds, the autofocus briefly hunts: the image goes soft for about half a second, then snaps sharp again on ${who}. The framing does not change.`);
   }
   // "or the main object" was cut (reviewer): naming an object that may not exist invites the model to add one.
   out.push(`The opening stays sharp, and the focus never drops while ${who} is shown up close.`);

@@ -15,12 +15,12 @@ t('measured moments are used: soft start + the dips after the hook, timed', () =
   assert.ok(/starts slightly soft for the first moment/.test(s), s);
   assert.ok(/At 1\.5s the phone's autofocus loses focus — the image goes very blurry — and finds it again by 2\.1s\./.test(s), s);
   assert.ok(/At 4\.6s .* goes soft — and finds it again by 4\.8s\./.test(s), s);
-  assert.ok(!/natural moment/.test(s), 'no invented moment when measured ones exist');
+  assert.ok(!/briefly hunts/.test(s), 'no invented moment when measured ones exist');
 });
 t('the hook stays sharp: a dip inside the hook (other than a soft start) is never written', () => {
   const s = focusSentences([{ from: 0.6, to: 1.1, low: 0.2 }], { hookEnd: 1.4, durationSec: 7 });
   assert.ok(!/At 0\.6s/.test(s), s);
-  assert.ok(/natural moment/.test(s), 'falls back to one natural moment after the hook');
+  assert.ok(/after the first two seconds, the autofocus briefly hunts/.test(s), 'falls back to one moment after the hook');
   assert.ok(/The opening stays sharp/.test(s));
 });
 t('at most 2 moments, never on the subject up close', () => {
@@ -33,6 +33,7 @@ t('no measured moments → exactly one natural moment', () => {
   const s = focusSentences([], { who: '[INFLUENCER]' });
   assert.strictEqual((s.match(/autofocus/g) || []).length, 1, s);
   assert.ok(/snaps sharp again on \[INFLUENCER\]/.test(s));
+  assert.ok(!/moving closer|passing close/.test(s), 'no cause named: "the phone moving closer" was acted out as a push-in');
 });
 t('the old-phone layer drops the cinema look', () => {
   assert.ok(/older iPhone/.test(UNFOCUS_LAYER) && /no cinematic grade, no film grain, no vignette/.test(UNFOCUS_LAYER));
