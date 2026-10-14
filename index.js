@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.86.0';
+const ANALYSER_VERSION = '2.87.0';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const hookGuardLib = require('./hookGuard');
@@ -47,23 +47,61 @@ function hasAudioStream(filePath) {
   });
 }
 
-async function downloadInstagramViaApify(videoUrl, outputPath) {
-  const apifyKey = process.env.APIFY_API_KEY;
-  if (!apifyKey) throw new Error('APIFY_API_KEY not configured');
-
+// ⚡ FAST FIRST, RE-HOST ONLY WHEN NEEDED (Mike, 2026-10-14: "fix the slow Instagram downloads"). MEASURED that day
+// in the actor's own run logs: the scrape that returns Instagram's `videoUrl` is done in ~5 s, then
+// includeDownloadedVideo starts a SEPARATE re-host run that took 2–5 min (17:05:55 → 17:09:25 on Dbj44gso-VT; runs
+// of 43–610 s that afternoon) — for the lower-quality copy we only use as a fallback. Without the flag the whole
+// thing took 9–16 s + a 3–4 s CDN fetch (same 720x1280 h264 + AAC file). Railway logs over 15 deployments: of ~388
+// Instagram downloads, the direct fetch fell back 38 times (~10%) and 23 picked files had no audio (~6%) — so the
+// slow re-host scrape now runs ONLY for those, and the rest saves 2–5 minutes.
+async function apifyReelItem(videoUrl, apifyKey, withDownload) {
   let items;
   try {
     const resp = await axios.post(
       `https://api.apify.com/v2/actors/apify~instagram-reel-scraper/run-sync-get-dataset-items?token=${apifyKey}`,
-      { username: [videoUrl], resultsLimit: 1, includeDownloadedVideo: true },
-      { timeout: 280000 }
+      { username: [videoUrl], resultsLimit: 1, ...(withDownload ? { includeDownloadedVideo: true } : {}) },
+      { timeout: withDownload ? 280000 : 150000 }
     );
     items = resp.data;
   } catch (e) {
     throw new Error('Apify Instagram scrape failed: ' + (e.response?.data?.error?.message || e.message));
   }
+  return Array.isArray(items) ? items[0] : null;
+}
+async function fetchVideoBuf(u) {
+  const r = await axios.get(u, { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 200 * 1024 * 1024 });
+  return Buffer.from(r.data);
+}
+const cdnErr = (e) => `${e?.response?.status || e?.code || ''} ${String(e?.message || e).slice(0, 120)}`.trim();
 
-  const item = Array.isArray(items) ? items[0] : null;
+async function downloadInstagramViaApify(videoUrl, outputPath) {
+  const apifyKey = process.env.APIFY_API_KEY;
+  if (!apifyKey) throw new Error('APIFY_API_KEY not configured');
+  const t0 = Date.now();
+
+  // 1. FAST: metadata + Instagram's own file. Kept only when it downloads AND carries audio.
+  // A failed fast scrape (timeout, Apify 5xx) is not the end: the slow scrape below is the old path (reviewer).
+  const fast = await apifyReelItem(videoUrl, apifyKey, false).catch((e) => { console.warn(`[ig-download] fast scrape failed (${String(e.message).slice(0, 140)}) — trying the re-host scrape`); return null; });
+  if (fast?.videoUrl) {
+    try {
+      const buf = await fetchVideoBuf(fast.videoUrl);
+      fs.writeFileSync(outputPath, buf);
+      if (await hasAudioStream(outputPath)) {
+        console.log(`[ig-download] fast path ${Math.round((Date.now() - t0) / 100) / 10}s (${Math.round(buf.length / 1024)}KB)`);
+        const mi = fast.musicInfo || null;
+        return { audioPath: null, sourceAudio: mi ? { title: String(mi.song_name || ''), artist: String(mi.artist_name || ''), original: !!mi.uses_original_audio } : null };
+      }
+      console.warn('[ig-download] fast file has NO audio stream — running the re-host scrape for an audio source');
+    } catch (e) {
+      console.warn(`[ig-download] direct CDN fetch failed (${cdnErr(e)}) — running the re-host scrape`);
+    }
+    try { fs.unlinkSync(outputPath); } catch (_) {}
+  }
+
+  // 2. SLOW (the old single path, unchanged from here on): videoUrl first, Apify's re-hosted copy as the fallback.
+  // A deleted / private post (an error item, no videoUrl) is reported from the fast item — no slow run for it.
+  const item = (fast && !fast.videoUrl && (fast.error || fast.errorDescription)) ? fast : await apifyReelItem(videoUrl, apifyKey, true);
+  console.log(`[ig-download] re-host scrape done ${Math.round((Date.now() - t0) / 100) / 10}s after the start`);
   // ORDER MATTERS — MEASURED 2026-09-03 on the @charliewelham_ reel (DWQbxq4CV6_):
   //   videoUrl        = Instagram's own progressive file  → 720x1280 h264 @ 1033 kb/s
   //   downloadedVideo = Apify's re-hosted copy             → 540x960  VP9  @  226 kb/s
@@ -118,14 +156,9 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
   let videoBuf = null, lastErr = null, usedUrl = null;
   for (const u of candidates) {
     try {
-      const videoRes = await axios.get(u, {
-        responseType: 'arraybuffer',
-        timeout: 60000,
-        maxContentLength: 200 * 1024 * 1024,
-      });
-      videoBuf = Buffer.from(videoRes.data);
+      videoBuf = await fetchVideoBuf(u);
       usedUrl = u;
-      if (u !== candidates[0]) console.warn('[clone] direct CDN videoUrl failed, fell back to Apify downloadedVideo (lower quality)');
+      if (u !== candidates[0]) console.warn(`[clone] direct CDN videoUrl failed (${cdnErr(lastErr)}), fell back to Apify downloadedVideo (lower quality)`);
       break;
     } catch (e) { lastErr = e; }
   }
@@ -148,9 +181,8 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
       console.warn(`[clone] picked rendition has NO audio stream${alt ? ' — fetching the other candidate as an audio source' : ' and there is no other candidate'}`);
       if (alt) {
         try {
-          const altRes = await axios.get(alt, { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 200 * 1024 * 1024 });
           const altPath = outputPath + '.audiosrc';
-          fs.writeFileSync(altPath, Buffer.from(altRes.data));
+          fs.writeFileSync(altPath, await fetchVideoBuf(alt));
           if (await hasAudioStream(altPath)) {
             audioPath = altPath;
             console.log('[clone] audio recovered from the fallback rendition — frames still come from the high-quality one');
