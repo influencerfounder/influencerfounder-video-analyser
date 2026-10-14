@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.87.0';
+const ANALYSER_VERSION = '2.87.1';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const hookGuardLib = require('./hookGuard');
@@ -68,9 +68,20 @@ async function apifyReelItem(videoUrl, apifyKey, withDownload) {
   }
   return Array.isArray(items) ? items[0] : null;
 }
+// IPv4 FIRST (2026-10-14). On Railway the direct fetch failed with `ETIMEDOUT AggregateError` — Node's connect
+// error when every address of a host is abandoned, not an Instagram refusal. The URL sat on a far CDN edge
+// (instagram.frec35-1 = Recife, Brazil: Apify scrapes through a proxy there, so Instagram hands out that edge), and
+// Node 22 tries IPv6 and IPv4 with only 250 ms each (autoSelectFamily) — Railway has no public IPv6 and a
+// transatlantic connect can take longer, so neither attempt finished. With one IPv4 address there is no 250 ms
+// cap: the connect simply takes as long as it takes. If IPv4 fails, the old dual-stack fetch is tried once more.
 async function fetchVideoBuf(u) {
-  const r = await axios.get(u, { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 200 * 1024 * 1024 });
-  return Buffer.from(r.data);
+  const opts = { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 200 * 1024 * 1024 };
+  try {
+    return Buffer.from((await axios.get(u, { ...opts, family: 4 })).data);
+  } catch (e) {
+    if (e?.response) throw e;   // the server answered (403, 404…): another route will not change that
+    return Buffer.from((await axios.get(u, opts)).data);
+  }
 }
 const cdnErr = (e) => `${e?.response?.status || e?.code || ''} ${String(e?.message || e).slice(0, 120)}`.trim();
 

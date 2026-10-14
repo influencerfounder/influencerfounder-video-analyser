@@ -10,7 +10,7 @@ function harness({ fastItem, slowItem, cdn = {}, audio = {} }) {
   const posts = [], gets = [], files = {};
   const axios = {
     post: async (url, body) => { posts.push(body); if (!body.includeDownloadedVideo && fastItem === 'THROW') throw new Error('timeout of 150000ms exceeded'); return { data: [body.includeDownloadedVideo ? slowItem : fastItem] }; },
-    get: async (u) => { gets.push(u); if (cdn[u] === 'fail') { const e = new Error('Request failed with status code 403'); e.response = { status: 403 }; throw e; } return { data: Buffer.from('VID:' + u) }; },
+    get: async (u, o) => { gets.push(u); if (cdn[u] === 'v4fail' && o.family === 4) { const e = new Error('connect ETIMEDOUT'); e.code = 'ETIMEDOUT'; throw e; } if (cdn[u] === 'fail') { const e = new Error('Request failed with status code 403'); e.response = { status: 403 }; throw e; } return { data: Buffer.from('VID:' + u) }; },
   };
   const fsm = { writeFileSync: (p, buf) => { files[p] = String(buf); }, unlinkSync: (p) => { delete files[p]; } };
   const hasAudioStream = async (p) => { const c = files[p] || ''; return audio[c.replace('VID:', '')] !== false; };
@@ -49,6 +49,12 @@ const t = async (n, f) => { try { await f(); pass++; console.log('  ok  ' + n); 
   await t('a failed fast scrape falls through to the re-host scrape instead of failing the download', async () => {
     const h = harness({ fastItem: 'THROW', slowItem: { videoUrl: 'cdn2' } });
     await h.run(); assert.strictEqual(h.posts.length, 2); assert.strictEqual(h.files['/t/v.mp4'], 'VID:cdn2');
+  });
+  await t('the CDN file is fetched over IPv4 first; a connect failure retries dual-stack, an HTTP refusal does not', async () => {
+    const h = harness({ fastItem: { videoUrl: 'cdn1' }, cdn: { cdn1: 'v4fail' } });
+    await h.run(); assert.strictEqual(h.posts.length, 1, 'no re-host needed'); assert.deepStrictEqual(h.gets, ['cdn1', 'cdn1']);
+    const h2 = harness({ fastItem: { videoUrl: 'cdn1' }, slowItem: { downloadedVideo: 'apify2' }, cdn: { cdn1: 'fail' } });
+    await h2.run(); assert.strictEqual(h2.gets.filter(g => g === 'cdn1').length, 1, 'a 403 is not retried');
   });
   console.log(`\nig-download-fast: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
