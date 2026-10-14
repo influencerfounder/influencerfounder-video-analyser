@@ -10,8 +10,9 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.84.1';
+const ANALYSER_VERSION = '2.85.0';
 const unfocusLib = require('./unfocus');
+const focusBlur = require('./focusblur');
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -706,39 +707,11 @@ const cloneHandler = async (req, res) => {
       }
     }
 
-    // 🔍 MEASURED FOCUS (Real Unfocus Look only) — focusshift.py: where the source's autofocus loses and finds
-    // focus. Fails open to [] (then one natural moment is written instead).
-    let focusEvents = [];
-    // The cuts, so a cut is never read as a focus dip and the hook ends at the first cut (reviewer, 2026-10-13:
-    // measuredCuts is only filled on hookfirst, and on a realism run two of seven 'dips' were cuts). The SAME
-    // scene detection as the hookfirst block above (threshold 0.2, cuts < 0.3 s apart merged) — that block is
-    // pinned by test/hook-first.selftest.js, so it is called again here rather than refactored.
-    let focusCuts = measuredCuts;
-    if (unfocus && mode !== 'bgswap' && !focusCuts) {
-      try {
-        const bin = SYSTEM_FFMPEG || process.env.FFMPEG_BIN || ffmpegStatic;
-        const out = await new Promise((resolve) => {
-          const pr = require('child_process').spawn(bin, ['-hide_banner', '-i', videoPath, '-an', '-vf', "select='gt(scene,0.2)',showinfo", '-f', 'null', '-']);
-          let err = '';
-          pr.stderr.on('data', (d) => { err += d.toString(); if (err.length > 2e6) err = err.slice(-1e6); });
-          pr.on('close', () => resolve(err)); pr.on('error', () => resolve(''));
-        });
-        const raw = [...out.matchAll(/pts_time:([0-9.]+)/g)].map(m => Number(m[1])).filter(t => t > 0.15 && t < duration - 0.15);
-        focusCuts = [];
-        for (const t of raw) if (!focusCuts.length || t - focusCuts[focusCuts.length - 1] >= 0.3) focusCuts.push(Math.round(t * 100) / 100);
-      } catch (_) { focusCuts = null; }
-    }
-    if (unfocus && mode !== 'bgswap') {
-      try {
-        const out = await new Promise((resolve) => {
-          require('child_process').execFile(PYTHON, [path.join(__dirname, 'focusshift.py'), videoPath, (focusCuts || []).join(',')], { timeout: 60000 },
-            (err, stdout) => resolve(err ? '' : String(stdout || '')));
-        });
-        const j = out ? JSON.parse(out.trim().split('\n').pop()) : null;
-        focusEvents = j && Array.isArray(j.events) ? j.events : [];
-        console.log(`[clone] unfocus measured focus: ${JSON.stringify(focusEvents)}`);
-      } catch (e) { console.warn('[clone] focus measure failed:', e.message); focusEvents = []; }
-    }
+    // 🔍 (2026-10-14) The source's focus dips are no longer measured (focusshift.py): the autofocus moment left
+    // the prompt and is added to the finished video by /api/focus-blur, which measures the GENERATED video.
+    // Kept as empty values so the response shape (`unfocus.events/cuts`) does not change for the Studio.
+    const focusEvents = [];
+    const focusCuts = measuredCuts;
 
     // 2b. Keep a short-lived PLAYABLE copy of the source video, so the Studio can
     // show the original next to the finished recreate ("what went well / what to
@@ -1938,9 +1911,10 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
 
     const clonePrompt = (promptStyle === 'realism' || promptStyle === 'improve' || promptStyle === 'hookfirst') ? `${basePrompt} ${LANE_LAYERS[lane]}` : basePrompt;
     // 🔍 Real Unfocus Look replaces the lane layer (the HIGH-END cinema layer included) with the old-phone layer
-    // and adds the timed autofocus moments — in every style, since the switch is an explicit per-remake choice.
+    // — in every style, since the switch is an explicit per-remake choice. The autofocus moment is no longer
+    // prompted (Wan ignored it, measured 2026-10-14): the tool adds it to the finished video via /api/focus-blur.
     const unfocusText = unfocus && mode !== 'bgswap'
-      ? `${unfocusLib.UNFOCUS_LAYER} ${unfocusLib.focusSentences(focusEvents, { hookEnd: (focusCuts && focusCuts.length) ? focusCuts[0] : 0, durationSec: duration, who: '[INFLUENCER]' })}`
+      ? unfocusLib.UNFOCUS_LAYER   // the autofocus moment itself is added after generation (focusblur.js)
       : '';
     const sentPrompt = unfocusText ? `${basePrompt} ${unfocusText}` : clonePrompt;
 
@@ -3060,6 +3034,50 @@ app.post('/api/audio-split', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
+// 🔍 POST /api/focus-blur — one autofocus moment added to a FINISHED video (see focusblur.js for why and where).
+// Body: { videoUrl, avoid?: [[from,to]] }. Measures motion + cuts on the video itself, picks the window, blurs
+// it, keeps the audio as is. Returns { skipped:true } when nothing fits — the caller keeps the original.
+app.post('/api/focus-blur', async (req, res) => {
+  const b = req.body || {};
+  if (typeof b.videoUrl !== 'string' || !/^https:\/\//.test(b.videoUrl)) return res.status(400).json({ success: false, error: 'videoUrl (https) required' });
+  const FF = SYSTEM_FFMPEG || process.env.FFMPEG_BIN;
+  if (!FF) return res.status(500).json({ success: false, error: 'needs the system ffmpeg' });
+  const token = `fb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fblur-'));
+  const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+  const { execFile } = require('child_process');
+  const run = (args, ms) => new Promise((resolve, reject) => execFile(FF, args, { timeout: ms, maxBuffer: 32 * 1024 * 1024 }, (err, so, se) => err ? reject(new Error(String(se || err.message).slice(-600))) : resolve(String(se || ''))));
+  try {
+    const r = await axios.get(b.videoUrl, { responseType: 'arraybuffer', timeout: 90000, maxContentLength: 400 * 1024 * 1024 });
+    const vid = path.join(tmp, 'in.mp4'); fs.writeFileSync(vid, Buffer.from(r.data));
+    const duration = await probeDuration(vid);
+    // Motion of the PEOPLE, camera move removed (subjectmotion.py), 10 samples a second over the first 8 s —
+    // plain frame difference read a handheld sway as action and an outburst small in frame as calm.
+    const sm = await new Promise((resolve) => require('child_process').execFile(PYTHON, [path.join(__dirname, 'subjectmotion.py'), vid, String(Math.min(8, duration))], { timeout: 90000 },
+      (err, so) => { try { resolve(err ? null : JSON.parse(String(so))); } catch (_) { resolve(null); } }));
+    const motion = (sm && Array.isArray(sm.motion) ? sm.motion : []).map((v) => (v === null ? NaN : Number(v)));
+    const cs = await run(['-hide_banner', '-i', vid, '-vf', 'scale=240:-2,scdet=threshold=10,metadata=print:key=lavfi.scd.time', '-f', 'null', '-'], 120000);
+    const cuts = [...cs.matchAll(/lavfi\.scd\.time=([0-9.]+)/g)].map((m) => Number(m[1]));
+    const avoid = (Array.isArray(b.avoid) ? b.avoid : []).slice(0, 40).map((x) => [Number(x[0]), Number(x[1])]).filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y) && y > x);
+    const win = focusBlur.pickBlurWindow({ duration, motion, step: 0.1, cuts, avoid });
+    if (!win) {
+      console.log(`[focus-blur:${token}] skipped — no clear window (dur=${duration.toFixed(1)} cuts=${cuts.length} avoid=${avoid.length})`);
+      return res.json({ success: true, skipped: true, reason: 'no clear stretch for the soft moment', cuts, duration });
+    }
+    // Same quality class as the generated video: CRF 14 is visually lossless here; the audio is copied untouched.
+    await run(['-hide_banner', '-loglevel', 'error', '-y', '-i', vid, '-vf', focusBlur.blurFilter(win), '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-crf', '14', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', '-threads', '2', outputPath], 240000);
+    tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
+    console.log(`[focus-blur:${token}] ${win.from}-${win.to}s (${win.reason}) motion=${motion.length} dur=${duration.toFixed(1)} cuts=${cuts.length} avoid=${avoid.length}`);
+    // https always: behind Railway's proxy req.protocol reads 'http', and the tool fetches/stores this link.
+    res.json({ success: true, videoUrl: `https://${req.get('host')}/api/temp-video/${token}`, token, window: win, cuts, duration });
+  } catch (err) {
+    console.error(`[focus-blur:${token}] error:`, err.message);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
   }
 });
 

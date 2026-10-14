@@ -14,7 +14,7 @@
 // ignores timestamps, so v2 does not offer it).
 
 'use strict';
-const { UNFOCUS_LAYER, focusSentences } = require('../unfocus');
+const { UNFOCUS_LAYER } = require('../unfocus');
 
 // ── The rule gate (process, enforced in review + selftest) ──────────────────────────────────
 // A new rule needs ALL THREE: (a) a failure seen on ≥ 2 test-set sources, (b) a scorecard
@@ -33,7 +33,7 @@ const RULES = {
   mainLabel: 'The writer\'s placeholder MAIN is always replaced by the influencer\'s name (lobby run 1: "walks beside MAIN").',
   phaseLength:    'Phases inside one take (no cut) shorter than 1.5 s are merged into a neighbour: Alibaba recommends 2-5 s segments and G63 run 1 came back as 13 one-second phases (1,119 words).',
   wanAudio:       'Wan adds dialogue and music unless told: "No dialogue. No background music." (Wan research, 2026-09-07).',
-  unfocus:        'Real Unfocus Look (owner switch): old-phone layer + 1-2 timed autofocus moments after the hook, measured ones first. Evidence: 3 recreates with 0 focus dips (focusshift.py) vs the phone-shot source with 3; the church test take with a written moment produced a real 2.3-3.6 s dip.',
+  unfocus:        'Real Unfocus Look (owner switch): the old-phone layer only. The autofocus moment is added to the finished video (focusblur.js) since 2026-10-14: Wan rendered no dip on two takes that carried a timed sentence.',
 };
 
 const TEMPO = /\b(slowly|slow[- ]?motion|gently|gracefully|leisurely|unhurried(?:ly)?|languid(?:ly)?|lazily|deliberately|calmly|softly)\b\s*/gi;
@@ -248,8 +248,7 @@ function compile(spec, opts = {}) {
 
   const tail = [];
   if (opts.unfocus) { // RULE unfocus
-    const firstCut = Array.isArray(opts.cuts) && opts.cuts.length ? Number(opts.cuts[0]) : 0;
-    tail.push(UNFOCUS_LAYER, focusSentences(opts.focus, { hookEnd: firstCut, durationSec: Number(opts.durationSec) || 0, who: name }));
+    tail.push(UNFOCUS_LAYER);   // the autofocus moment is added after generation (focusblur.js), never prompted
   }
   if (!multi) tail.push('Generate single shot.');
   if (model === 'wan') tail.push('No dialogue. No background music.'); // RULE wanAudio

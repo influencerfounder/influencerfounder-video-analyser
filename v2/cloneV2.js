@@ -484,7 +484,8 @@ function mount(app, deps) {
       // 🔍 where the source's autofocus loses and finds focus — used only by the Real Unfocus Look switch.
       // Only when the Real Unfocus Look switch is on (owner test) — a measurement nothing else reads costs every
       // other analysis time inside the 270 s budget (reviewer, 2026-10-13).
-      const focusM = req.body && req.body.unfocus === true ? await py(PY, path.join(__dirname, '..', 'focusshift.py'), [video, cuts.join(',')], 60000) : null; mark('focus');
+      // (2026-10-14) no longer measured — the autofocus moment is added to the finished video (/api/focus-blur).
+      const focusM = null;
       const hookSecs = Math.min(1.5, cuts.length ? cuts[0] : 1.5);
       const hookMotion = await py(PY, hookMotionScript, [video, String(hookSecs)], 45000); mark('hookmotion');
       const beats = await measureBeats(ffmpegBin, video, detectBeats, cuts).catch(() => null); mark('beats');
