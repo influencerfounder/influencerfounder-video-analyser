@@ -10,11 +10,12 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const axios = require('axios');
+const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-1.3.0';
+const V2_VERSION = 'v2-1.4.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -305,6 +306,47 @@ async function secondOpinionMerge({ spec, log, sheets, hookFrames, key, deadline
   return { spec: added.length ? { ...spec, shots: out } : null, added, w };
 }
 
+// ⏳ LATE SECOND OPINION (Mike, 2026-10-14: "A plus B"). Measured that day on Railway: 12 of 16 owner analyses
+// lost the second opinion to TIME, not to an error — the Instagram download took 55–228 s, Gemini 3.1 Pro preview
+// took 95–120+ s in the afternoon (under ~55 s that morning), and the analysis stopped waiting 180 s after its
+// start. Now (A) Gemini starts the moment the video is on disk, and (B) the analysis never waits for it: an answer
+// that is not in yet is judged in the BACKGROUND and kept here; the tool fetches it
+// (GET /api/clone-v2/second-opinion/:id) and applies it to the plan before Generate / Approve. It comes back as
+// PATCHES (shot start + its list before and after), so the tool can refuse a shot that changed meanwhile.
+// In memory on the one Railway instance: a restart or deploy loses a pending one, and the tool then says so.
+const SO_LATE_TTL_MS = 30 * 60000;
+const SO_LATE = new Map();
+function soPatches(before, after) {
+  const a = (after && after.shots) || [];
+  return ((before && before.shots) || []).map((x, i) => ({ start: Number(x.start), before: (x.main_events || []).map(String), after: ((a[i] && a[i].main_events) || []).map(String) }))
+    .filter((p) => JSON.stringify(p.before) !== JSON.stringify(p.after));
+}
+function startLateSecondOpinion({ lid, secondP, spec, sheets, hookFrames, key, recompile, store = SO_LATE, merge = secondOpinionMerge }) {
+  const t0 = Date.now();
+  for (const [k, v] of store) if (t0 - v.at > SO_LATE_TTL_MS) store.delete(k);
+  const id = crypto.randomBytes(16).toString('hex');
+  const rec = { at: t0, lid: String(lid || ''), status: 'pending' };
+  store.set(id, rec);
+  const done = (patch) => Object.assign(rec, { added: [], patches: [], prompts: null, error: null }, patch, { status: 'done', doneAt: Date.now() });
+  const p = (async () => {
+    const g = await Promise.resolve(secondP).catch((e) => ({ ok: false, error: String((e && e.message) || e) }));
+    if (!g || !g.ok) return done({ error: String((g && g.error) || 'Gemini did not answer').slice(0, 160) });
+    // The judge gets its own 90 s (secondOpinionMerge stops it 60 s before the deadline given).
+    const m = await merge({ spec, log: g.log, sheets, hookFrames, key, deadline: Date.now() + 150000 });
+    const ok = !!(m.spec && !validateSpec(m.spec).length);
+    let prompts = null;
+    if (ok && typeof recompile === 'function') { try { prompts = recompile(m.spec); } catch (_) {} }
+    return done({ model: g.model, geminiSecs: g.secs, added: ok ? m.added : [], patches: ok ? soPatches(spec, m.spec) : [], prompts, error: ok ? null : (m.error ? String(m.error).slice(0, 160) : null) });
+  })().catch((e) => done({ error: String((e && e.message) || e).slice(0, 160) })).then(() => {
+    console.log(`[clone-v2] second opinion (late, ${Math.round((rec.doneAt - t0) / 1000)} s after the analysis, ${id.slice(0, 8)}): ${rec.added.length} added${rec.error ? ' (' + rec.error + ')' : ''}${rec.added.length ? ' — ' + rec.added.map((a) => `[${a.start}s] ${String(a.event || '').replace(/\s+/g, ' ').slice(0, 160)}`).join(' | ') : ''}`);
+  });
+  return { id, done: p };
+}
+function lateSecondOpinionView(rec) {
+  if (rec.status === 'pending') return { success: true, status: 'pending', waitedSecs: Math.round((Date.now() - rec.at) / 1000) };
+  return { success: true, status: 'done', model: rec.model || null, geminiSecs: rec.geminiSecs || null, added: rec.added, patches: rec.patches, prompts: rec.prompts, error: rec.error };
+}
+
 // ── Phase 2: the OUTFIT, cut from the SOURCE itself (2026-10-06, Mike: "build it like this") ──
 // Every recreate has a different outfit, so it is built per video from the video: the clearest real
 // frame of MAIN facing the camera and the clearest from behind, cut from just below the chin down.
@@ -478,6 +520,14 @@ function mount(app, deps) {
       const dm = /Duration:\s*(\d+):(\d+):([\d.]+)/.exec(probe.stderr);
       const duration = dm ? (+dm[1]) * 3600 + (+dm[2]) * 60 + parseFloat(dm[3]) : 15;
 
+      // 🔎 Second opinion (owner only): Gemini starts the moment the video is on disk (2026-10-14 — it used to wait
+      // for every measurement and the frames first) and watches it while the analysis goes on; see LATE SECOND
+      // OPINION. geminiShotLog reads the file synchronously before its first await, so the tmp clean-up is safe.
+      // 240 s: nothing waits on it any more, and Gemini was measured at 120+ s on a slow afternoon.
+      let soSettled = null;
+      const secondP = (!kieKey && typeof geminiShotLog === 'function') ? geminiShotLog(video, { timeoutMs: 240000 }).catch((e) => ({ ok: false, error: String(e.message || e) })) : null;
+      if (secondP) secondP.then((g) => { soSettled = g; });
+
       // 2. MEASURE.
       const { cuts, falseCuts, motionCuts } = await measureCuts(ffmpegBin, video, duration, (ts) => py(PY, path.join(__dirname, 'cutflow.py'), [video, ts.join(',')], 60000)); mark('cuts');
       const camera = await py(PY, path.join(__dirname, 'cameramotion.py'), [video, cuts.join(',')], 120000); mark('camera');
@@ -530,9 +580,6 @@ function mount(app, deps) {
       shotKeys.forEach(k => { content.push({ type: 'text', text: `SHOT ${k.shot} — full-size frame at ${k.t} s (read clothing, which side of the top faces the camera, framing):` }); content.push(b64(k.b)); });
       content.push({ type: 'text', text: 'Fill the JSON spec now. Return only JSON.' });
 
-      // 🔎 Second opinion (owner only): Gemini watches the video while the writer works (see secondOpinionMerge).
-      const secondP = (!kieKey && typeof geminiShotLog === 'function') ? geminiShotLog(video).catch((e) => ({ ok: false, error: String(e.message || e) })) : null;
-
       // 4. WRITE the spec (one repair attempt on invalid JSON).
       const system = writerSystem({ personaGender });
       let w, spec, errs;
@@ -566,19 +613,22 @@ function mount(app, deps) {
       }
       if (errs.length) return res.status(502).json({ success: false, error: 'The analysis could not be structured — try again.', detail: errs, raw: String((w && w.text) || '').slice(0, 2000) });
 
-      let secondOpinion = null;
+      let secondOpinion = null, soLate = false;
       if (secondP) {
-        // Never wait for Gemini past 90 s before the deadline (the outfit pick still has to run).
-        const g = await Promise.race([secondP, new Promise((r) => setTimeout(() => r({ ok: false, error: 'Gemini took too long' }), Math.max(0, deadline - 90000 - Date.now())))]);
-        if (g && g.ok) {
+        // Never WAIT for Gemini: in already, with time for the judge (80 s) → judged here, as before; not in yet, or
+        // no time left for the judge → it finishes in the background (startLateSecondOpinion, below).
+        await new Promise((r) => setImmediate(r));   // let an answer that just arrived set soSettled
+        const g = soSettled;
+        if (!g || (g.ok && deadline - Date.now() < 80000)) soLate = true;
+        else if (g.ok) {
           const m = await secondOpinionMerge({ spec, log: g.log, sheets: sh, hookFrames: hook, key, deadline });
           const applied = !!(m.spec && !validateSpec(m.spec).length);
           if (applied) spec = m.spec;
           secondOpinion = { model: g.model, geminiSecs: g.secs, added: applied ? m.added : [], error: m.error || null };
-        } else secondOpinion = { model: null, added: [], error: (g && g.error) || 'Gemini did not answer' };
+        } else secondOpinion = { model: null, added: [], error: g.error || 'Gemini did not answer' };
         // WHAT it added, not only how many (Mike, 2026-10-12: is the second opinion improving the workflow? — judge
         // the additions over the next ~10 remakes). One line per addition: the shot start and the added moment.
-        console.log(`[clone-v2] second opinion: ${secondOpinion.added.length} added${secondOpinion.error ? ' (' + secondOpinion.error + ')' : ''}${secondOpinion.added.length ? ' — ' + secondOpinion.added.map((a) => `[${a.start}s] ${String(a.event || '').replace(/\s+/g, ' ').slice(0, 160)}`).join(' | ') : ''}`);
+        if (secondOpinion) console.log(`[clone-v2] second opinion: ${secondOpinion.added.length} added${secondOpinion.error ? ' (' + secondOpinion.error + ')' : ''}${secondOpinion.added.length ? ' — ' + secondOpinion.added.map((a) => `[${a.start}s] ${String(a.event || '').replace(/\s+/g, ' ').slice(0, 160)}`).join(' | ') : ''}`);
         mark('second');
       }
 
@@ -597,6 +647,12 @@ function mount(app, deps) {
       const copts = { name, gender: personaGender, cuts, camera: camera && camera.segments, durationSec: duration };
       const wan = compile(spec, { ...copts, model: 'wan' });
       const seedance = compile(spec, { ...copts, model: 'seedance' });
+      if (soLate) {
+        const late = startLateSecondOpinion({ lid: req.body.locationId, secondP, spec: JSON.parse(JSON.stringify(spec)), sheets: sh, hookFrames: hook, key,
+          recompile: (s) => ({ wan: compile(s, { ...copts, model: 'wan' }), seedance: compile(s, { ...copts, model: 'seedance' }) }) });
+        secondOpinion = { pending: true, id: late.id, model: null, added: [], error: null };
+        console.log(`[clone-v2] second opinion: not in yet — finishing in the background (${late.id.slice(0, 8)})`);
+      }
 
       // Source copy for side-by-side playback (same 30-min temp store as v1).
       let sourceVideoUrl = '';
@@ -629,6 +685,13 @@ function mount(app, deps) {
     }
   };
   app.post('/api/clone-v2', joinIdentical(cloneV2Handler, deps.runRecorded));
+  // ⏳ A second opinion that finished after its analysis (see LATE SECOND OPINION). The id is 128 random bits and
+  // bound to the lid that asked, so one account can never read another's.
+  app.get('/api/clone-v2/second-opinion/:id', (req, res) => {
+    const rec = SO_LATE.get(String(req.params.id || ''));
+    if (!rec || (rec.lid && String(req.query.lid || '') !== rec.lid)) return res.status(404).json({ success: false, status: 'unknown' });
+    res.json(lateSecondOpinionView(rec));
+  });
 }
 
 // 🔁 JOIN DUPLICATES + 3-MIN RESULT CACHE — v1's rule for /api/clone (2026-09-09), now on v2 too
@@ -655,4 +718,4 @@ function joinIdentical(handler, runRecorded, { inflight = new Map(), recent = ne
   };
 }
 
-module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, normPick, secondOpinionMerge, SECOND_OPINION_MAX, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
+module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, normPick, secondOpinionMerge, SECOND_OPINION_MAX, startLateSecondOpinion, lateSecondOpinionView, soPatches, SO_LATE, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };

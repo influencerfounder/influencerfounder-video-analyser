@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.85.0';
+const ANALYSER_VERSION = '2.86.0';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const hookGuardLib = require('./hookGuard');
@@ -4840,7 +4840,7 @@ Return JSON only:
  "timeline":[{"start":0,"end":0,"who":"MAIN or P1/P2…","action":"what the body does, in plain words","camera":"what the lens does: fixed / pans left / follows / pushes in / pulls back / walks around …","where":"where in the location this happens"}]}
 
 Rules: times to 0.1 s, read from the video's own clock. A new timeline row whenever the action OR the camera changes. Cover 0 s to the end with no gaps. Only what is visible or audible — never guess. If the camera moves with the person, say so in that row.`;
-async function geminiShotLog(videoPath) {
+async function geminiShotLog(videoPath, { timeoutMs = 120000 } = {}) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return { ok: false, error: 'no GEMINI_API_KEY' };
   const size = fs.statSync(videoPath).size;
@@ -4853,7 +4853,7 @@ async function geminiShotLog(videoPath) {
       { text: GEMINI_SHOTLOG_PROMPT },
     ] }],
     generationConfig: { responseMimeType: 'application/json', temperature: 0.2 },
-  }, { headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, timeout: 120000, validateStatus: () => true });
+  }, { headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, timeout: timeoutMs, validateStatus: () => true });
   if (r.status !== 200) return { ok: false, error: `gemini ${r.status}: ${String(r.data?.error?.message || '').slice(0, 160)}` };
   const parts = r.data?.candidates?.[0]?.content?.parts || [];
   const txt = parts.filter(p => p && typeof p.text === 'string' && !p.thought).map(p => p.text).join('').trim();

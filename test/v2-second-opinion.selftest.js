@@ -55,12 +55,53 @@ const t = async (n, fn) => { try { await fn(); pass++; console.log('  ok  ' + n)
   });
   await t('wired: owner path only (no student key), Gemini started in parallel with the writer, result returned', () => {
     const src = require('fs').readFileSync(SRC, 'utf8');
-    assert.ok(/const secondP = \(!kieKey && typeof geminiShotLog === 'function'\) \? geminiShotLog\(video\)/.test(src));
-    assert.ok(src.indexOf('const secondP =') < src.indexOf('// 4. WRITE the spec'), 'Gemini must start before the writer');
+    assert.ok(/const secondP = \(!kieKey && typeof geminiShotLog === 'function'\) \? geminiShotLog\(video, \{ timeoutMs: 240000 \}\)/.test(src));
+    // A (2026-10-14): Gemini starts the moment the video is on disk — before every measurement and the frames.
+    assert.ok(src.indexOf('const secondP =') < src.indexOf('// 2. MEASURE.'), 'Gemini must start right after the download');
+    // B: the analysis never waits for Gemini — no timer race, a not-yet answer goes to the background.
+    assert.ok(!/Gemini took too long/.test(src), 'the analysis must not wait for Gemini');
+    assert.ok(/if \(soLate\) \{\s*const late = startLateSecondOpinion\(\{ lid: req\.body\.locationId,/.test(src), 'a late answer finishes in the background, bound to the lid');
+    assert.ok(/app\.get\('\/api\/clone-v2\/second-opinion\/:id'/.test(src) && /rec\.lid && String\(req\.query\.lid \|\| ''\) !== rec\.lid/.test(src), 'lookup route, lid-bound');
     assert.ok(/sourceVideoUrl, secondOpinion, writer:/.test(src));
     const idx = require('fs').readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
     assert.ok(/runRecorded, geminiShotLog,/.test(idx), 'the analyser passes its Gemini logger in');
   });
+  // ⏳ LATE (2026-10-14): judged in the background, fetched by the tool as patches.
+  const deferred = () => { let r; const p = new Promise((x) => { r = x; }); return { p, r }; };
+  await t('late: pending until Gemini answers, then done with patches + recompiled prompts, lid-bound record', async () => {
+    const store = new Map(); const d = deferred();
+    const merged = { ...SPEC, shots: [{ start: 0, main_events: ['walks toward the camera', 'covers the mouth', 'waves'] }, SPEC.shots[1]] };
+    const L = v2.startLateSecondOpinion({ lid: 'LID1', secondP: d.p, spec: SPEC, sheets, hookFrames, key: 'k', store,
+      recompile: (s) => ({ wan: { prompt: 'W' + s.shots[0].main_events.length } }), merge: async () => ({ spec: merged, added: [{ start: 0, event: 'waves' }] }) });
+    assert.ok(/^[0-9a-f]{32}$/.test(L.id));
+    assert.strictEqual(v2.lateSecondOpinionView(store.get(L.id)).status, 'pending');
+    assert.strictEqual(store.get(L.id).lid, 'LID1');
+    d.r({ ok: true, log: LOG, model: 'gemini-x', secs: 101 }); await L.done;
+    const v = v2.lateSecondOpinionView(store.get(L.id));
+    assert.strictEqual(v.status, 'done'); assert.deepStrictEqual(v.added, [{ start: 0, event: 'waves' }]);
+    assert.deepStrictEqual(v.patches, [{ start: 0, before: ['walks toward the camera', 'covers the mouth'], after: ['walks toward the camera', 'covers the mouth', 'waves'] }], 'only the changed shot');
+    assert.strictEqual(v.prompts.wan.prompt, 'W3'); assert.strictEqual(v.geminiSecs, 101); assert.strictEqual(v.error, null);
+  });
+  await t('late: a Gemini failure or timeout ends as done with the reason, never stuck pending', async () => {
+    const store = new Map();
+    const L = v2.startLateSecondOpinion({ lid: 'L', secondP: Promise.resolve({ ok: false, error: 'timeout of 240000ms exceeded' }), spec: SPEC, store, merge: async () => { throw new Error('must not judge'); } });
+    await L.done; const v = v2.lateSecondOpinionView(store.get(L.id));
+    assert.strictEqual(v.status, 'done'); assert.ok(/240000/.test(v.error)); assert.deepStrictEqual(v.patches, []);
+    const L2 = v2.startLateSecondOpinion({ lid: 'L', secondP: Promise.resolve({ ok: true, log: LOG }), spec: SPEC, store, merge: async () => { throw new Error('boom'); } });
+    await L2.done; assert.strictEqual(store.get(L2.id).status, 'done'); assert.ok(/boom/.test(store.get(L2.id).error));
+  });
+  await t('late: a judge answer that fails validation applies nothing', async () => {
+    const store = new Map();
+    const L = v2.startLateSecondOpinion({ lid: 'L', secondP: Promise.resolve({ ok: true, log: LOG }), spec: SPEC, store, merge: async () => ({ spec: { shots: 'broken' }, added: [{ start: 0, event: 'x' }] }) });
+    await L.done; const v = v2.lateSecondOpinionView(store.get(L.id));
+    assert.deepStrictEqual(v.added, []); assert.deepStrictEqual(v.patches, []); assert.strictEqual(v.prompts, null);
+  });
+  await t('late: records older than 30 min are dropped when a new one starts', async () => {
+    const store = new Map([['old', { at: Date.now() - 31 * 60000, status: 'done' }]]);
+    v2.startLateSecondOpinion({ lid: 'L', secondP: new Promise(() => {}), spec: SPEC, store });
+    assert.ok(!store.has('old')); assert.strictEqual(store.size, 1);
+  });
+
   console.log(`\nv2-second-opinion: ${pass} pass, ${fail} fail`);
   process.exit(fail ? 1 : 0);
 })();
