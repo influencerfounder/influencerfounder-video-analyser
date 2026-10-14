@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.87.1';
+const ANALYSER_VERSION = '2.87.2';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const hookGuardLib = require('./hookGuard');
@@ -83,6 +83,8 @@ async function fetchVideoBuf(u) {
     return Buffer.from((await axios.get(u, opts)).data);
   }
 }
+// Which CDN edge served it (e.g. instagram.frec35-1 = Recife): the far-edge failures are judged from this.
+const cdnHost = (u) => { try { return new URL(u).hostname; } catch (_) { return '?'; } };
 const cdnErr = (e) => `${e?.response?.status || e?.code || ''} ${String(e?.message || e).slice(0, 120)}`.trim();
 
 async function downloadInstagramViaApify(videoUrl, outputPath) {
@@ -98,13 +100,13 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
       const buf = await fetchVideoBuf(fast.videoUrl);
       fs.writeFileSync(outputPath, buf);
       if (await hasAudioStream(outputPath)) {
-        console.log(`[ig-download] fast path ${Math.round((Date.now() - t0) / 100) / 10}s (${Math.round(buf.length / 1024)}KB)`);
+        console.log(`[ig-download] fast path ${Math.round((Date.now() - t0) / 100) / 10}s (${Math.round(buf.length / 1024)}KB, ${cdnHost(fast.videoUrl)})`);
         const mi = fast.musicInfo || null;
         return { audioPath: null, sourceAudio: mi ? { title: String(mi.song_name || ''), artist: String(mi.artist_name || ''), original: !!mi.uses_original_audio } : null };
       }
       console.warn('[ig-download] fast file has NO audio stream — running the re-host scrape for an audio source');
     } catch (e) {
-      console.warn(`[ig-download] direct CDN fetch failed (${cdnErr(e)}) — running the re-host scrape`);
+      console.warn(`[ig-download] direct CDN fetch failed (${cdnErr(e)}, ${cdnHost(fast.videoUrl)}) — running the re-host scrape`);
     }
     try { fs.unlinkSync(outputPath); } catch (_) {}
   }
