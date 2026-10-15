@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.88.0';
+const ANALYSER_VERSION = '2.89.0';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const hookGuardLib = require('./hookGuard');
@@ -3082,8 +3082,9 @@ app.post('/api/audio-split', async (req, res) => {
   }
 });
 
-// 🔍 POST /api/focus-blur — one autofocus moment added to a FINISHED video (see focusblur.js for why and where).
-// Body: { videoUrl, avoid?: [[from,to]] }. Measures motion + cuts on the video itself, picks the window, blurs
+// 🔍 POST /api/focus-blur — 0–2 autofocus moments added to a FINISHED video (see focusblur.js for why and where;
+// randomized per video since 2026-10-15). Body: { videoUrl, avoid?: [[from,to]], recent?: [{count, events}] }
+// — `recent` is the influencer's last plans, kept by the tool, so videos posted in a row do not repeat. Measures motion + cuts on the video itself, picks the window, blurs
 // it, keeps the audio as is. Returns { skipped:true } when nothing fits — the caller keeps the original.
 app.post('/api/focus-blur', async (req, res) => {
   const b = req.body || {};
@@ -3101,23 +3102,29 @@ app.post('/api/focus-blur', async (req, res) => {
     const duration = await probeDuration(vid);
     // Motion of the PEOPLE, camera move removed (subjectmotion.py), 10 samples a second over the first 8 s —
     // plain frame difference read a handheld sway as action and an outburst small in frame as calm.
-    const sm = await new Promise((resolve) => require('child_process').execFile(PYTHON, [path.join(__dirname, 'subjectmotion.py'), vid, String(Math.min(8, duration))], { timeout: 90000 },
+    // Measured over the first two thirds (+0.5 s), up to 12 s: the moment may now land anywhere in that stretch.
+    const sm = await new Promise((resolve) => require('child_process').execFile(PYTHON, [path.join(__dirname, 'subjectmotion.py'), vid, String(Math.min(12, duration * 2 / 3 + 0.5))], { timeout: 120000 },
       (err, so) => { try { resolve(err ? null : JSON.parse(String(so))); } catch (_) { resolve(null); } }));
     const motion = (sm && Array.isArray(sm.motion) ? sm.motion : []).map((v) => (v === null ? NaN : Number(v)));
     const cs = await run(['-hide_banner', '-i', vid, '-vf', 'scale=240:-2,scdet=threshold=10,metadata=print:key=lavfi.scd.time', '-f', 'null', '-'], 120000);
     const cuts = [...cs.matchAll(/lavfi\.scd\.time=([0-9.]+)/g)].map((m) => Number(m[1]));
     const avoid = (Array.isArray(b.avoid) ? b.avoid : []).slice(0, 40).map((x) => [Number(x[0]), Number(x[1])]).filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y) && y > x);
-    const win = focusBlur.pickBlurWindow({ duration, motion, step: 0.1, cuts, avoid });
-    if (!win) {
-      console.log(`[focus-blur:${token}] skipped — no clear window (dur=${duration.toFixed(1)} cuts=${cuts.length} avoid=${avoid.length})`);
-      return res.json({ success: true, skipped: true, reason: 'no clear stretch for the soft moment', cuts, duration });
+    const recent = (Array.isArray(b.recent) ? b.recent : []).slice(0, 5).map((r) => ({
+      count: Number(r && r.count) || 0,
+      events: (r && Array.isArray(r.events) ? r.events : []).slice(0, 2).map((e) => ({ from: Number(e && e.from), depth: e && e.depth === 'deep' ? 'deep' : 'mild' })),
+    }));
+    const plan = focusBlur.planFocusBlur({ duration, motion, step: 0.1, cuts, avoid, recent });
+    if (!plan.events.length) {
+      console.log(`[focus-blur:${token}] skipped — ${plan.reason} (dur=${duration.toFixed(1)} cuts=${cuts.length} avoid=${avoid.length} recent=${recent.length})`);
+      return res.json({ success: true, skipped: true, reason: plan.reason, plan, cuts, duration });
     }
+    const win = { from: plan.events[0].from, to: plan.events[plan.events.length - 1].to, reason: plan.reason };
     // Same quality class as the generated video: CRF 14 is visually lossless here; the audio is copied untouched.
-    await run(['-hide_banner', '-loglevel', 'error', '-y', '-i', vid, '-vf', focusBlur.blurFilter(win), '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-crf', '14', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', '-threads', '2', outputPath], 240000);
+    await run(['-hide_banner', '-loglevel', 'error', '-y', '-i', vid, '-vf', focusBlur.planFilter(plan.events), '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-crf', '14', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', '-threads', '2', outputPath], 240000);
     tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
-    console.log(`[focus-blur:${token}] ${win.from}-${win.to}s (${win.reason}) motion=${motion.length} dur=${duration.toFixed(1)} cuts=${cuts.length} avoid=${avoid.length}`);
+    console.log(`[focus-blur:${token}] ${plan.reason} [${plan.events.map((e) => e.reason + ' σ' + e.peak).join('; ')}] motion=${motion.length} dur=${duration.toFixed(1)} cuts=${cuts.length} avoid=${avoid.length}`);
     // https always: behind Railway's proxy req.protocol reads 'http', and the tool fetches/stores this link.
-    res.json({ success: true, videoUrl: `https://${req.get('host')}/api/temp-video/${token}`, token, window: win, cuts, duration });
+    res.json({ success: true, videoUrl: `https://${req.get('host')}/api/temp-video/${token}`, token, window: win, plan, cuts, duration });
   } catch (err) {
     console.error(`[focus-blur:${token}] error:`, err.message);
     res.status(500).json({ success: false, error: err.message });

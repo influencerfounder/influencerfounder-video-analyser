@@ -54,5 +54,97 @@ t('/api/focus-blur measures people (camera removed), not frame difference, and c
   assert.ok(/'-c:a', 'copy'/.test(body), 'audio untouched');
   assert.ok(/skipped: true/.test(body), 'nothing fits → the caller keeps the original');
 });
+
+// ── 🎲 Randomized focus (2026-10-15, Mike's five points) ──
+const { planFocusBlur, planFilter } = require('../focusblur');
+const long = [NaN]; for (let i = 1; i < 120; i++) long.push((i >= 30 && i < 45) || (i >= 70 && i < 80) ? 25 : 6);  // 12 s, two bursts of action
+const runMany = (opts, n = 400, withMemory = true) => {
+  const out = []; let recent = [];
+  for (let s = 1; s <= n; s++) {
+    const p = planFocusBlur({ ...opts, seed: s, recent: withMemory ? recent : [] });
+    out.push(p); recent = [{ count: p.count, events: p.events }].concat(recent).slice(0, 5);
+  }
+  return out;
+};
+t('1. strength: never above the reel\'s deepest (sigma 2.7), mostly mild, sometimes deep', () => {
+  const ev = runMany({ duration: 12, motion: long, cuts: [] }).flatMap((p) => p.events);
+  assert.ok(ev.length > 200);
+  assert.ok(ev.every((e) => e.peak >= 0.9 && e.peak <= 2.7), 'peak range');
+  const deep = ev.filter((e) => e.depth === 'deep').length / ev.length;
+  assert.ok(deep > 0.2 && deep < 0.5, 'deep share ' + deep);
+  for (const e of ev.slice(0, 50)) for (const m of planFilter([e]).matchAll(/sigma=([0-9.]+)/g)) assert.ok(Number(m[1]) <= 2.7, planFilter([e]));
+});
+t('2. shape: a quick drop, a hold at the peak, then focus returning in falling steps', () => {
+  const e = { from: 1, drop: 0.08, hold: 0.3, recover: 0.45, peak: 2.4 };
+  const sig = [...planFilter([e]).matchAll(/sigma=([0-9.]+)/g)].map((m) => Number(m[1]));
+  assert.deepStrictEqual(sig, [1.2, 2.4, 1.56, 0.96, 0.48]);
+  assert.ok(/gte\(t,1\)\*lt\(t,1\.08\)/.test(planFilter([e])) && /gte\(t,1\.38\)\*lt\(t,1\.53\)/.test(planFilter([e])), planFilter([e]));
+});
+t('2b. no frame ever gets two blurs stacked (real frame times at 24 and 30 fps), so the peak never passes 2.7', () => {
+  // Evaluates each segment's enable exactly as ffmpeg does, on the frame timestamps of real encodes.
+  const segs = (f) => [...f.matchAll(/sigma=([0-9.]+):enable='gte\(t,([0-9.]+)\)\*lt\(t,([0-9.]+)\)'/g)].map((m) => [Number(m[1]), Number(m[2]), Number(m[3])]);
+  let worst = 0;
+  for (let seed = 1; seed <= 3000; seed++) {
+    const p = planFocusBlur({ duration: 12, motion: long, cuts: [], seed });
+    const sg = segs(planFilter(p.events));
+    for (const [tb, fps] of [[15360, 30], [12288, 24]]) for (let n = 0; n < 12 * fps; n++) {
+      const t = Math.round(n * tb / fps) / tb;
+      const on = sg.filter(([, x, y]) => t >= x && t < y);
+      assert.ok(on.length <= 1, `seed ${seed} t=${t}: ${on.length} blurs stacked`);
+      if (on.length) worst = Math.max(worst, on[0][0]);
+      if (n === 0) assert.strictEqual(on.length, 0, 'frame 0 is never blurred');
+    }
+  }
+  assert.ok(worst <= 2.7 && worst > 2, 'worst ' + worst);
+});
+t('3. count: some none, most one, some two — and never "none" or "two" twice in a row', () => {
+  const ps = runMany({ duration: 12, motion: long, cuts: [] });
+  const c = [0, 0, 0]; ps.forEach((p) => c[p.count]++);
+  assert.ok(c[0] > 30 && c[0] < 140 && c[1] > 180 && c[2] > 30, JSON.stringify(c));
+  for (let i = 1; i < ps.length; i++) {
+    assert.ok(!(ps[i].count === 0 && ps[i - 1].count === 0), 'two nones in a row at ' + i);
+    assert.ok(!(ps[i].count === 2 && ps[i - 1].count === 2), 'two twos in a row at ' + i);
+  }
+});
+t('4. where: spread over the first two thirds, never the opening frame, a cut, an avoid range or the action', () => {
+  const cuts = [5.0], avoid = [[6.5, 7.5]];
+  const ps = runMany({ duration: 12, motion: long, cuts, avoid });
+  const ev = ps.flatMap((p) => p.events);
+  const meanAt = (a, b) => { const xs = long.slice(Math.floor(a * 10), Math.ceil(b * 10)).filter(Number.isFinite); return xs.reduce((s, v) => s + v, 0) / xs.length; };
+  for (const e of ev) {
+    assert.ok(e.from >= 0.4 && e.to <= 8 + 1e-9, 'in [0.4, 2/3]: ' + JSON.stringify(e));
+    assert.ok(!(5.0 > e.from - 0.2 && 5.0 < e.to + 0.2), 'clear of the cut: ' + JSON.stringify(e));
+    assert.ok(!(e.from < 7.5 && e.to > 6.5), 'clear of the close-up: ' + JSON.stringify(e));
+    if (!/before the action/.test(e.reason)) assert.ok(meanAt(e.from, e.to) < 10, 'not on the action: ' + JSON.stringify(e));
+  }
+  const seconds = new Set(ev.map((e) => Math.floor(e.from)));
+  assert.ok(seconds.size >= 4, 'spread over at least 4 different seconds: ' + [...seconds]);
+  ps.filter((p) => p.count === 2).forEach((p) => assert.ok(p.events[1].from - p.events[0].to >= 1.5 - 1e-9, 'two moments apart: ' + p.reason));
+});
+t('4b. the angry grandmother: the approved "just before the action" spot stays one of the options', () => {
+  const ps = runMany({ duration: 7, motion: m('mad'), cuts: FX.mad.cuts }, 300);
+  const before = ps.flatMap((p) => p.events).filter((e) => /before the action/.test(e.reason));
+  assert.ok(before.length > 30, 'picked ' + before.length + '/300');
+  before.forEach((e) => assert.ok(e.from >= 0.4 && e.to <= 1.4 + 1e-9, JSON.stringify(e)));
+  assert.ok(ps.flatMap((p) => p.events).some((e) => !/before the action/.test(e.reason)), 'and not always');
+});
+t('5. memory: a spot the last videos used is picked far less often', () => {
+  const free = runMany({ duration: 12, motion: long, cuts: [] }, 400, false).flatMap((p) => p.events);
+  const share = (evs) => evs.filter((e) => Math.abs(e.from - 1.0) < 0.7).length / evs.length;
+  const recent = [{ count: 1, events: [{ from: 1.0, depth: 'mild' }] }, { count: 1, events: [{ from: 1.1, depth: 'deep' }] }];
+  const steered = []; for (let s = 1; s <= 400; s++) steered.push(...planFocusBlur({ duration: 12, motion: long, cuts: [], seed: s, recent }).events);
+  assert.ok(share(steered) < share(free) * 0.6, `near 1.0 s: ${share(steered).toFixed(2)} with memory vs ${share(free).toFixed(2)} without`);
+});
+t('5b. memory: three of the same depth in a row → the next one is the other depth', () => {
+  const recent = [1, 2, 3].map(() => ({ count: 1, events: [{ from: 2, depth: 'deep' }] }));
+  for (let s = 1; s <= 50; s++) { const p = planFocusBlur({ duration: 12, motion: long, cuts: [], seed: s, recent }); if (p.events.length) assert.strictEqual(p.events.find((e) => e.from === Math.min(...p.events.map((x) => x.from))) && p.events.some((e) => e.depth === 'mild'), true); }
+});
+t('the route plans with planFocusBlur + planFilter, passes `recent`, and measures beyond 8 s', () => {
+  const SRC = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+  const body = SRC.slice(SRC.indexOf("app.post('/api/focus-blur'"), SRC.indexOf("app.post('/api/ad-assemble'"));
+  assert.ok(/planFocusBlur\(\{[^}]*recent/.test(body), 'recent passed');
+  assert.ok(/planFilter\(plan\.events\)/.test(body) && !/blurFilter\(/.test(body), 'new filter only');
+  assert.ok(/Math\.min\(12, duration \* 2 \/ 3/.test(body), 'measured over two thirds');
+});
 console.log('\nfocusblur: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
