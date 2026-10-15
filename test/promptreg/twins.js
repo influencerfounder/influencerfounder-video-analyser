@@ -59,6 +59,8 @@ const RULES = [
   ['appearance ban scoped to the influencer', /THIS BAN COVERS \[INFLUENCER\] ALONE/],
   ['clothing is not a distinguishing description', /CLOTHING ALONE IS NOT A DISTINGUISHING DESCRIPTION/],
   ['no-resemblance sentence must sit in the first third', /in the FIRST THIRD of the prompt and before any wardrobe description/],
+  // 2026-10-15 — two bodyguards written as one group ("two men with short cropped hair") came back identical.
+  ['no group description of two people', /Never describe two people as one group/],
 ];
 for (const [name, re] of RULES) {
   t(`ORIGINAL carries the ${name}`, re.test(ORIG || ''), 'rule missing from ORIGINAL');
