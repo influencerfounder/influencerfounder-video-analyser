@@ -15,7 +15,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-1.5.0';
+const V2_VERSION = 'v2-1.6.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -422,6 +422,69 @@ function normPick(p) {
   else if (box.some((x) => x > 100) && box.every((x) => x >= 0 && x <= 1000)) box = box.map((x) => Math.round(x) / 10);   // Gemini's native 0-1000
   return { index, box };
 }
+// 🎬 OPENING CANDIDATES (2026-10-16, Mike: "it must be a frame from within the hook … as far in the beginning as
+// possible. But if there's no person in the first three seconds, then maybe it's different"). The first frame of the
+// remake is a swap into ONE frame of the original, and the video starts exactly there — so the candidates come only
+// from the first 3 s (the hook), earliest first, and only frames where MAIN can actually be swapped. A door case on
+// 2026-10-16 (Kryfex as a dim reflection behind glass) showed why "small" was not enough: a person you cannot read
+// cannot be swapped well, so that frame is OBSCURED and never a candidate. The tool picks the earliest candidate by
+// default and moves the shot plan to start there; Mike can pick another one or go without a first frame.
+const OPENING_PICK_SYSTEM = `You judge the first seconds of a short video for ONE thing: in which frames can the main person (MAIN, described below) be cleanly replaced by another person in a still image. For EVERY frame give "main":
+- "clear": MAIN is plainly visible — face readable (front, three-quarter or profile), body not mostly cut off, not behind glass or in a reflection;
+- "small": MAIN is clearly visible and readable but small or distant (a whole person in a wide shot);
+- "obscured": MAIN is there but cannot be read well: behind glass, a window or a screen, only a reflection, a dark silhouette against the light, face turned fully away or hidden, heavily blurred, or mostly cut off by the frame or by something in front;
+- "absent": MAIN is not in the frame.
+And "where": one short line that would let someone point at MAIN in that frame (position, size, a visible attribute) — never the word MAIN; "" when absent.
+Return ONLY JSON: {"frames":[{"i":0,"main":"clear|small|obscured|absent","where":""}]} with one entry per frame, in order.`;
+const OPENING_WINDOW = 3;     // the hook: candidates only from the first 3 s
+const OPENING_MAX = 3;        // at most 3 to choose from (Mike: too many was too much)
+const OPENING_GAP = 0.35;     // candidates at least this far apart
+function openingCandidateTimes(duration) {
+  const end = Math.min(OPENING_WINDOW, Math.max(0.5, Number(duration) - 0.5));
+  const out = [0.05];
+  for (let t = 0.4; t <= end + 1e-9 && out.length < 8; t += 0.4) out.push(Math.round(t * 100) / 100);
+  return out;
+}
+/** Pure: the judged frames → the candidates, earliest first (clear or small only), spaced, capped. */
+function chooseOpenings(times, judged) {
+  const rows = (Array.isArray(judged) ? judged : []).map((r, k) => ({ i: Number.isFinite(+r.i) ? +r.i : k, main: String(r.main || '').toLowerCase(), where: String(r.where || '').replace(/\s+/g, ' ').trim().slice(0, 200) }));
+  const out = [];
+  for (const r of rows.sort((a, b) => a.i - b.i)) {
+    const t = times[r.i];
+    if (t === undefined || (r.main !== 'clear' && r.main !== 'small')) continue;
+    if (out.length && t - out[out.length - 1].t < OPENING_GAP) continue;
+    out.push({ t, main: r.main, where: r.where });
+    if (out.length >= OPENING_MAX) break;
+  }
+  return out;
+}
+async function pickOpenings({ spec, ff, video, tmp, key, kieKey = '', duration, deadline = 0 }) {
+  const times = openingCandidateTimes(duration);
+  const frames = [];
+  for (const t of times) { const b = await frameAt(ff, video, t, 480, path.join(tmp, `open-${t}.jpg`)); if (b) frames.push({ t, b }); }
+  if (!frames.length) return null;
+  const useTimes = frames.map(f => f.t);
+  const o = (spec && spec.outfit) || {};
+  const s0 = (spec && Array.isArray(spec.shots) && spec.shots[0]) || {};
+  const who = [`MAIN wears: ${o.top_name || '?'}${o.bottom ? ', ' + o.bottom : ''}.`, spec && spec.opening && spec.opening.main_where ? `In the very first frame MAIN is: ${spec.opening.main_where}.` : '', (s0.main_events || []).length ? `At the start MAIN: ${(s0.main_events || []).slice(0, 2).join('; ')}.` : ''].filter(Boolean).join(' ');
+  const content = [{ type: 'text', text: who }];
+  frames.forEach((f, i) => { content.push({ type: 'text', text: `Frame ${i} at ${f.t} s:` }); content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: f.b.toString('base64') } }); });
+  let w;
+  try {
+    w = kieKey ? await callGeminiKie({ system: OPENING_PICK_SYSTEM, content, kieKey, maxTokens: 2000, deadline })
+      : await callWriter({ system: OPENING_PICK_SYSTEM, content, key, maxTokens: 700, deadline });
+  } catch (e) { console.warn('[clone-v2] opening pick failed:', e.message); return null; }
+  const j = parseSpec(w.text) || {};
+  if (!Array.isArray(j.frames)) { console.warn('[clone-v2] opening pick unusable:', String(w.text || '').slice(0, 200)); return null; }
+  const picks = chooseOpenings(useTimes, j.frames);
+  const candidates = [];
+  for (const c of picks) {
+    const full = await fullFramePng(ff, video, c.t, path.join(tmp, `opening-${c.t}.png`));
+    if (full) candidates.push({ ...c, size: [full.W, full.H], png: fs.readFileSync(full.path).toString('base64') });
+  }
+  return { candidates, judged: j.frames.map((r, k) => ({ t: useTimes[+r.i] ?? useTimes[k], main: r.main })), writer: w.model };
+}
+
 async function pickOutfit({ spec, ff, video, tmp, key, kieKey = '', duration, deadline = 0 }) {
   const cand = [];
   for (const k of outfitCandidateTimes(spec, duration)) {
@@ -640,6 +703,10 @@ function mount(app, deps) {
       let outfit = { front: null, back: null };
       try { outfit = await pickOutfit({ spec, ff: ffmpegBin, video, tmp, key, kieKey, duration, deadline }); } catch (e) { outfit = { front: null, back: null, reason: String(e.message || e).slice(0, 160) }; }
       mark('outfit');
+      // 🎬 Up to 3 opening candidates from the hook (fail open: null = the tool keeps the frame0 route).
+      let openings = null;
+      try { openings = await pickOpenings({ spec, ff: ffmpegBin, video, tmp, key, kieKey, duration, deadline }); } catch (e) { console.warn('[clone-v2] openings failed:', e.message); }
+      mark('openings');
       let frame0 = null;
       try {
         const f0 = await fullFramePng(ffmpegBin, video, hookTs[0] || 0.05, path.join(tmp, 'frame0.png'));
@@ -676,7 +743,7 @@ function mount(app, deps) {
         measured: { cuts, falseCuts, motionCuts, camera: (camera && camera.segments) || null, hookMotion, beats, focus: (focusM && Array.isArray(focusM.events)) ? focusM.events : [] },
         spec, prompts: { wan, seedance },
         keyframes: shotKeys.map(k => ({ t: k.t, shot: k.shot, dataUrl: thumb(k.b) })),
-        outfit, frame0,
+        outfit, frame0, openings,
         hookFrames: hook.slice(0, 1).map(h => ({ t: h.t, dataUrl: thumb(h.b) })),
         sourceVideoUrl, secondOpinion, writer: { model: w.model, usage: w.usage, stop: w.stop, payer: w.payer, hook: w.hook || null, hookError: w.hookError || null, hookUsage: w.hookUsage || null, credits: w.credits ?? null }, timing,
       });
@@ -747,4 +814,4 @@ function joinIdentical(handler, runRecorded, { inflight = new Map(), recent = ne
   };
 }
 
-module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, normPick, secondOpinionMerge, SECOND_OPINION_MAX, startLateSecondOpinion, lateSecondOpinionView, soPatches, SO_LATE, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes, userFacts, userInputs };
+module.exports = { mount, V2_VERSION, chooseOpenings, openingCandidateTimes, OPENING_PICK_SYSTEM, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, normPick, secondOpinionMerge, SECOND_OPINION_MAX, startLateSecondOpinion, lateSecondOpinionView, soPatches, SO_LATE, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes, userFacts, userInputs };

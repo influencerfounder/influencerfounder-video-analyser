@@ -192,7 +192,8 @@ t('writer system carries every WRITER_RULE and the persona pronouns', () => {
   assert.ok(/"bare_skin":\[\]/.test(writerSystem({})) && /a tank top = \["arms","shoulders"\]/.test(writerSystem({})), 'bare_skin is asked for, with the tank-top example');
   // 🎯 2026-10-13: Dorzy was swapped onto the foreground man; MAIN was the tiny grandmother at the back.
   const ws = writerSystem({});
-  assert.ok(/"opening":\{"main_in_first_frame":"clear\|small\|absent","main_where":""\}/.test(ws), 'the spec asks where MAIN is in the first frame');
+  // 2026-10-16: "obscured" added (behind glass, reflection, silhouette …) — such an opening gets no first frame by default.
+  assert.ok(/"opening":\{"main_in_first_frame":"clear\|small\|obscured\|absent","main_where":""\}/.test(ws), 'the spec asks where MAIN is in the first frame');
   assert.ok(/Decide who MAIN is from the WHOLE video first: the person filling the opening is often a bystander\./.test(ws), 'MAIN is decided from the whole video, not the opening');
   assert.ok(WRITER_RULES.openingWhere, 'recorded in the rules list');
   const parsed = parseSpec(JSON.stringify({ outfit: {}, opening: { main_in_first_frame: 'small', main_where: 'seated at a table at the back' }, shots: [{ start: 0, main_events: [] }] }));
