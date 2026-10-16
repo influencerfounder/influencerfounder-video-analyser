@@ -55,7 +55,7 @@ const t = async (n, fn) => { try { await fn(); pass++; console.log('  ok  ' + n)
   });
   await t('wired: owner path only (no student key), Gemini started in parallel with the writer, result returned', () => {
     const src = require('fs').readFileSync(SRC, 'utf8');
-    assert.ok(/const secondP = \(!kieKey && typeof geminiShotLog === 'function'\) \? geminiShotLog\(video, \{ timeoutMs: 240000 \}\)/.test(src));
+    assert.ok(/const secondP = \(!kieKey && !userInputs\(req\.body \|\| \{\}\)\.mainHint && typeof geminiShotLog === 'function'\) \? geminiShotLog\(video, \{ timeoutMs: 240000 \}\)/.test(src));
     // A (2026-10-14): Gemini starts the moment the video is on disk — before every measurement and the frames.
     assert.ok(src.indexOf('const secondP =') < src.indexOf('// 2. MEASURE.'), 'Gemini must start right after the download');
     // B: the analysis never waits for Gemini — no timer race, a not-yet answer goes to the background.

@@ -15,7 +15,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-1.4.0';
+const V2_VERSION = 'v2-1.5.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -525,7 +525,9 @@ function mount(app, deps) {
       // OPINION. geminiShotLog reads the file synchronously before its first await, so the tmp clean-up is safe.
       // 240 s: nothing waits on it any more, and Gemini was measured at 120+ s on a slow afternoon.
       let soSettled = null;
-      const secondP = (!kieKey && typeof geminiShotLog === 'function') ? geminiShotLog(video, { timeoutMs: 240000 }).catch((e) => ({ ok: false, error: String(e.message || e) })) : null;
+      // Not when the user has said who MAIN is (reviewer, 2026-10-16): Gemini picks its own MAIN — on the Shelby video
+      // the trolley man the user just ruled out — and the judge would add HIS actions to the corrected MAIN.
+      const secondP = (!kieKey && !userInputs(req.body || {}).mainHint && typeof geminiShotLog === 'function') ? geminiShotLog(video, { timeoutMs: 240000 }).catch((e) => ({ ok: false, error: String(e.message || e) })) : null;
       if (secondP) secondP.then((g) => { soSettled = g; });
 
       // 2. MEASURE.
@@ -569,6 +571,7 @@ function mount(app, deps) {
         `MEASURED CAMERA (optical flow on the background, screen directions): ${camLine}.`,
         hookMotion && hookMotion.head >= 0 ? `MEASURED HOOK MOTION in the first ${hookMotion.seconds} s (camera removed, px per 0.1 s): head ${hookMotion.head}, middle ${hookMotion.middle}, bottom ${hookMotion.bottom}. A band moving much more than the head is a movement you must list.` : '',
         beats && beats.audio && beats.bpm ? `MUSIC: ~${beats.bpm} BPM; ${beats.cutsOnBeat}/${beats.cutsTotal} cuts land on a beat${beats.editedToBeat ? ' (edited to the beat)' : ''}.` : '',
+        ...userFacts(req.body || {}),
       ].filter(Boolean).join('\n');
 
       const b64 = (buf) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: buf.toString('base64') } });
@@ -701,7 +704,33 @@ function mount(app, deps) {
 // joins the run in progress, and a finished success is served for 3 minutes. Errors never cached.
 const V2_RECENT_TTL_MS = 180000;
 function v2JoinKey(b) {
-  return JSON.stringify([String(b.locationId || ''), String(b.videoUrl || ''), String(b.name || ''), b.personaGender || '', b.unfocus === true]);   // unfocus: the focus dips are only measured when on
+  // The user's hints are part of the key: a re-analysis WITH a "who is MAIN" hint must never join or be served
+  // the run without it (that run is the wrong one the user is correcting).
+  const u = userInputs(b);
+  return JSON.stringify([String(b.locationId || ''), String(b.videoUrl || ''), String(b.name || ''), b.personaGender || '', b.unfocus === true, u.author, u.mainHint, u.changes]);   // unfocus: the focus dips are only measured when on
+}
+// 👤💬 WHAT THE USER TOLD US (2026-10-16). Two inputs from the tool, plus the posting account:
+//   sourceAuthor — the handle that posted the video. Measured that day on @thomasshelbysosia: the writer made the
+//     older man pushing a trolley MAIN (he fills the opening) while the account — and the video — is about the
+//     Peaky Blinders lookalike walking behind him. The handle is a hint, never an order (Mike: "Yes, add it").
+//   mainHint / userChanges — typed by the owner in the app ("the main person is the man in the flat cap",
+//     "make the car red"). The hint overrides the writer's own choice; the changes are written into the spec as
+//     if the video already showed them, so the compiled prompt carries them.
+// Text from a person, so it is cleaned (no quotes, brackets or newlines) and capped before it enters a prompt.
+function cleanUserText(raw, max) {
+  return String(raw || '').replace(/[`"\u201c\u201d<>{}\[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+function userInputs(b) {
+  const author = String((b && b.sourceAuthor) || '').replace(/^@/, '').replace(/[^A-Za-z0-9._]/g, '').slice(0, 40);
+  return { author, mainHint: cleanUserText(b && b.mainHint, 300), changes: cleanUserText(b && b.userChanges, 600) };
+}
+function userFacts(b) {
+  const u = userInputs(b);
+  return [
+    u.author ? `POSTED BY: @${u.author}. When the handle names or describes a person (a character, a lookalike, a name), the person it is about is usually MAIN — even when someone else fills the opening. Use it only as a hint: when the video clearly makes someone else its subject, that person is MAIN.` : '',
+    u.mainHint ? `WHO MAIN IS — the user says, and this OVERRIDES your own choice: ${u.mainHint}. Every MAIN field (outfit, shots, opening, main_where) is about that person; everyone else goes in cast.` : '',
+    u.changes ? `THE USER'S CHANGES FOR THE REMAKE: ${u.changes}. Write the spec as if the video already showed these changes — in the outfit, cast, background and every shot where it is visible. Change nothing else: everything the user did not mention stays exactly as the video shows.` : '',
+  ].filter(Boolean);
 }
 function joinIdentical(handler, runRecorded, { inflight = new Map(), recent = new Map(), now = () => Date.now() } = {}) {
   return async (req, res) => {
@@ -718,4 +747,4 @@ function joinIdentical(handler, runRecorded, { inflight = new Map(), recent = ne
   };
 }
 
-module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, normPick, secondOpinionMerge, SECOND_OPINION_MAX, startLateSecondOpinion, lateSecondOpinionView, soPatches, SO_LATE, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes };
+module.exports = { mount, V2_VERSION, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, normPick, secondOpinionMerge, SECOND_OPINION_MAX, startLateSecondOpinion, lateSecondOpinionView, soPatches, SO_LATE, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes, userFacts, userInputs };
