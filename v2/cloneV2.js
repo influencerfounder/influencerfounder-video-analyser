@@ -15,7 +15,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-1.6.0';
+const V2_VERSION = 'v2-1.7.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -430,9 +430,9 @@ function normPick(p) {
 // cannot be swapped well, so that frame is OBSCURED and never a candidate. The tool picks the earliest candidate by
 // default and moves the shot plan to start there; Mike can pick another one or go without a first frame.
 const OPENING_PICK_SYSTEM = `You judge the first seconds of a short video for ONE thing: in which frames can the main person (MAIN, described below) be cleanly replaced by another person in a still image. For EVERY frame give "main":
-- "clear": MAIN is plainly visible — face readable (front, three-quarter or profile), body not mostly cut off, not behind glass or in a reflection;
+- "clear": MAIN is plainly visible — face readable (front, three-quarter or profile), body not mostly cut off, not behind glass or in a reflection. MAIN's OWN hand, sunglasses, hat or hair partly over the face while doing something (shielding the face from cameras, waving, fixing the hair, drinking) is part of the pose, not a reason to skip the frame: still "clear" (or "small" when distant);
 - "small": MAIN is clearly visible and readable but small or distant (a whole person in a wide shot);
-- "obscured": MAIN is there but cannot be read well: behind glass, a window or a screen, only a reflection, a dark silhouette against the light, face turned fully away or hidden, heavily blurred, or mostly cut off by the frame or by something in front;
+- "obscured": MAIN is there but cannot be read well: behind glass, a window or a screen, only a reflection, a dark silhouette against the light, face turned fully away or hidden by something else (another person, an object in front), heavily blurred, or mostly cut off by the frame or by something in front;
 - "absent": MAIN is not in the frame.
 And "where": one short line that would let someone point at MAIN in that frame (position, size, a visible attribute) — never the word MAIN; "" when absent.
 Return ONLY JSON: {"frames":[{"i":0,"main":"clear|small|obscured|absent","where":""}]} with one entry per frame, in order.`;
@@ -458,15 +458,16 @@ function chooseOpenings(times, judged) {
   }
   return out;
 }
-async function pickOpenings({ spec, ff, video, tmp, key, kieKey = '', duration, deadline = 0 }) {
-  const times = openingCandidateTimes(duration);
-  const frames = [];
-  for (const t of times) { const b = await frameAt(ff, video, t, 480, path.join(tmp, `open-${t}.jpg`)); if (b) frames.push({ t, b }); }
-  if (!frames.length) return null;
-  const useTimes = frames.map(f => f.t);
+// Who MAIN is, in words the judge can point with (the opening frames and a hand-picked moment use the same lines).
+function openingWho(spec, mainHint = '') {
   const o = (spec && spec.outfit) || {};
   const s0 = (spec && Array.isArray(spec.shots) && spec.shots[0]) || {};
-  const who = [`MAIN wears: ${o.top_name || '?'}${o.bottom ? ', ' + o.bottom : ''}.`, spec && spec.opening && spec.opening.main_where ? `In the very first frame MAIN is: ${spec.opening.main_where}.` : '', (s0.main_events || []).length ? `At the start MAIN: ${(s0.main_events || []).slice(0, 2).join('; ')}.` : ''].filter(Boolean).join(' ');
+  const lines = [`MAIN wears: ${o.top_name || '?'}${o.bottom ? ', ' + o.bottom : ''}.`, spec && spec.opening && spec.opening.main_where ? `In the very first frame MAIN is: ${spec.opening.main_where}.` : '', (s0.main_events || []).length ? `At the start MAIN: ${(s0.main_events || []).slice(0, 2).join('; ')}.` : ''].filter(Boolean).join(' ');
+  const hint = String(mainHint || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  return hint ? `MAIN is: ${hint}. ${lines}` : lines;
+}
+/** The opening judge on one or more frames ({t, b: jpeg}) → { j: {frames:[…]}, w } or null. */
+async function judgeOpeningFrames({ who, frames, key, kieKey = '', deadline = 0 }) {
   const content = [{ type: 'text', text: who }];
   frames.forEach((f, i) => { content.push({ type: 'text', text: `Frame ${i} at ${f.t} s:` }); content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: f.b.toString('base64') } }); });
   let w;
@@ -476,6 +477,18 @@ async function pickOpenings({ spec, ff, video, tmp, key, kieKey = '', duration, 
   } catch (e) { console.warn('[clone-v2] opening pick failed:', e.message); return null; }
   const j = parseSpec(w.text) || {};
   if (!Array.isArray(j.frames)) { console.warn('[clone-v2] opening pick unusable:', String(w.text || '').slice(0, 200)); return null; }
+  return { j, w };
+}
+async function pickOpenings({ spec, ff, video, tmp, key, kieKey = '', duration, deadline = 0 }) {
+  const times = openingCandidateTimes(duration);
+  const frames = [];
+  for (const t of times) { const b = await frameAt(ff, video, t, 480, path.join(tmp, `open-${t}.jpg`)); if (b) frames.push({ t, b }); }
+  if (!frames.length) return null;
+  const useTimes = frames.map(f => f.t);
+  const who = openingWho(spec);
+  const jw = await judgeOpeningFrames({ who, frames, key, kieKey, deadline });
+  if (!jw) return null;
+  const { j, w } = jw;
   const picks = chooseOpenings(useTimes, j.frames);
   const candidates = [];
   for (const c of picks) {
@@ -547,6 +560,43 @@ function mount(app, deps) {
         unfocus: b.unfocus === true, focus: Array.isArray(b.focus) ? b.focus.slice(0, 10) : [] });
       res.json({ success: true, version: V2_VERSION, ...out });
     } catch (e) { res.status(500).json({ success: false, error: String(e.message || e).slice(0, 200) }); }
+  });
+
+  // 🎯 PICK A MOMENT (2026-10-17, Mike: "how can I select another first frame image?"). The opening judge only looks
+  // at the first 3 s and offers at most 3 frames — on the van video (@unreal_b.r.a.n.d) it offered none, because she
+  // holds her hand over her face in every one. This takes ONE moment the person chose on the card: the original frame
+  // at t as a lossless PNG (the same bytes the opening candidates use) + the same judge, so the swap still knows WHICH
+  // person to replace there. The source must already be a downloadable file (the tool's durable copy).
+  app.post('/api/clone-v2/moment', async (req, res) => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'v2moment-'));
+    try {
+      const b = req.body || {};
+      const videoUrl = String(b.videoUrl || '');
+      const t = Number(b.t);
+      if (!/^https:\/\//i.test(videoUrl)) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+      if (!Number.isFinite(t) || t < 0) return res.status(400).json({ success: false, error: 'Missing t' });
+      const kieKey = typeof b.kieApiKey === 'string' ? b.kieApiKey.trim().slice(0, 200) : '';
+      const key = kieKey ? '' : process.env.ANTHROPIC_API_KEY;
+      if (!key && !kieKey) return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY not configured' });
+      const video = path.join(tmp, 'video.mp4');
+      const r = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 200 * 1024 * 1024 });
+      fs.writeFileSync(video, Buffer.from(r.data));
+      const probe = await run(ffmpegBin, ['-hide_banner', '-i', video], { timeout: 20000 });
+      const dm = /Duration:\s*(\d+):(\d+):([\d.]+)/.exec(probe.stderr);
+      const duration = dm ? (+dm[1]) * 3600 + (+dm[2]) * 60 + parseFloat(dm[3]) : 0;
+      const at = Math.round(Math.max(0, duration ? Math.min(t, duration - 0.05) : t) * 100) / 100;
+      const full = await fullFramePng(ffmpegBin, video, at, path.join(tmp, 'moment.png'));
+      if (!full) return res.status(400).json({ success: false, error: 'Could not read a frame at that moment.' });
+      const small = await frameAt(ffmpegBin, video, at, 480, path.join(tmp, 'moment.jpg'));
+      const jw = small ? await judgeOpeningFrames({ who: openingWho(b.spec, b.mainHint), frames: [{ t: at, b: small }], key, kieKey, deadline: Date.now() + 90000 }) : null;
+      const row = jw && Array.isArray(jw.j.frames) ? (jw.j.frames[0] || {}) : {};
+      const main = ['clear', 'small', 'obscured', 'absent'].includes(String(row.main || '').toLowerCase()) ? String(row.main).toLowerCase() : '';
+      res.json({ success: true, version: V2_VERSION, t: at, duration, main, where: String(row.where || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+        size: [full.W, full.H], png: fs.readFileSync(full.path).toString('base64') });
+    } catch (e) {
+      console.warn('[clone-v2] moment failed:', e.message);
+      res.status(500).json({ success: false, error: String(e.message || e).slice(0, 200) });
+    } finally { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {} }
   });
 
   const cloneV2Handler = async (req, res) => {
@@ -814,4 +864,4 @@ function joinIdentical(handler, runRecorded, { inflight = new Map(), recent = ne
   };
 }
 
-module.exports = { mount, V2_VERSION, chooseOpenings, openingCandidateTimes, OPENING_PICK_SYSTEM, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, normPick, secondOpinionMerge, SECOND_OPINION_MAX, startLateSecondOpinion, lateSecondOpinionView, soPatches, SO_LATE, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes, userFacts, userInputs };
+module.exports = { mount, V2_VERSION, chooseOpenings, openingCandidateTimes, openingWho, OPENING_PICK_SYSTEM, V2_BUDGET_MS, WRITER_MIN_MS, callWriter, callGeminiKie, normPick, secondOpinionMerge, SECOND_OPINION_MAX, startLateSecondOpinion, lateSecondOpinionView, soPatches, SO_LATE, refineHookViaKieClaude, toOpenAiContent, joinIdentical, v2JoinKey, measureCuts, fastWindows, FLASH_MAD, CUT_FLOW_RATIO, cropRect, specShotAt, outfitCandidateTimes, userFacts, userInputs };

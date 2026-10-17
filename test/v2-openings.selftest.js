@@ -29,5 +29,16 @@ t('small counts (a whole person in a wide shot), absent or obscured everywhere â
 t('the judge is told what obscured means (glass, reflection, silhouette, face turned away)', () => {
   assert.ok(/behind glass, a window or a screen, only a reflection, a dark silhouette/.test(v.OPENING_PICK_SYSTEM));
 });
+t('own hand / sunglasses over the face is a pose, not obscured (van case 2026-10-17)', () => {
+  assert.ok(/OWN hand, sunglasses, hat or hair partly over the face[^"]*not a reason to skip the frame: still "clear"/.test(v.OPENING_PICK_SYSTEM));
+  assert.ok(/hidden by something else \(another person, an object in front\)/.test(v.OPENING_PICK_SYSTEM));
+});
+t('openingWho: the owner\'s who-is-MAIN hint leads; without one the lines are unchanged', () => {
+  const spec = { outfit: { top_name: 'grey suit', bottom: 'grey trousers' }, opening: { main_where: 'inside the van' }, shots: [{ main_events: ['steps out'] }] };
+  const base = v.openingWho(spec);
+  assert.strictEqual(base, 'MAIN wears: grey suit, grey trousers. In the very first frame MAIN is: inside the van. At the start MAIN: steps out.');
+  assert.ok(v.openingWho(spec, ' the woman  in grey ').startsWith('MAIN is: the woman in grey. MAIN wears'));
+  assert.strictEqual(v.openingWho(null), 'MAIN wears: ?.');
+});
 console.log(`\nv2-openings: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
