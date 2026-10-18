@@ -24,6 +24,8 @@ const { spawn } = require('child_process');
 const axios = require('axios');
 
 const VACE_MIN_FRAMES = 17;            // fal wan-vace-14b/inpainting num_frames floor
+const VACE_MAX_FRAMES = 241;           // and its ceiling (schema 17–241): a longer uncut shot is refused, never truncated
+const CHUNK = 40;                      // frames held in memory at once (~10 MB per 720x1280 frame with mattes)
 const CUT_DIFF_MIN = 25;               // a hard cut: mean abs frame difference well above the motion level
 const CUT_DIFF_X_MEDIAN = 5;
 
@@ -260,7 +262,10 @@ async function runBgCutout(ctx) {
 
     step('mask');
 
-    const srcUrl = ctx.publish(src, 'video/mp4');
+    // fal gets its OWN copy: the temp-video store unlinks published files after 30 min, and the
+    // composite step re-reads src.mp4 much later (reviewer 2026-10-18).
+    const srcFal = path.join(tmp, 'src_fal.mp4'); fs.copyFileSync(src, srcFal);
+    const srcUrl = ctx.publish(srcFal, 'video/mp4');
     const maskRes = await falRun(ctx.falKey, 'fal-ai/birefnet/v2/video', { video_url: srcUrl, model: 'Matting', operating_resolution: '1024x1024', output_mask: true, refine_foreground: false, video_output_type: 'X264 (.mp4)', video_quality: 'maximum' });
     const maskUrl = maskRes && maskRes.mask_video && maskRes.mask_video.url;
     if (!maskUrl) throw new Error('BiRefNet returned no mask video');
@@ -283,18 +288,23 @@ async function runBgCutout(ctx) {
     for (let i = 1; i < N; i++) { let s = 0; const a = small[i], b = small[i - 1]; for (let k = 0; k < a.length; k++) s += Math.abs(a[k] - b[k]); diffs.push(s / a.length); }
     const cuts = detectCuts(diffs, N);
     const shots = cuts.slice(0, -1).map((a, j) => ({ j, a, b: cuts[j + 1] }));
+    const longest = shots.reduce((m, sh) => Math.max(m, sh.b - sh.a), 0);
+    if (longest > VACE_MAX_FRAMES) throw new Error(`One uncut shot is ${(longest / fps).toFixed(1)} s; the background model handles up to ${((VACE_MAX_FRAMES - 1) / fps).toFixed(1)} s without a cut. Trim it or pick a video with cuts.`);
     const maskCount = (await readFrames(mask, 90, 160, 0, 100000, true, true)).length;
     if (maskCount < N) throw new Error(`mask has ${maskCount} frames, video ${N}`);
 
     step('backgrounds', { shots: shots.length });
     // Inputs are built one shot at a time (memory); the VACE calls then run in parallel.
     for (const sh of shots) {
-      const fr = await readFrames(src, W, H, sh.a, sh.b), mk = await readFrames(mask, W, H, sh.a, sh.b, true);
-      const idx = []; for (let k = 0; k < fr.length; k++) idx.push(k);
-      while (idx.length < VACE_MIN_FRAMES) idx.push(fr.length - 1);   // pad short shots to VACE's floor
       const gf = path.join(tmp, `grey${sh.j}.mp4`), mf = path.join(tmp, `inv${sh.j}.mp4`);
       const ge = encoder(gf, W, H, fps), me = encoder(mf, W, H, fps, true);
-      for (const k of idx) { const { grey, inv } = vaceInputs(fr[k], mk[k], W, H); await ge.write(grey); await me.write(inv); }
+      let last = null, written = 0;
+      for (let c0 = sh.a; c0 < sh.b; c0 += CHUNK) {
+        const c1 = Math.min(sh.b, c0 + CHUNK);
+        const fr = await readFrames(src, W, H, c0, c1), mk = await readFrames(mask, W, H, c0, c1, true);
+        for (let k = 0; k < fr.length; k++) { last = vaceInputs(fr[k], mk[k], W, H); await ge.write(last.grey); await me.write(last.inv); written++; }
+      }
+      while (written < VACE_MIN_FRAMES && last) { await ge.write(last.grey); await me.write(last.inv); written++; }   // pad short shots to VACE's floor
       await ge.end(); await me.end();
       sh.gf = gf; sh.mf = mf;
     }
@@ -318,17 +328,32 @@ async function runBgCutout(ctx) {
     const outV = path.join(tmp, 'comp.mp4'), enc = encoder(outV, W, H, fps);
     const shotLog = [];
     for (const sh of shots) {
-      const bgs = await readFrames(bgFiles[sh.j], W, H, 0, 100000);
-      const fr = await readFrames(src, W, H, sh.a, sh.b), masks = await readFrames(mask, W, H, sh.a, sh.b, true);
-      if (!bgs.length) throw new Error(`empty background for shot ${sh.j + 1}`);
-      const bgAt = (k) => bgs[Math.min(k, bgs.length - 1)];
-      const mattes = []; for (let k = 0; k < fr.length; k++) mattes.push(firmMatte(masks[k], k > 0 ? masks[k - 1] : null, k + 1 < fr.length ? masks[k + 1] : null));
-      // light match from every 4th frame of the shot
+      const nBg = (await readFrames(bgFiles[sh.j], 90, 160, 0, 100000, true, true)).length;
+      if (!nBg) throw new Error(`empty background for shot ${sh.j + 1}`);
+      // a background that came back shorter than the shot freezes on its last frame; say so in the log
+      const bgIdx = (i) => Math.min(i - sh.a, nBg - 1);
+      // Chunked (memory): each chunk reads one extra mask frame either side for the temporal smoothing.
+      const chunk = async (c0, c1) => {
+        const fr = await readFrames(src, W, H, c0, c1);
+        const mk = await readFrames(mask, W, H, Math.max(sh.a, c0 - 1), Math.min(sh.b, c1 + 1), true);
+        const off = c0 - Math.max(sh.a, c0 - 1);
+        const bg = await readFrames(bgFiles[sh.j], W, H, bgIdx(c0), bgIdx(c1 - 1) + 1);
+        const mattes = fr.map((_, k) => firmMatte(mk[k + off], mk[k + off - 1] || null, mk[k + off + 1] || null));
+        return { fr, bg: (k) => bg[Math.min(bgIdx(c0 + k) - bgIdx(c0), bg.length - 1)], mattes };
+      };
+      // pass 1: light match from every 4th frame
       const oS = [0, 0, 0], nS = [0, 0, 0]; let c = 0;
-      for (let k = 0; k < mattes.length; k += 4) { const o = ringMean(fr[k], mattes[k], W, H), nn = ringMean(bgAt(k), mattes[k], W, H); for (let q = 0; q < 3; q++) { oS[q] += o[q]; nS[q] += nn[q]; } c++; }
-      const light = lightParams(oS.map((v) => v / c), nS.map((v) => v / c));
-      shotLog.push({ shot: sh.j + 1, frames: sh.b - sh.a, ...Object.fromEntries(Object.entries(light).map(([k, v]) => [k, Math.round(v * 1000) / 1000])) });
-      for (let k = 0; k < mattes.length; k++) await enc.write(compositeFrame(fr[k], bgAt(k), mattes[k], W, H, light));
+      for (let c0 = sh.a; c0 < sh.b; c0 += CHUNK) {
+        const ch = await chunk(c0, Math.min(sh.b, c0 + CHUNK));
+        for (let k = (4 - ((c0 - sh.a) % 4)) % 4; k < ch.fr.length; k += 4) { const o = ringMean(ch.fr[k], ch.mattes[k], W, H), nn = ringMean(ch.bg(k), ch.mattes[k], W, H); for (let q = 0; q < 3; q++) { oS[q] += o[q]; nS[q] += nn[q]; } c++; }
+      }
+      const light = lightParams(oS.map((v) => v / Math.max(c, 1)), nS.map((v) => v / Math.max(c, 1)));
+      shotLog.push({ shot: sh.j + 1, frames: sh.b - sh.a, bgFrames: nBg, ...Object.fromEntries(Object.entries(light).map(([k, v]) => [k, Math.round(v * 1000) / 1000])) });
+      // pass 2: composite
+      for (let c0 = sh.a; c0 < sh.b; c0 += CHUNK) {
+        const ch = await chunk(c0, Math.min(sh.b, c0 + CHUNK));
+        for (let k = 0; k < ch.fr.length; k++) await enc.write(compositeFrame(ch.fr[k], ch.bg(k), ch.mattes[k], W, H, light));
+      }
       step('composite', { shotsComposited: sh.j + 1 });
     }
     await enc.end();
@@ -336,7 +361,7 @@ async function runBgCutout(ctx) {
     if (info.audio) await run('ffmpeg', ['-loglevel', 'error', '-y', '-i', outV, '-i', raw, '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-movflags', '+faststart', result]);
     else await run('ffmpeg', ['-loglevel', 'error', '-y', '-i', outV, '-c', 'copy', '-movflags', '+faststart', result]);
     const vaceSeconds = shots.reduce((s, sh) => s + Math.max(sh.b - sh.a, VACE_MIN_FRAMES) / fps, 0);
-    return { resultFile: result, tmpDir: tmp, prompt, shots: shotLog, costUsd: Math.round(vaceSeconds * 0.08 * 100) / 100 };
+    return { resultFile: result, tmpDir: tmp, prompt, shots: shotLog, size: `${W}x${H}`, fps, costUsd: Math.round(vaceSeconds * 0.08 * 100) / 100 };
   } catch (e) {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
     throw e;

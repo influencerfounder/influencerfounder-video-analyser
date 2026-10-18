@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.93.1';
+const ANALYSER_VERSION = '2.93.2';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const bgCutout = require('./bgcutout');
@@ -2168,7 +2168,7 @@ app.post('/api/bg-cutout', (req, res) => {
     videoUrl, brief: String(brief).slice(0, 400), falKey, anthropicKey: process.env.ANTHROPIC_API_KEY,
     publish, update: (f) => Object.assign(job, f),
   }).then((r) => {
-    Object.assign(job, { status: 'done', step: 'done', resultUrl: publish(r.resultFile, 'video/mp4'), shots: r.shots, costUsd: r.costUsd });
+    Object.assign(job, { status: 'done', step: 'done', resultUrl: publish(r.resultFile, 'video/mp4'), shots: r.shots, costUsd: r.costUsd, size: r.size, fps: r.fps });
     console.log(`[bg-cutout:${jobId}] done ${r.shots.length} shots, ~$${r.costUsd}`);
     setTimeout(() => { try { fs.rmSync(r.tmpDir, { recursive: true, force: true }); } catch (_) {} }, 45 * 60 * 1000);
   }).catch((e) => {
@@ -2181,7 +2181,7 @@ app.get('/api/bg-cutout/:jobId', (req, res) => {
   const j = bgCutoutJobs.get(req.params.jobId);
   if (!j) return res.status(404).json({ success: false, error: 'Job not found (the analyser may have restarted)' });
   res.json({ success: true, status: j.status, step: j.step, shots: j.shots, shotsDone: j.shotsDone, shotsComposited: j.shotsComposited,
-    prompt: j.prompt || null, resultUrl: j.resultUrl || null, costUsd: j.costUsd || null, error: j.error || null });
+    prompt: j.prompt || null, resultUrl: j.resultUrl || null, costUsd: j.costUsd || null, size: j.size || null, fps: j.fps || null, error: j.error || null });
 });
 
 // GET /api/faceswap/status/:jobId
