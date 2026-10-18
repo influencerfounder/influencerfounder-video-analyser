@@ -1,0 +1,336 @@
+// ✂️ BACKGROUND-ONLY SWAP BY CUT-OUT (2026-10-18, Mike: "build the cut-out method into the Change
+// background button"). Every generative edit we tried redrew the person (Seedance 2.5 edit mode shifted the
+// framing, Wan 2.7 Video Edit erased the INK ADDICT back print). This keeps the person's ORIGINAL pixels:
+//   mask the people (BiRefNet video on fal) → split at hard cuts → per shot grey out the background and
+//   regenerate ONLY that hole (Wan VACE 14B inpainting on fal, prompt matched to the source's light) →
+//   paste the original pixels back through the matte, with a light match, light wrap and edge
+//   decontamination → original audio back on.
+// Measured on the Kryfex station clip: person-core PSNR 40–48 dB (visually identical), every cut kept.
+// Lessons that shaped it (reports/Background only swap.md):
+//   - VACE copies whatever the source still shows: with the original background visible it redrew the
+//     station. So the background is GREYED OUT in the video it gets.
+//   - A background in the SOURCE's light hides edges; a bright sky exposes every matting error.
+//   - Motion-blurred hands get low alpha and go see-through: the matte is firmed and smoothed over
+//     neighbouring frames.
+//   - Edge pixels still carry the OLD background (a bright column gave a white rim): decontaminate them.
+//   - Measure the light in a ring AROUND the person, never the whole frame (a blue sky pulled him cool).
+// Owner-only: it bills Mike's own fal key, which the tool passes per request (like kieApiKey).
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawn } = require('child_process');
+const axios = require('axios');
+
+const VACE_MIN_FRAMES = 17;            // fal wan-vace-14b/inpainting num_frames floor
+const CUT_DIFF_MIN = 25;               // a hard cut: mean abs frame difference well above the motion level
+const CUT_DIFF_X_MEDIAN = 5;
+
+// ── pure image helpers (Float32, interleaved RGB or single channel) ──────────────────────────────
+/** Separable box blur of a single-channel W×H Float32Array, radius r, edge-clamped. */
+function boxBlur1(src, W, H, r) {
+  if (r <= 0) return Float32Array.from(src);
+  const tmp = new Float32Array(W * H), out = new Float32Array(W * H), d = 2 * r + 1;
+  for (let y = 0; y < H; y++) {
+    const row = y * W; let acc = 0;
+    for (let k = -r; k <= r; k++) acc += src[row + Math.min(W - 1, Math.max(0, k))];
+    for (let x = 0; x < W; x++) {
+      tmp[row + x] = acc / d;
+      acc += src[row + Math.min(W - 1, x + r + 1)] - src[row + Math.max(0, x - r)];
+    }
+  }
+  for (let x = 0; x < W; x++) {
+    let acc = 0;
+    for (let k = -r; k <= r; k++) acc += tmp[Math.min(H - 1, Math.max(0, k)) * W + x];
+    for (let y = 0; y < H; y++) {
+      out[y * W + x] = acc / d;
+      acc += tmp[Math.min(H - 1, y + r + 1) * W + x] - tmp[Math.max(0, y - r) * W + x];
+    }
+  }
+  return out;
+}
+function boxBlur3(rgb, W, H, r) {
+  const n = W * H, c = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+  for (let i = 0; i < n; i++) { c[0][i] = rgb[i * 3]; c[1][i] = rgb[i * 3 + 1]; c[2][i] = rgb[i * 3 + 2]; }
+  const b = c.map((ch) => boxBlur1(ch, W, H, r)), out = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { out[i * 3] = b[0][i]; out[i * 3 + 1] = b[1][i]; out[i * 3 + 2] = b[2][i]; }
+  return out;
+}
+const ycc = (r, g, b) => { const y = 0.2126 * r + 0.7152 * g + 0.0722 * b; return [y, (b - y) / 1.8556, (r - y) / 1.5748]; };
+const rgbOf = (y, cb, cr) => { const r = y + 1.5748 * cr, b = y + 1.8556 * cb; return [r, (y - 0.2126 * r - 0.0722 * b) / 0.7152, b]; };
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+/** Hard cuts from per-frame mean abs differences (diffs[i] = frame i+1 vs frame i). Returns shot
+ *  boundaries [0, …, frameCount]. */
+function detectCuts(diffs, frameCount) {
+  const sorted = [...diffs].sort((a, b) => a - b);
+  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  const thr = Math.max(CUT_DIFF_MIN, median * CUT_DIFF_X_MEDIAN);
+  const cuts = [0];
+  diffs.forEach((d, i) => { if (d > thr && i + 1 - cuts[cuts.length - 1] >= 3) cuts.push(i + 1); });
+  cuts.push(frameCount);
+  return cuts;
+}
+
+/** Firm, temporally smoothed matte from BiRefNet masks (0..255 Uint8, single channel): neighbours averaged
+ *  with the current frame, then remapped so motion-blurred hands stay solid, with a slight choke. */
+function firmMatte(cur, prev, next) {
+  const n = cur.length, out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const nb = [cur[i]]; if (prev) nb.push(prev[i]); if (next) nb.push(next[i]);
+    const avg = nb.reduce((s, v) => s + v, 0) / nb.length / 255;
+    const m = 0.5 * avg + 0.5 * cur[i] / 255;
+    out[i] = Math.pow(clamp((m - 0.10) / 0.82, 0, 1), 0.7);
+  }
+  return out;
+}
+
+/** Light match for one shot, from the mean colour of a ring around the people in the old vs new
+ *  background. One value per shot = no flicker. Returns { gainY, dCb, dCr }. */
+function lightParams(oldRing, newRing) {
+  const o = ycc(...oldRing), n = ycc(...newRing);
+  return {
+    gainY: clamp(Math.pow(Math.max(n[0], 1) / Math.max(o[0], 1), 0.45), 0.90, 1.15),
+    dCb: clamp(0.35 * (n[1] - o[1]), -8, 8),
+    dCr: clamp(0.35 * (n[2] - o[2]), -8, 8),
+  };
+}
+
+/** Mean RGB of the ring around the people (inside a 40 px reach of the matte, outside the matte). */
+function ringMean(rgb, matte, W, H) {
+  const reach = boxBlur1(matte, W, H, 40);
+  let r = 0, g = 0, b = 0, k = 0;
+  for (let i = 0; i < W * H; i++) {
+    if (reach[i] > 0.02 && matte[i] < 0.05) { r += rgb[i * 3]; g += rgb[i * 3 + 1]; b += rgb[i * 3 + 2]; k++; }
+  }
+  if (k < 500) { r = g = b = k = 0; for (let i = 0; i < W * H; i++) if (matte[i] < 0.05) { r += rgb[i * 3]; g += rgb[i * 3 + 1]; b += rgb[i * 3 + 2]; k++; } }
+  return k ? [r / k, g / k, b / k] : [128, 128, 128];
+}
+
+/** One composited frame: original pixels over the new background. src/bg are Uint8 RGB, matte Float32.
+ *  The solid core (matte ≥ 0.98) keeps the original colour except the per-shot light match. */
+function compositeFrame(src, bg, matte, W, H, light) {
+  const n = W * H, a = boxBlur1(matte, W, H, 1);
+  // edge decontamination: the old background behind each edge pixel, from nearby background pixels
+  const bgw = new Float32Array(n), srcBg = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { const w = a[i] < 0.03 ? 1 : 0; bgw[i] = w; srcBg[i * 3] = src[i * 3] * w; srcBg[i * 3 + 1] = src[i * 3 + 1] * w; srcBg[i * 3 + 2] = src[i * 3 + 2] * w; }
+  const bSum = boxBlur3(srcBg, W, H, 15), wSum = boxBlur1(bgw, W, H, 15);
+  // light wrap: the blurred new background bleeds over a thin band at the edge
+  const inner = new Float32Array(n); for (let i = 0; i < n; i++) inner[i] = matte[i] > 0.98 ? 1 : 0;
+  const innerB = boxBlur1(inner, W, H, 4), bgBlur = boxBlur3(Float32Array.from(bg), W, H, 10);
+  const out = new Uint8Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const al = a[i], j = i * 3;
+    let r = src[j], g = src[j + 1], b = src[j + 2];
+    if (al > 0 && al < 0.98) {
+      const ws = Math.max(wSum[i], 1e-3), inv = 1 / Math.max(al, 0.25);
+      r = clamp((r - (1 - al) * bSum[j] / ws) * inv, 0, 255);
+      g = clamp((g - (1 - al) * bSum[j + 1] / ws) * inv, 0, 255);
+      b = clamp((b - (1 - al) * bSum[j + 2] / ws) * inv, 0, 255);
+    }
+    const q = ycc(r, g, b); [r, g, b] = rgbOf(q[0] * light.gainY, q[1] + light.dCb, q[2] + light.dCr);
+    const e = clamp(al - innerB[i], 0, 1) * 0.15;
+    r = r * (1 - e) + bgBlur[j] * e; g = g * (1 - e) + bgBlur[j + 1] * e; b = b * (1 - e) + bgBlur[j + 2] * e;
+    out[j] = clamp(Math.round(r * al + bg[j] * (1 - al)), 0, 255);
+    out[j + 1] = clamp(Math.round(g * al + bg[j + 1] * (1 - al)), 0, 255);
+    out[j + 2] = clamp(Math.round(b * al + bg[j + 2] * (1 - al)), 0, 255);
+  }
+  return out;
+}
+
+/** VACE input for one frame: the people kept (slightly widened), the rest flat grey; and the inverted mask
+ *  (255 = regenerate) that leaves only the solid core of the people alone. */
+function vaceInputs(src, mask, W, H) {
+  const n = W * H, keep = new Float32Array(n), core = new Float32Array(n);
+  for (let i = 0; i < n; i++) { keep[i] = mask[i] > 40 ? 1 : 0; core[i] = mask[i] > 200 ? 1 : 0; }
+  const keepD = boxBlur1(keep, W, H, 3), coreE = boxBlur1(core, W, H, 3);
+  const grey = new Uint8Array(n * 3), inv = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = keepD[i] > 0.001;
+    grey[i * 3] = k ? src[i * 3] : 128; grey[i * 3 + 1] = k ? src[i * 3 + 1] : 128; grey[i * 3 + 2] = k ? src[i * 3 + 2] : 128;
+    inv[i] = coreE[i] > 0.999 ? 0 : 255;
+  }
+  return { grey, inv };
+}
+
+// ── I/O ──────────────────────────────────────────────────────────────────────────────────────────
+function run(cmd, args, input) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(cmd, args); const out = []; let err = '';
+    p.stdout.on('data', (d) => out.push(d)); p.stderr.on('data', (d) => { err += d; if (err.length > 8000) err = err.slice(-8000); });
+    p.on('error', reject);
+    p.on('close', (code) => code === 0 ? resolve(Buffer.concat(out)) : reject(new Error(`${cmd} exited ${code}: ${err.slice(-400)}`)));
+    if (input) { p.stdin.on('error', () => {}); p.stdin.end(input); }
+  });
+}
+async function probe(file) {
+  const txt = (await run('ffmpeg', ['-hide_banner', '-i', file]).catch((e) => ({ toString: () => e.message }))).toString();
+  const m = /Video:.*?(\d{2,5})x(\d{2,5})/.exec(txt), f = /(\d+(?:\.\d+)?) fps/.exec(txt), au = /Audio:/.test(txt);
+  return { W: m ? +m[1] : 0, H: m ? +m[2] : 0, fps: f ? +f[1] : 24, audio: au };
+}
+/** Decode frames [from, to) as raw RGB (or gray) buffers. */
+async function readFrames(file, W, H, from, to, gray, scaleTo) {
+  const ch = gray ? 1 : 3;
+  const vf = `select=between(n\\,${from}\\,${to - 1})` + (scaleTo ? `,scale=${W}:${H}` : '');
+  const buf = await run('ffmpeg', ['-loglevel', 'error', '-i', file, '-vf', vf, '-vsync', '0', '-f', 'rawvideo', '-pix_fmt', gray ? 'gray' : 'rgb24', '-']);
+  const size = W * H * ch, frames = [];
+  for (let o = 0; o + size <= buf.length; o += size) frames.push(new Uint8Array(buf.buffer, buf.byteOffset + o, size));
+  return frames;
+}
+function encoder(file, W, H, fps, gray) {
+  const p = spawn('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', gray ? 'gray' : 'rgb24', '-s', `${W}x${H}`, '-r', String(fps), '-i', '-',
+    '-c:v', 'libx264', '-crf', gray ? '12' : '12', '-preset', 'medium', '-pix_fmt', 'yuv420p', file]);
+  const done = new Promise((res, rej) => { p.on('close', (c) => c === 0 ? res() : rej(new Error('encoder exited ' + c))); p.on('error', rej); });
+  return { write: (b) => new Promise((r) => (p.stdin.write(Buffer.from(b.buffer, b.byteOffset, b.byteLength)) ? r() : p.stdin.once('drain', r))), end: () => { p.stdin.end(); return done; } };
+}
+
+async function falRun(falKey, model, input, onTick) {
+  const H = { Authorization: `Key ${falKey}`, 'Content-Type': 'application/json' };
+  const sub = await axios.post(`https://queue.fal.run/${model}`, input, { headers: H, timeout: 60000 });
+  const { status_url: statusUrl, response_url: responseUrl } = sub.data || {};
+  if (!statusUrl) throw new Error(`fal ${model}: no status_url (${JSON.stringify(sub.data).slice(0, 200)})`);
+  const t0 = Date.now();
+  while (Date.now() - t0 < 15 * 60 * 1000) {
+    await new Promise((r) => setTimeout(r, 5000));
+    const st = await axios.get(statusUrl, { headers: H, timeout: 30000 }).then((r) => r.data).catch(() => null);
+    if (onTick) onTick(st && st.status);
+    if (st && st.status === 'COMPLETED') return (await axios.get(responseUrl, { headers: H, timeout: 60000 })).data;
+    if (st && /FAIL|ERROR/i.test(String(st.status))) throw new Error(`fal ${model} failed: ${JSON.stringify(st).slice(0, 300)}`);
+  }
+  throw new Error(`fal ${model} timed out`);
+}
+async function download(url, file) {
+  const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 180000, maxContentLength: 300 * 1024 * 1024 });
+  fs.writeFileSync(file, Buffer.from(r.data));
+}
+
+/** Claude writes the background prompt in the SOURCE's light (the lesson that mattered most). */
+async function lightMatchedPrompt({ anthropicKey, brief, frameJpeg }) {
+  const fallback = {
+    prompt: `${brief}. Soft, even light that matches a phone video, background strongly out of focus with soft bokeh, muted realistic colours. Natural handheld phone footage.`,
+    negative: 'hard sunlight, harsh shadows, oversaturated, cartoon, sharp background, readable text, watermark',
+  };
+  if (!anthropicKey || !frameJpeg) return { ...fallback, source: 'fallback' };
+  try {
+    const r = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-5', max_tokens: 700, thinking: { type: 'disabled' },
+      system: 'You write background prompts for a video inpainting model. The people in the video stay exactly as filmed; only the space behind them is regenerated. So the new background must be lit like the ORIGINAL frame or the composite looks fake. Look at the frame and match: brightness, light softness/hardness, colour temperature, where the light comes from, how blurred the background is, indoor vs outdoor feel. Never describe the people. Never ask for readable text or signs. Return ONLY JSON: {"prompt":"...","negative":"..."} — prompt 50-90 words, negative 10-25 words (always include anything that would clash with the original light, e.g. a bright white sky when the original is dim).',
+      messages: [{ role: 'user', content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: frameJpeg.toString('base64') } },
+        { type: 'text', text: `New background wanted: ${brief}\nWrite the prompt in this frame's light.` },
+      ] }],
+    }, { headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout: 60000 });
+    const text = (r.data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+    const j = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+    if (j.prompt && j.prompt.length > 20) return { prompt: j.prompt, negative: j.negative || fallback.negative, source: 'claude' };
+  } catch (e) { console.warn('[bgcutout] prompt writer failed, fallback used:', e.message); }
+  return { ...fallback, source: 'fallback' };
+}
+
+/**
+ * The job. ctx: { videoUrl, brief, falKey, anthropicKey, publish(file, contentType) → public URL,
+ * update(fields) } → { resultFile, prompt, shots, cost }.
+ */
+async function runBgCutout(ctx) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bgcut_'));
+  const step = (s, extra) => ctx.update({ step: s, ...(extra || {}) });
+  try {
+    step('download');
+    const raw = path.join(tmp, 'raw.mp4'); await download(ctx.videoUrl, raw);
+    let info = await probe(raw);
+    if (!info.W) throw new Error('could not read the video');
+    // VACE's top resolution is 720p: normalise to ≤720 px wide (even sizes), ≤30 fps, constant frame rate.
+    const src = path.join(tmp, 'src.mp4');
+    const fps = Math.min(30, Math.round(info.fps) || 24);
+    await run('ffmpeg', ['-loglevel', 'error', '-y', '-i', raw, '-vf', `scale='min(720,iw)':-2,fps=${fps}`, '-an', '-c:v', 'libx264', '-crf', '10', '-pix_fmt', 'yuv420p', src]);
+    const { W, H } = await probe(src);
+    const dur = Number(/Duration: (\d+):(\d+):([\d.]+)/.exec((await run('ffmpeg', ['-hide_banner', '-i', src]).catch((e) => e.message)).toString()).slice(1).reduce((s, v, i) => s + Number(v) * [3600, 60, 1][i], 0));
+    if (dur > 16) throw new Error(`The video is ${dur.toFixed(1)} s; the cut-out swap handles up to 16 s for now.`);
+
+    step('mask');
+
+    const srcUrl = ctx.publish(src, 'video/mp4');
+    const maskRes = await falRun(ctx.falKey, 'fal-ai/birefnet/v2/video', { video_url: srcUrl, model: 'Matting', operating_resolution: '1024x1024', output_mask: true, refine_foreground: false, video_output_type: 'X264 (.mp4)', video_quality: 'maximum' });
+    const maskUrl = maskRes && maskRes.mask_video && maskRes.mask_video.url;
+    if (!maskUrl) throw new Error('BiRefNet returned no mask video');
+    const maskRaw = path.join(tmp, 'mask_raw.mp4'); await download(maskUrl, maskRaw);
+    const mask = path.join(tmp, 'mask.mp4');
+    await run('ffmpeg', ['-loglevel', 'error', '-y', '-i', maskRaw, '-vf', `scale=${W}:${H},fps=${fps},format=gray`, '-c:v', 'libx264', '-crf', '8', '-pix_fmt', 'yuv420p', mask]);
+
+    // The prompt is written AFTER the fal mask: the analyser has no auth, and a bad fal key fails there,
+    // before the owner's Anthropic key is spent.
+    step('prompt');
+    const mid = await run('ffmpeg', ['-loglevel', 'error', '-ss', String(Math.max(0, dur / 2)), '-i', src, '-frames:v', '1', '-f', 'mjpeg', '-q:v', '3', '-']).catch(() => null);
+    const prompt = await lightMatchedPrompt({ anthropicKey: ctx.anthropicKey, brief: ctx.brief, frameJpeg: mid });
+    ctx.update({ prompt });
+
+    step('cuts');
+    // Cut detection on a 90x160 copy (a full-res copy of every frame would need ~800 MB on Railway).
+    const small = await readFrames(src, 90, 160, 0, 100000, false, true);
+    const N = small.length;
+    const diffs = [];
+    for (let i = 1; i < N; i++) { let s = 0; const a = small[i], b = small[i - 1]; for (let k = 0; k < a.length; k++) s += Math.abs(a[k] - b[k]); diffs.push(s / a.length); }
+    const cuts = detectCuts(diffs, N);
+    const shots = cuts.slice(0, -1).map((a, j) => ({ j, a, b: cuts[j + 1] }));
+    const maskCount = (await readFrames(mask, 90, 160, 0, 100000, true, true)).length;
+    if (maskCount < N) throw new Error(`mask has ${maskCount} frames, video ${N}`);
+
+    step('backgrounds', { shots: shots.length });
+    // Inputs are built one shot at a time (memory); the VACE calls then run in parallel.
+    for (const sh of shots) {
+      const fr = await readFrames(src, W, H, sh.a, sh.b), mk = await readFrames(mask, W, H, sh.a, sh.b, true);
+      const idx = []; for (let k = 0; k < fr.length; k++) idx.push(k);
+      while (idx.length < VACE_MIN_FRAMES) idx.push(fr.length - 1);   // pad short shots to VACE's floor
+      const gf = path.join(tmp, `grey${sh.j}.mp4`), mf = path.join(tmp, `inv${sh.j}.mp4`);
+      const ge = encoder(gf, W, H, fps), me = encoder(mf, W, H, fps, true);
+      for (const k of idx) { const { grey, inv } = vaceInputs(fr[k], mk[k], W, H); await ge.write(grey); await me.write(inv); }
+      await ge.end(); await me.end();
+      sh.gf = gf; sh.mf = mf;
+    }
+    let done = 0;
+    const bgFiles = await Promise.all(shots.map(async (sh) => {
+      const gf = sh.gf, mf = sh.mf;
+      const r = await falRun(ctx.falKey, 'fal-ai/wan-vace-14b/inpainting', {
+        prompt: prompt.prompt, negative_prompt: prompt.negative, video_url: ctx.publish(gf, 'video/mp4'), mask_video_url: ctx.publish(mf, 'video/mp4'),
+        match_input_num_frames: true, match_input_frames_per_second: true, resolution: '720p', aspect_ratio: H >= W ? '9:16' : '16:9',
+        video_quality: 'maximum', enable_prompt_expansion: false, seed: 4242,
+      });
+      const url = r && r.video && r.video.url; if (!url) throw new Error(`VACE returned no video for shot ${sh.j + 1}`);
+      const bf = path.join(tmp, `bg${sh.j}.mp4`); await download(url, bf);
+      const bfn = path.join(tmp, `bgn${sh.j}.mp4`);
+      await run('ffmpeg', ['-loglevel', 'error', '-y', '-i', bf, '-vf', `scale=${W}:${H},fps=${fps}`, '-c:v', 'libx264', '-crf', '10', '-pix_fmt', 'yuv420p', bfn]);
+      step('backgrounds', { shots: shots.length, shotsDone: ++done });
+      return bfn;
+    }));
+
+    step('composite');
+    const outV = path.join(tmp, 'comp.mp4'), enc = encoder(outV, W, H, fps);
+    const shotLog = [];
+    for (const sh of shots) {
+      const bgs = await readFrames(bgFiles[sh.j], W, H, 0, 100000);
+      const fr = await readFrames(src, W, H, sh.a, sh.b), masks = await readFrames(mask, W, H, sh.a, sh.b, true);
+      if (!bgs.length) throw new Error(`empty background for shot ${sh.j + 1}`);
+      const bgAt = (k) => bgs[Math.min(k, bgs.length - 1)];
+      const mattes = []; for (let k = 0; k < fr.length; k++) mattes.push(firmMatte(masks[k], k > 0 ? masks[k - 1] : null, k + 1 < fr.length ? masks[k + 1] : null));
+      // light match from every 4th frame of the shot
+      const oS = [0, 0, 0], nS = [0, 0, 0]; let c = 0;
+      for (let k = 0; k < mattes.length; k += 4) { const o = ringMean(fr[k], mattes[k], W, H), nn = ringMean(bgAt(k), mattes[k], W, H); for (let q = 0; q < 3; q++) { oS[q] += o[q]; nS[q] += nn[q]; } c++; }
+      const light = lightParams(oS.map((v) => v / c), nS.map((v) => v / c));
+      shotLog.push({ shot: sh.j + 1, frames: sh.b - sh.a, ...Object.fromEntries(Object.entries(light).map(([k, v]) => [k, Math.round(v * 1000) / 1000])) });
+      for (let k = 0; k < mattes.length; k++) await enc.write(compositeFrame(fr[k], bgAt(k), mattes[k], W, H, light));
+      step('composite', { shotsComposited: sh.j + 1 });
+    }
+    await enc.end();
+    const result = path.join(tmp, 'result.mp4');
+    if (info.audio) await run('ffmpeg', ['-loglevel', 'error', '-y', '-i', outV, '-i', raw, '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-movflags', '+faststart', result]);
+    else await run('ffmpeg', ['-loglevel', 'error', '-y', '-i', outV, '-c', 'copy', '-movflags', '+faststart', result]);
+    const vaceSeconds = shots.reduce((s, sh) => s + Math.max(sh.b - sh.a, VACE_MIN_FRAMES) / fps, 0);
+    return { resultFile: result, tmpDir: tmp, prompt, shots: shotLog, costUsd: Math.round(vaceSeconds * 0.08 * 100) / 100 };
+  } catch (e) {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
+    throw e;
+  }
+}
+
+module.exports = { runBgCutout, detectCuts, firmMatte, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };

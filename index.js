@@ -10,9 +10,10 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.92.0';
+const ANALYSER_VERSION = '2.93.0';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
+const bgCutout = require('./bgcutout');
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
 const HOOK_REVISE_MIN_MS = 45000;
@@ -2142,6 +2143,45 @@ app.post('/api/faceswap', async (req, res) => {
   runFaceswap(jobId, videoUrl, faceUrl).catch(() => {});
 
   res.json({ success: true, jobId });
+});
+
+// ✂️ POST /api/bg-cutout — background-only swap that keeps the people's ORIGINAL pixels (bgcutout.js).
+// Body { videoUrl, brief, falKey }. The tool passes the owner's fal key per request (like kieApiKey); no key,
+// no job. Runs async (~5–10 min); poll GET /api/bg-cutout/:jobId → resultUrl on the temp-video store.
+const bgCutoutJobs = new Map();
+app.post('/api/bg-cutout', (req, res) => {
+  const { videoUrl, brief, falKey } = req.body || {};
+  if (!/^https:\/\//.test(String(videoUrl || ''))) return res.status(400).json({ success: false, error: 'videoUrl must be https' });
+  if (!falKey) return res.status(400).json({ success: false, error: 'falKey required' });
+  if (!String(brief || '').trim()) return res.status(400).json({ success: false, error: 'brief required' });
+  for (const [id, j] of bgCutoutJobs) if (Date.now() - j.createdAt > 2 * 3600 * 1000) bgCutoutJobs.delete(id);
+  const jobId = `bgc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const job = { status: 'processing', step: 'queued', createdAt: Date.now() };
+  bgCutoutJobs.set(jobId, job);
+  const base = `https://${req.get('host')}`;
+  const publish = (file, contentType) => {
+    const token = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    tempVideos.set(token, { filePath: file, createdAt: Date.now(), contentType });
+    return `${base}/api/temp-video/${token}`;
+  };
+  bgCutout.runBgCutout({
+    videoUrl, brief: String(brief).slice(0, 400), falKey, anthropicKey: process.env.ANTHROPIC_API_KEY,
+    publish, update: (f) => Object.assign(job, f),
+  }).then((r) => {
+    Object.assign(job, { status: 'done', step: 'done', resultUrl: publish(r.resultFile, 'video/mp4'), shots: r.shots, costUsd: r.costUsd });
+    console.log(`[bg-cutout:${jobId}] done ${r.shots.length} shots, ~$${r.costUsd}`);
+    setTimeout(() => { try { fs.rmSync(r.tmpDir, { recursive: true, force: true }); } catch (_) {} }, 45 * 60 * 1000);
+  }).catch((e) => {
+    Object.assign(job, { status: 'error', error: e.message });
+    console.error(`[bg-cutout:${jobId}] failed:`, e.message);
+  });
+  res.json({ success: true, jobId });
+});
+app.get('/api/bg-cutout/:jobId', (req, res) => {
+  const j = bgCutoutJobs.get(req.params.jobId);
+  if (!j) return res.status(404).json({ success: false, error: 'Job not found (the analyser may have restarted)' });
+  res.json({ success: true, status: j.status, step: j.step, shots: j.shots, shotsDone: j.shotsDone, shotsComposited: j.shotsComposited,
+    prompt: j.prompt || null, resultUrl: j.resultUrl || null, costUsd: j.costUsd || null, error: j.error || null });
 });
 
 // GET /api/faceswap/status/:jobId
