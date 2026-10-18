@@ -88,6 +88,16 @@ function firmMatte(cur, prev, next) {
   return out;
 }
 
+/** Half-sure matte areas AWAY from anyone's solid body are a ghost (2026-10-18: a woman behind his arm,
+ *  half in the mask, let the old station show through as a muddy patch). Within 8 px of a solid region the
+ *  soft values stay (real edges, motion-blurred hands); further out they snap to 0 or 1. */
+function matteClean(matte, W, H) {
+  const solid = new Float32Array(W * H); for (let i = 0; i < solid.length; i++) solid[i] = matte[i] > 0.9 ? 1 : 0;
+  const near = boxBlur1(solid, W, H, 8), out = new Float32Array(matte.length);
+  for (let i = 0; i < out.length; i++) out[i] = near[i] > 0.01 ? matte[i] : (matte[i] >= 0.5 ? 1 : 0);
+  return out;
+}
+
 /** Light match for one shot, from the mean colour of a ring around the people in the old vs new
  *  background. One value per shot = no flicker. Returns { gainY, dCb, dCr }. */
 function lightParams(oldRing, newRing) {
@@ -216,24 +226,32 @@ async function download(url, file) {
 }
 
 /** Claude writes the background prompt in the SOURCE's light (the lesson that mattered most). */
-async function lightMatchedPrompt({ anthropicKey, brief, frameJpeg }) {
+async function lightMatchedPrompt({ anthropicKey, brief, frameJpeg, shotFrames }) {
   const fallback = {
     prompt: `${brief}. Soft, even light that matches a phone video, background strongly out of focus with soft bokeh, muted realistic colours. Natural handheld phone footage.`,
-    negative: 'hard sunlight, harsh shadows, oversaturated, cartoon, sharp background, readable text, watermark',
+    negative: 'hard sunlight, harsh shadows, oversaturated, cartoon, sharp background, readable text, watermark, water under people, walking on water',
   };
-  if (!anthropicKey || !frameJpeg) return { ...fallback, source: 'fallback' };
+  if (!anthropicKey || (!frameJpeg && !(shotFrames && shotFrames.length))) return { ...fallback, source: 'fallback' };
   try {
     const r = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-5', max_tokens: 700, thinking: { type: 'disabled' },
-      system: 'You write background prompts for a video inpainting model. The people in the video stay exactly as filmed; only the space behind them is regenerated. So the new background must be lit like the ORIGINAL frame or the composite looks fake. Look at the frame and match: brightness, light softness/hardness, colour temperature, where the light comes from, how blurred the background is, indoor vs outdoor feel. Never describe the people. Never ask for readable text or signs. Return ONLY JSON: {"prompt":"...","negative":"..."} — prompt 50-90 words, negative 10-25 words (always include anything that would clash with the original light, e.g. a bright white sky when the original is dim).',
+      model: 'claude-sonnet-5', max_tokens: 1400, thinking: { type: 'disabled' },
+      system: 'You write background prompts for a video inpainting model. The people in the video stay exactly as filmed; only the space behind them is regenerated, shot by shot. So the new background must be lit like the ORIGINAL frames or the composite looks fake: match brightness, light softness/hardness, colour temperature, light direction, how blurred the background is. Never describe the people. Never ask for readable text or signs.\n'
+        + 'You get one frame per shot. Write ONE shared base prompt for the place and its light, plus a short addition per shot saying what this camera angle shows: which way the camera looks (along the street, towards a wall, across), and what is directly under, in front of and behind the people. RULE: wherever people stand or walk (and the floor visible around their feet or below the frame edge) is solid ground — a street, quay, pavement or floor. Water, drops, roads with traffic or sky are only to the side or further back, never under or directly in front of a person.\n'
+        + 'Return ONLY JSON: {"prompt":"base, 50-90 words","negative":"10-25 words, include anything clashing with the original light and \'water under people, walking on water\'","shots":[{"shot":1,"add":"10-30 words"}, ...]}',
       messages: [{ role: 'user', content: [
-        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: frameJpeg.toString('base64') } },
-        { type: 'text', text: `New background wanted: ${brief}\nWrite the prompt in this frame's light.` },
+        ...(shotFrames && shotFrames.length ? shotFrames : [{ shot: 1, jpeg: frameJpeg }]).flatMap((f) => [
+          { type: 'text', text: `Shot ${f.shot}:` },
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: f.jpeg.toString('base64') } },
+        ]),
+        { type: 'text', text: `New background wanted: ${brief}\nWrite the base prompt in these frames' light, and one addition per shot.` },
       ] }],
     }, { headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout: 60000 });
     const text = (r.data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
     const j = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
-    if (j.prompt && j.prompt.length > 20) return { prompt: j.prompt, negative: j.negative || fallback.negative, source: 'claude' };
+    if (j.prompt && j.prompt.length > 20) {
+      const shots = {}; for (const x of Array.isArray(j.shots) ? j.shots : []) if (x && x.shot && x.add) shots[Number(x.shot)] = String(x.add).slice(0, 300);
+      return { prompt: j.prompt, negative: j.negative || fallback.negative, shots, source: 'claude' };
+    }
   } catch (e) { console.warn('[bgcutout] prompt writer failed, fallback used:', e.message); }
   return { ...fallback, source: 'fallback' };
 }
@@ -273,12 +291,6 @@ async function runBgCutout(ctx) {
     const mask = path.join(tmp, 'mask.mp4');
     await run('ffmpeg', ['-loglevel', 'error', '-y', '-i', maskRaw, '-vf', `scale=${W}:${H},fps=${fps},format=gray`, '-c:v', 'libx264', '-crf', '8', '-pix_fmt', 'yuv420p', mask]);
 
-    // The prompt is written AFTER the fal mask: the analyser has no auth, and a bad fal key fails there,
-    // before the owner's Anthropic key is spent.
-    step('prompt');
-    const mid = await run('ffmpeg', ['-loglevel', 'error', '-ss', String(Math.max(0, dur / 2)), '-i', src, '-frames:v', '1', '-f', 'mjpeg', '-q:v', '3', '-']).catch(() => null);
-    const prompt = await lightMatchedPrompt({ anthropicKey: ctx.anthropicKey, brief: ctx.brief, frameJpeg: mid });
-    ctx.update({ prompt });
 
     step('cuts');
     // Cut detection on a 90x160 copy (a full-res copy of every frame would need ~800 MB on Railway).
@@ -292,6 +304,19 @@ async function runBgCutout(ctx) {
     if (longest > VACE_MAX_FRAMES) throw new Error(`One uncut shot is ${(longest / fps).toFixed(1)} s; the background model handles up to ${((VACE_MAX_FRAMES - 1) / fps).toFixed(1)} s without a cut. Trim it or pick a video with cuts.`);
     const maskCount = (await readFrames(mask, 90, 160, 0, 100000, true, true)).length;
     if (maskCount < N) throw new Error(`mask has ${maskCount} frames, video ${N}`);
+
+    // The prompt is written AFTER the fal mask (the analyser has no auth; a bad fal key fails there, before
+    // the owner's Anthropic key is spent), and from ONE frame per shot so each angle gets its own ground
+    // (2026-10-18: one shared prompt put the canal right in front of a man walking away from the camera).
+    step('prompt');
+    const shotFrames = [];
+    for (const sh of shots.slice(0, 12)) {
+      const t = ((sh.a + sh.b) / 2) / fps;
+      const jpeg = await run('ffmpeg', ['-loglevel', 'error', '-ss', t.toFixed(3), '-i', src, '-frames:v', '1', '-vf', 'scale=360:-2', '-f', 'mjpeg', '-q:v', '4', '-']).catch(() => null);
+      if (jpeg && jpeg.length) shotFrames.push({ shot: sh.j + 1, jpeg });
+    }
+    const prompt = await lightMatchedPrompt({ anthropicKey: ctx.anthropicKey, brief: ctx.brief, shotFrames });
+    ctx.update({ prompt });
 
     step('backgrounds', { shots: shots.length });
     // Inputs are built one shot at a time (memory); the VACE calls then run in parallel.
@@ -312,7 +337,7 @@ async function runBgCutout(ctx) {
     const bgFiles = await Promise.all(shots.map(async (sh) => {
       const gf = sh.gf, mf = sh.mf;
       const r = await falRun(ctx.falKey, 'fal-ai/wan-vace-14b/inpainting', {
-        prompt: prompt.prompt, negative_prompt: prompt.negative, video_url: ctx.publish(gf, 'video/mp4'), mask_video_url: ctx.publish(mf, 'video/mp4'),
+        prompt: prompt.prompt + (prompt.shots && prompt.shots[sh.j + 1] ? ' ' + prompt.shots[sh.j + 1] : ''), negative_prompt: prompt.negative, video_url: ctx.publish(gf, 'video/mp4'), mask_video_url: ctx.publish(mf, 'video/mp4'),
         match_input_num_frames: true, match_input_frames_per_second: true, resolution: '720p', aspect_ratio: H >= W ? '9:16' : '16:9',
         video_quality: 'maximum', enable_prompt_expansion: false, seed: 4242,
       });
@@ -338,7 +363,7 @@ async function runBgCutout(ctx) {
         const mk = await readFrames(mask, W, H, Math.max(sh.a, c0 - 1), Math.min(sh.b, c1 + 1), true);
         const off = c0 - Math.max(sh.a, c0 - 1);
         const bg = await readFrames(bgFiles[sh.j], W, H, bgIdx(c0), bgIdx(c1 - 1) + 1);
-        const mattes = fr.map((_, k) => firmMatte(mk[k + off], mk[k + off - 1] || null, mk[k + off + 1] || null));
+        const mattes = fr.map((_, k) => matteClean(firmMatte(mk[k + off], mk[k + off - 1] || null, mk[k + off + 1] || null), W, H));
         return { fr, bg: (k) => bg[Math.min(bgIdx(c0 + k) - bgIdx(c0), bg.length - 1)], mattes };
       };
       // pass 1: light match from every 4th frame
@@ -368,4 +393,4 @@ async function runBgCutout(ctx) {
   }
 }
 
-module.exports = { runBgCutout, probe, detectCuts, firmMatte, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };
+module.exports = { runBgCutout, probe, detectCuts, firmMatte, matteClean, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };

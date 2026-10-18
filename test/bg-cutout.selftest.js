@@ -43,6 +43,20 @@ ok(v.inv[32 * W + 32] === 0, "the person's core is never regenerated");
 // 7 — a motion-blurred, half-transparent hand stays fairly solid after firming
 const blur = new Uint8Array(n).fill(110);
 ok(B.firmMatte(blur, blur, blur)[0] > 0.45, 'a 43% matte (motion blur) is firmed above 45%');
+// 7b — a large half-sure patch away from any solid body (a bystander half in the mask) snaps to 0/1,
+// while the soft edge right next to the person stays soft
+{
+  const mm = new Float32Array(n);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (x >= 4 && x < 20) mm[y * W + x] = 1;            // the person (solid)
+    if (x === 20 || x === 21) mm[y * W + x] = 0.4;       // their soft edge
+    if (x >= 44 && x < 60) mm[y * W + x] = 0.4;          // a ghost: half-sure, far from any solid body
+  }
+  const c = B.matteClean(mm, W, H);
+  ok(c[10 * W + 50] === 0, 'a half-sure patch far from anyone is removed, not shown half-transparent');
+  ok(Math.abs(c[10 * W + 20] - 0.4) < 1e-6, "the person's soft edge keeps its softness");
+  ok(c[10 * W + 10] === 1, 'the solid body stays solid');
+}
 // 8 — probe reads a REAL file (the first live run died with "could not read the video": the probe kept only
 // the last 400 chars of ffmpeg's stderr, which on a real file no longer hold the Video: line)
 (async () => {
