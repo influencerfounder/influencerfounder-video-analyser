@@ -235,19 +235,31 @@ async function lightMatchedPrompt({ anthropicKey, brief, frameJpeg, shotFrames }
   try {
     const r = await axios.post('https://api.anthropic.com/v1/messages', {
       model: 'claude-sonnet-5', max_tokens: 1400, thinking: { type: 'disabled' },
-      system: 'You write background prompts for a video inpainting model. The people in the video stay exactly as filmed; only the space behind them is regenerated, shot by shot. So the new background must be lit like the ORIGINAL frames or the composite looks fake: match brightness, light softness/hardness, colour temperature, light direction, how blurred the background is. Never describe the people. Never ask for readable text or signs.\n'
+      system: 'You write background prompts for a video inpainting model. The people in the video stay exactly as filmed; the space behind them is REPLACED by a NEW place, shot by shot. The NEW place is the one the user asks for — never the place you see in the frames. Use the frames ONLY for the light and the camera angle; never describe their location, architecture, columns, floors or objects. So the new background must be lit like the ORIGINAL frames or the composite looks fake: match brightness, light softness/hardness, colour temperature, light direction, how blurred the background is. Never describe the people. Never ask for readable text or signs.\n'
         + 'You get one frame per shot. Write ONE shared base prompt for the place and its light, plus a short addition per shot saying what this camera angle shows: which way the camera looks (along the street, towards a wall, across), and what is directly under, in front of and behind the people. RULE: wherever people stand or walk (and the floor visible around their feet or below the frame edge) is solid ground — a street, quay, pavement or floor. Water, drops, roads with traffic or sky are only to the side or further back, never under or directly in front of a person.\n'
         + 'Return ONLY JSON: {"prompt":"base, 50-90 words","negative":"10-25 words, include anything clashing with the original light and \'water under people, walking on water\'","shots":[{"shot":1,"add":"10-30 words"}, ...]}',
       messages: [{ role: 'user', content: [
+        { type: 'text', text: `NEW PLACE (describe this, not the frames' location): ${brief}` },
         ...(shotFrames && shotFrames.length ? shotFrames : [{ shot: 1, jpeg: frameJpeg }]).flatMap((f) => [
           { type: 'text', text: `Shot ${f.shot}:` },
           { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: f.jpeg.toString('base64') } },
         ]),
-        { type: 'text', text: `New background wanted: ${brief}\nWrite the base prompt in these frames' light, and one addition per shot.` },
+        { type: 'text', text: `Write the base prompt for the NEW PLACE — ${brief} — lit like these frames, and one addition per shot (camera angle + solid ground under/in front of the people, in the NEW place).` },
       ] }],
     }, { headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout: 60000 });
     const text = (r.data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
     const j = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+    // Guard (2026-10-18): with eight frames Claude once described the ORIGINAL station and dropped the brief.
+    // The base prompt must name at least one of the brief's own words (4+ letters), or it is not this place.
+    const briefWords = String(brief).toLowerCase().match(/[a-zà-ÿ]{4,}/g) || [];
+    const STOP = new Set(['with', 'that', 'this', 'from', 'into', 'over', 'under', 'very', 'some', 'busy', 'evening', 'night', 'morning', 'visible', 'behind', 'street', 'open', 'side']);
+    const keys = briefWords.filter((w) => !STOP.has(w));
+    const namesPlace = !keys.length || keys.some((w) => String(j.prompt || '').toLowerCase().includes(w));
+    if (!namesPlace) console.warn('[bgcutout] prompt ignored the brief, using the brief-led fallback:', String(j.prompt).slice(0, 120));
+    if (j.prompt && j.prompt.length > 20 && !namesPlace) {
+      const shots = {}; for (const x of Array.isArray(j.shots) ? j.shots : []) if (x && x.shot && x.add) shots[Number(x.shot)] = String(x.add).slice(0, 300);
+      return { ...fallback, shots: {}, source: 'fallback', rejected: String(j.prompt).slice(0, 300) };
+    }
     if (j.prompt && j.prompt.length > 20) {
       const shots = {}; for (const x of Array.isArray(j.shots) ? j.shots : []) if (x && x.shot && x.add) shots[Number(x.shot)] = String(x.add).slice(0, 300);
       return { prompt: j.prompt, negative: j.negative || fallback.negative, shots, source: 'claude' };
@@ -393,4 +405,4 @@ async function runBgCutout(ctx) {
   }
 }
 
-module.exports = { runBgCutout, probe, detectCuts, firmMatte, matteClean, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };
+module.exports = { runBgCutout, probe, lightMatchedPrompt, detectCuts, firmMatte, matteClean, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };
