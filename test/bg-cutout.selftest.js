@@ -43,5 +43,21 @@ ok(v.inv[32 * W + 32] === 0, "the person's core is never regenerated");
 // 7 — a motion-blurred, half-transparent hand stays fairly solid after firming
 const blur = new Uint8Array(n).fill(110);
 ok(B.firmMatte(blur, blur, blur)[0] > 0.45, 'a 43% matte (motion blur) is firmed above 45%');
+// 8 — probe reads a REAL file (the first live run died with "could not read the video": the probe kept only
+// the last 400 chars of ffmpeg's stderr, which on a real file no longer hold the Video: line)
+(async () => {
+  const os = require('os'), path = require('path'), { execFileSync } = require('child_process');
+  const tmp = path.join(os.tmpdir(), `bgc_probe_${process.pid}.mp4`);
+  try {
+    execFileSync('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=s=64x96:d=0.5:r=24', '-f', 'lavfi', '-i', 'sine=d=0.5',
+      '-metadata', 'comment=' + 'x'.repeat(2000), '-shortest', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', tmp]);
+    const info = await B.probe(tmp);
+    ok(info.W === 64 && info.H === 96 && info.fps === 24 && info.audio === true, `probe reads size, fps and audio from a real file (${JSON.stringify(info)})`);
+  } catch (e) { ok(false, 'probe test could not run: ' + e.message); }
+  try { require('fs').unlinkSync(tmp); } catch (_) {}
+  done();
+})();
+function done() {
 console.log(f ? `bg-cutout: ${f} FAILED, ${p} passed` : `bg-cutout: ${p} checks passed`);
 process.exit(f ? 1 : 0);
+}

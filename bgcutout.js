@@ -164,8 +164,16 @@ function run(cmd, args, input) {
     if (input) { p.stdin.on('error', () => {}); p.stdin.end(input); }
   });
 }
+/** ffmpeg's full stderr for `-i file` (it always exits 1 with no output file — the info is in stderr).
+ *  Full text on purpose: run()'s error keeps only the last 400 chars, which drops the Video: line. */
+function ffInfo(file) {
+  return new Promise((resolve) => {
+    const p = spawn('ffmpeg', ['-hide_banner', '-i', file]); let err = '';
+    p.stderr.on('data', (d) => { err += d; }); p.on('error', () => resolve('')); p.on('close', () => resolve(err));
+  });
+}
 async function probe(file) {
-  const txt = (await run('ffmpeg', ['-hide_banner', '-i', file]).catch((e) => ({ toString: () => e.message }))).toString();
+  const txt = await ffInfo(file);
   const m = /Video:.*?(\d{2,5})x(\d{2,5})/.exec(txt), f = /(\d+(?:\.\d+)?) fps/.exec(txt), au = /Audio:/.test(txt);
   return { W: m ? +m[1] : 0, H: m ? +m[2] : 0, fps: f ? +f[1] : 24, audio: au };
 }
@@ -245,7 +253,9 @@ async function runBgCutout(ctx) {
     const fps = Math.min(30, Math.round(info.fps) || 24);
     await run('ffmpeg', ['-loglevel', 'error', '-y', '-i', raw, '-vf', `scale='min(720,iw)':-2,fps=${fps}`, '-an', '-c:v', 'libx264', '-crf', '10', '-pix_fmt', 'yuv420p', src]);
     const { W, H } = await probe(src);
-    const dur = Number(/Duration: (\d+):(\d+):([\d.]+)/.exec((await run('ffmpeg', ['-hide_banner', '-i', src]).catch((e) => e.message)).toString()).slice(1).reduce((s, v, i) => s + Number(v) * [3600, 60, 1][i], 0));
+    const dm = /Duration: (\d+):(\d+):([\d.]+)/.exec(await ffInfo(src));
+    const dur = dm ? dm.slice(1).reduce((t, v, i) => t + Number(v) * [3600, 60, 1][i], 0) : 0;
+    if (!dur) throw new Error('could not read the video length');
     if (dur > 16) throw new Error(`The video is ${dur.toFixed(1)} s; the cut-out swap handles up to 16 s for now.`);
 
     step('mask');
@@ -333,4 +343,4 @@ async function runBgCutout(ctx) {
   }
 }
 
-module.exports = { runBgCutout, detectCuts, firmMatte, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };
+module.exports = { runBgCutout, probe, detectCuts, firmMatte, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };
