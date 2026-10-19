@@ -201,8 +201,23 @@ async function readFrames(file, W, H, from, to, gray, scaleTo) {
 function encoder(file, W, H, fps, gray) {
   const p = spawn('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', gray ? 'gray' : 'rgb24', '-s', `${W}x${H}`, '-r', String(fps), '-i', '-',
     '-c:v', 'libx264', '-crf', gray ? '12' : '12', '-preset', 'medium', '-pix_fmt', 'yuv420p', file]);
-  const done = new Promise((res, rej) => { p.on('close', (c) => c === 0 ? res() : rej(new Error('encoder exited ' + c))); p.on('error', rej); });
-  return { write: (b) => new Promise((r) => (p.stdin.write(Buffer.from(b.buffer, b.byteOffset, b.byteLength)) ? r() : p.stdin.once('drain', r))), end: () => { p.stdin.end(); return done; } };
+  // A dead ffmpeg (bad size, full disk, killed) never emits 'drain': every write must also settle on
+  // close, or the job hangs on "processing" for good (/toolscan 2026-10-19).
+  let dead = null, closed = false;
+  const done = new Promise((res, rej) => {
+    p.on('close', (c) => { closed = true; if (c === 0) res(); else { dead = dead || new Error('encoder exited ' + c); rej(dead); } });
+    p.on('error', (e) => { dead = dead || e; closed = true; rej(e); });
+  });
+  done.catch(() => {});   // observed through write()/end(); never an unhandledRejection
+  p.stdin.on('error', (e) => { dead = dead || e; });   // EPIPE from a dead process
+  const write = (b) => new Promise((r, j) => {
+    if (dead || closed) return j(dead || new Error('encoder closed'));
+    const onDrain = () => { p.removeListener('close', onClose); r(); };
+    const onClose = () => { p.stdin.removeListener('drain', onDrain); j(dead || new Error('encoder closed')); };
+    if (p.stdin.write(Buffer.from(b.buffer, b.byteOffset, b.byteLength))) return r();
+    p.stdin.once('drain', onDrain); p.once('close', onClose);
+  });
+  return { write, end: () => { p.stdin.end(); return done; }, kill: () => { try { p.kill('SIGKILL'); } catch (_) {} } };
 }
 
 async function falRun(falKey, model, input, onTick) {
@@ -275,6 +290,7 @@ async function lightMatchedPrompt({ anthropicKey, brief, frameJpeg, shotFrames }
 async function runBgCutout(ctx) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bgcut_'));
   const step = (s, extra) => ctx.update({ step: s, ...(extra || {}) });
+  const encs = [], track = (e) => (encs.push(e), e);   // killed on error, so no ffmpeg waits on stdin forever
   try {
     step('download');
     const raw = path.join(tmp, 'raw.mp4'); await download(ctx.videoUrl, raw);
@@ -334,7 +350,7 @@ async function runBgCutout(ctx) {
     // Inputs are built one shot at a time (memory); the VACE calls then run in parallel.
     for (const sh of shots) {
       const gf = path.join(tmp, `grey${sh.j}.mp4`), mf = path.join(tmp, `inv${sh.j}.mp4`);
-      const ge = encoder(gf, W, H, fps), me = encoder(mf, W, H, fps, true);
+      const ge = track(encoder(gf, W, H, fps)), me = track(encoder(mf, W, H, fps, true));
       let last = null, written = 0;
       for (let c0 = sh.a; c0 < sh.b; c0 += CHUNK) {
         const c1 = Math.min(sh.b, c0 + CHUNK);
@@ -362,7 +378,7 @@ async function runBgCutout(ctx) {
     }));
 
     step('composite');
-    const outV = path.join(tmp, 'comp.mp4'), enc = encoder(outV, W, H, fps);
+    const outV = path.join(tmp, 'comp.mp4'), enc = track(encoder(outV, W, H, fps));
     const shotLog = [];
     for (const sh of shots) {
       const nBg = (await readFrames(bgFiles[sh.j], 90, 160, 0, 100000, true, true)).length;
@@ -400,9 +416,10 @@ async function runBgCutout(ctx) {
     const vaceSeconds = shots.reduce((s, sh) => s + Math.max(sh.b - sh.a, VACE_MIN_FRAMES) / fps, 0);
     return { resultFile: result, tmpDir: tmp, prompt, shots: shotLog, size: `${W}x${H}`, fps, costUsd: Math.round(vaceSeconds * 0.08 * 100) / 100 };
   } catch (e) {
+    encs.forEach((x) => x.kill());
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
     throw e;
   }
 }
 
-module.exports = { runBgCutout, probe, lightMatchedPrompt, detectCuts, firmMatte, matteClean, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };
+module.exports = { runBgCutout, encoder, probe, lightMatchedPrompt, detectCuts, firmMatte, matteClean, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };
