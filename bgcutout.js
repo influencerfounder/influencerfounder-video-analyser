@@ -240,47 +240,74 @@ async function download(url, file) {
   fs.writeFileSync(file, Buffer.from(r.data));
 }
 
+// Guard words (2026-10-19 rewrite, /toolscan §6.4): the first guard matched a 4+ letter brief word as a plain
+// SUBSTRING, so a Dutch brief answered in English ("strand" vs "beach") and plurals were rejected — losing the
+// per-shot lines — while "park" matched "parking". Now: whole words, singular/plural folded, and Claude names the
+// new place in English itself ("place"), so the check works whatever language the brief is in.
+const GUARD_STOP = new Set(['with', 'that', 'this', 'from', 'into', 'over', 'under', 'very', 'some', 'busy', 'evening', 'night', 'morning', 'visible', 'behind', 'street', 'open', 'side',
+  'the', 'and', 'een', 'het', 'met', 'naar', 'voor', 'achter', 'bij', 'avond', 'nacht', 'ochtend', 'straat', 'place', 'background', 'scene', 'light', 'soft']);
+function stem(w) { return w.replace(/(ies)$/, 'y').replace(/(sses|shes|ches|xes)$/, (m) => m.slice(0, -2)).replace(/([^s])s$/, '$1'); }
+function guardWords(text) {
+  return [...new Set((String(text || '').toLowerCase().match(/[a-zà-ÿ]{4,}/g) || []).filter((w) => !GUARD_STOP.has(w)).map(stem))];
+}
+/** Does `prompt` name the place? true when it contains, as a whole word (plural folded), at least one guard word
+ *  of the brief OR half (at least one) of the guard words of Claude's own English place phrase. */
+function namesPlace(prompt, brief, place) {
+  const have = new Set(guardWords(prompt));
+  const b = guardWords(brief), pl = guardWords(place);
+  if (!b.length && !pl.length) return true;            // nothing checkable (a brief of stop words only)
+  if (b.some((w) => have.has(w))) return true;
+  if (pl.length && pl.filter((w) => have.has(w)).length >= Math.max(1, Math.ceil(pl.length / 2))) return true;
+  return false;
+}
+
 /** Claude writes the background prompt in the SOURCE's light (the lesson that mattered most). */
 async function lightMatchedPrompt({ anthropicKey, brief, frameJpeg, shotFrames }) {
-  const fallback = {
-    prompt: `${brief}. Soft, even light that matches a phone video, background strongly out of focus with soft bokeh, muted realistic colours. Natural handheld phone footage.`,
+  const fallbackFor = (place) => ({
+    prompt: `${place || brief}. Soft, even light that matches a phone video, background strongly out of focus with soft bokeh, muted realistic colours. Natural handheld phone footage.`,
     negative: 'hard sunlight, harsh shadows, oversaturated, cartoon, sharp background, readable text, watermark, water under people, walking on water',
-  };
+  });
+  const fallback = fallbackFor('');
   if (!anthropicKey || (!frameJpeg && !(shotFrames && shotFrames.length))) return { ...fallback, source: 'fallback' };
-  try {
+  const ask = async (correction) => {
     const r = await axios.post('https://api.anthropic.com/v1/messages', {
       model: 'claude-sonnet-5', max_tokens: 1400, thinking: { type: 'disabled' },
       system: 'You write background prompts for a video inpainting model. The people in the video stay exactly as filmed; the space behind them is REPLACED by a NEW place, shot by shot. The NEW place is the one the user asks for — never the place you see in the frames. Use the frames ONLY for the light and the camera angle; never describe their location, architecture, columns, floors or objects. So the new background must be lit like the ORIGINAL frames or the composite looks fake: match brightness, light softness/hardness, colour temperature, light direction, how blurred the background is. Never describe the people. Never ask for readable text or signs.\n'
         + 'You get one frame per shot. Write ONE shared base prompt for the place and its light, plus a short addition per shot saying what this camera angle shows: which way the camera looks (along the street, towards a wall, across), and what is directly under, in front of and behind the people. RULE: wherever people stand or walk (and the floor visible around their feet or below the frame edge) is solid ground — a street, quay, pavement or floor. Water, drops, roads with traffic or sky are only to the side or further back, never under or directly in front of a person.\n'
-        + 'Return ONLY JSON: {"prompt":"base, 50-90 words","negative":"10-25 words, include anything clashing with the original light and \'water under people, walking on water\'","shots":[{"shot":1,"add":"10-30 words"}, ...]}',
+        + 'Write everything in English, whatever language the request is in. "place" is the NEW place in 2-6 plain English words, and the base prompt must use those words.\n'
+        + 'Return ONLY JSON: {"place":"2-6 English words","prompt":"base, 50-90 words","negative":"10-25 words, include anything clashing with the original light and \'water under people, walking on water\'","shots":[{"shot":1,"add":"10-30 words"}, ...]}',
       messages: [{ role: 'user', content: [
         { type: 'text', text: `NEW PLACE (describe this, not the frames' location): ${brief}` },
         ...(shotFrames && shotFrames.length ? shotFrames : [{ shot: 1, jpeg: frameJpeg }]).flatMap((f) => [
           { type: 'text', text: `Shot ${f.shot}:` },
           { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: f.jpeg.toString('base64') } },
         ]),
-        { type: 'text', text: `Write the base prompt for the NEW PLACE — ${brief} — lit like these frames, and one addition per shot (camera angle + solid ground under/in front of the people, in the NEW place).` },
+        { type: 'text', text: `Write the base prompt for the NEW PLACE — ${brief} — lit like these frames, and one addition per shot (camera angle + solid ground under/in front of the people, in the NEW place).`
+          + (correction ? `\nYour previous answer described the wrong place ("${correction}"). Describe the NEW PLACE above, not what is in the frames.` : '') },
       ] }],
     }, { headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout: 60000 });
     const text = (r.data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
-    const j = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+    return JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+  };
+  let place = '', rejected = '';
+  try {
     // Guard (2026-10-18): with eight frames Claude once described the ORIGINAL station and dropped the brief.
-    // The base prompt must name at least one of the brief's own words (4+ letters), or it is not this place.
-    const briefWords = String(brief).toLowerCase().match(/[a-zà-ÿ]{4,}/g) || [];
-    const STOP = new Set(['with', 'that', 'this', 'from', 'into', 'over', 'under', 'very', 'some', 'busy', 'evening', 'night', 'morning', 'visible', 'behind', 'street', 'open', 'side']);
-    const keys = briefWords.filter((w) => !STOP.has(w));
-    const namesPlace = !keys.length || keys.some((w) => String(j.prompt || '').toLowerCase().includes(w));
-    if (!namesPlace) console.warn('[bgcutout] prompt ignored the brief, using the brief-led fallback:', String(j.prompt).slice(0, 120));
-    if (j.prompt && j.prompt.length > 20 && !namesPlace) {
+    // A prompt that does not name the place gets ONE more try with the mistake pointed out, then the fallback.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const j = await ask(attempt ? rejected.slice(0, 160) : '');
+      place = String(j.place || place || '').slice(0, 80);
+      if (!(j.prompt && j.prompt.length > 20)) continue;
+      if (!namesPlace(j.prompt, brief, place)) {
+        rejected = String(j.prompt).slice(0, 300);
+        console.warn(`[bgcutout] prompt ignored the place (attempt ${attempt + 1}):`, rejected.slice(0, 120));
+        continue;
+      }
       const shots = {}; for (const x of Array.isArray(j.shots) ? j.shots : []) if (x && x.shot && x.add) shots[Number(x.shot)] = String(x.add).slice(0, 300);
-      return { ...fallback, shots: {}, source: 'fallback', rejected: String(j.prompt).slice(0, 300) };
-    }
-    if (j.prompt && j.prompt.length > 20) {
-      const shots = {}; for (const x of Array.isArray(j.shots) ? j.shots : []) if (x && x.shot && x.add) shots[Number(x.shot)] = String(x.add).slice(0, 300);
-      return { prompt: j.prompt, negative: j.negative || fallback.negative, shots, source: 'claude' };
+      return { prompt: j.prompt, negative: j.negative || fallback.negative, shots, place, source: 'claude', ...(attempt ? { retried: true, rejected } : {}) };
     }
   } catch (e) { console.warn('[bgcutout] prompt writer failed, fallback used:', e.message); }
-  return { ...fallback, source: 'fallback' };
+  // English place phrase when Claude gave one (a Dutch brief must not reach the video model raw)
+  return { ...fallbackFor(place), shots: {}, source: 'fallback', ...(rejected ? { rejected } : {}) };
 }
 
 /**
@@ -422,4 +449,4 @@ async function runBgCutout(ctx) {
   }
 }
 
-module.exports = { runBgCutout, encoder, probe, lightMatchedPrompt, detectCuts, firmMatte, matteClean, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };
+module.exports = { runBgCutout, encoder, probe, lightMatchedPrompt, namesPlace, guardWords, detectCuts, firmMatte, matteClean, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };
