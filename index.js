@@ -17,7 +17,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.96.1';
+const ANALYSER_VERSION = '2.96.2';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const bgCutout = require('./bgcutout');
@@ -2162,7 +2162,7 @@ app.post('/api/faceswap', async (req, res) => {
 // no job. Runs async (~5–10 min); poll GET /api/bg-cutout/:jobId → resultUrl on the temp-video store.
 const bgCutoutJobs = new Map();
 app.post('/api/bg-cutout', (req, res) => {
-  const { videoUrl, brief, falKey } = req.body || {};
+  const { videoUrl, brief, falKey, resolution } = req.body || {};
   if (!/^https:\/\//.test(String(videoUrl || ''))) return res.status(400).json({ success: false, error: 'videoUrl must be https' });
   if (!falKey) return res.status(400).json({ success: false, error: 'falKey required' });
   if (!String(brief || '').trim()) return res.status(400).json({ success: false, error: 'brief required' });
@@ -2177,7 +2177,7 @@ app.post('/api/bg-cutout', (req, res) => {
     return `${base}/api/temp-video/${token}`;
   };
   bgCutout.runBgCutout({
-    videoUrl, brief: String(brief).slice(0, 400), falKey, anthropicKey: process.env.ANTHROPIC_API_KEY,
+    videoUrl, brief: String(brief).slice(0, 400), falKey, anthropicKey: process.env.ANTHROPIC_API_KEY, resolution: resolution === '480p' ? '480p' : '720p',
     publish, update: (f) => Object.assign(job, f),
   }).then((r) => {
     Object.assign(job, { status: 'done', step: 'done', resultUrl: publish(r.resultFile, 'video/mp4'), shots: r.shots, costUsd: r.costUsd, size: r.size, fps: r.fps });

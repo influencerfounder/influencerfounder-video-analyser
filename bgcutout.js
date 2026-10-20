@@ -337,6 +337,9 @@ async function lightMatchedPrompt({ anthropicKey, brief, frameJpeg, shotFrames }
  * update(fields) } → { resultFile, prompt, shots, cost }.
  */
 async function runBgCutout(ctx) {
+  // 480p backgrounds cost half (fal: 0.04 vs 0.08 USD/s) — the person is pasted back at full resolution either way,
+  // and the background is blurred on purpose (Mike, 2026-10-20: 'too expensive for a trial reel', test A).
+  const vaceRes = ctx.resolution === '480p' ? '480p' : '720p', vaceRate = vaceRes === '480p' ? 0.04 : 0.08;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bgcut_'));
   const step = (s, extra) => ctx.update({ step: s, ...(extra || {}) });
   const encs = [], track = (e) => (encs.push(e), e);   // killed on error, so no ffmpeg waits on stdin forever
@@ -415,7 +418,7 @@ async function runBgCutout(ctx) {
       const gf = sh.gf, mf = sh.mf;
       const r = await falRun(ctx.falKey, 'fal-ai/wan-vace-14b/inpainting', {
         prompt: prompt.prompt + (prompt.shots && prompt.shots[sh.j + 1] ? ' ' + prompt.shots[sh.j + 1] : ''), negative_prompt: prompt.negative, video_url: ctx.publish(gf, 'video/mp4'), mask_video_url: ctx.publish(mf, 'video/mp4'),
-        match_input_num_frames: true, match_input_frames_per_second: true, resolution: '720p', aspect_ratio: H >= W ? '9:16' : '16:9',
+        match_input_num_frames: true, match_input_frames_per_second: true, resolution: vaceRes, aspect_ratio: H >= W ? '9:16' : '16:9',
         video_quality: 'maximum', enable_prompt_expansion: false, seed: 4242,
       });
       const url = r && r.video && r.video.url; if (!url) throw new Error(`VACE returned no video for shot ${sh.j + 1}`);
@@ -463,7 +466,7 @@ async function runBgCutout(ctx) {
     if (info.audio) await run('ffmpeg', ['-loglevel', 'error', '-y', '-i', outV, '-i', raw, '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-movflags', '+faststart', result]);
     else await run('ffmpeg', ['-loglevel', 'error', '-y', '-i', outV, '-c', 'copy', '-movflags', '+faststart', result]);
     const vaceSeconds = shots.reduce((s, sh) => s + Math.max(sh.b - sh.a, VACE_MIN_FRAMES) / fps, 0);
-    return { resultFile: result, tmpDir: tmp, prompt, shots: shotLog, size: `${W}x${H}`, fps, costUsd: Math.round(vaceSeconds * 0.08 * 100) / 100 };
+    return { resultFile: result, tmpDir: tmp, prompt, shots: shotLog, size: `${W}x${H}`, fps, costUsd: Math.round(vaceSeconds * vaceRate * 100) / 100, resolution: vaceRes };
   } catch (e) {
     encs.forEach((x) => x.kill());
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
