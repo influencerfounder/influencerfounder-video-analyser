@@ -135,7 +135,8 @@ function probeDuration(mp4) {
     let a = { success: false, error: 'not attempted' };
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        a = await post(`${RAILWAY}/api/clone`, { videoUrl: s.url, promptStyle: 'original', personaGender: s.personaGender });
+        a = await post(`${RAILWAY}/api/clone`, { videoUrl: s.url, promptStyle: 'original', personaGender: s.personaGender },
+          process.env.ANALYSER_SECRET ? { 'X-IF-Analyser-Key': process.env.ANALYSER_SECRET } : {});   // 🔐 analyserAuth.js
         break;
       } catch (e) {
         a = { success: false, error: e.message };

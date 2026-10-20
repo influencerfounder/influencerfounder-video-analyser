@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.94.2';
+const ANALYSER_VERSION = '2.95.0';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const bgCutout = require('./bgcutout');
@@ -370,6 +370,9 @@ function recommendRecreateSpec(sourceSecs) {
 }
 const PORT = process.env.PORT || 3000;
 
+// 🔐 Every route needs the tool's shared key, except the open file/health links (analyserAuth.js).
+// Before express.json, so an unauthorised caller never gets a 50 MB body parsed.
+app.use(require('./analyserAuth').middleware());
 app.use(express.json({ limit: '50mb' }));
 
 app.use((req, res, next) => {

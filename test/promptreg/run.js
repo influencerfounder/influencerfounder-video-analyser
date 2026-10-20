@@ -140,7 +140,7 @@ function frames(mp4, duration) {
 async function promptFor(fx, mp4) {
   if (DEPLOYED) {
     const r = await fetch(`${RAILWAY}/api/clone`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...(process.env.ANALYSER_SECRET ? { 'X-IF-Analyser-Key': process.env.ANALYSER_SECRET } : {}) },   // 🔐 analyserAuth.js
       body: JSON.stringify({ videoUrl: fx.url, promptStyle: 'realism', personaGender: fx.personaGender, shotCuts: SHOTCUTS })
     }).then(r => r.json());
     if (!r.success) throw new Error('deployed analyse failed: ' + r.error);
