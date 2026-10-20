@@ -1,4 +1,11 @@
 const express = require('express');
+// IPv4 FOR EVERY OUTGOING CONNECTION (2.96.1, 2026-10-20). Railway has no public IPv6, and Node 22's dual-stack
+// connect (autoSelectFamily) gives each address family only 250 ms — so a far CDN edge (Instagram hands out
+// Recife etc.) fails in ~0.3 s with an AggregateError whose message is EMPTY. fetchVideoBuf fixed one download on
+// 10-14; the Trial Reel Lab spoof (/api/variants) and ~10 other raw axios.get downloads still failed this way
+// ("Request failed with status code 500", log line `error:` with nothing after it). Set once, here, for all of them.
+require('net').setDefaultAutoSelectFamily(false);
+require('dns').setDefaultResultOrder('ipv4first');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -10,7 +17,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.96.0';
+const ANALYSER_VERSION = '2.96.1';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const bgCutout = require('./bgcutout');
@@ -4739,8 +4746,9 @@ app.post('/api/variants', async (req, res) => {
 
     res.json({ success: true, seed: runSeed, count: out.length, dimensions: { width, height }, variants: out });
   } catch (err) {
-    const message = err.response?.data?.error?.message || err.message;
-    console.error(`[variants:${runSeed}] error:`, message);
+    // An AggregateError (connect failure) has an EMPTY message — name the code so the log and the user see something.
+    const message = err.response?.data?.error?.message || err.message || err.code || err.errors?.[0]?.code || 'Variant generation failed';
+    console.error(`[variants:${runSeed}] error:`, message, err.code || '', err.response?.status || '');
     res.status(500).json({ success: false, error: message });
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
