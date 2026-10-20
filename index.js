@@ -10,7 +10,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.95.2';
+const ANALYSER_VERSION = '2.96.0';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const bgCutout = require('./bgcutout');
@@ -1310,7 +1310,9 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
 // has no ceiling and Seedance will render a mushy, noisy frame. A further cut to ~40 words was drafted
 // (tier 2) and deliberately NOT shipped — it needs a real A/B on video, not a word count.
     const LANE_LAYERS = {
-      'AUTHENTIC': 'Filmed on a smartphone: hand tremor with small framing corrections, slightly off-center framing, mild lens softness, faint sensor noise, mild compression and auto-exposure artefacts, uneven ambient light with natural shadow falloff, real skin with visible pores and blemishes, no beauty filter, stray hair flyaways, facial asymmetry, lived-in surroundings.',
+      // 2026-10-20 (Mike: the old-phone look on every non-high-end video): AUTHENTIC IS the canonical old-phone
+      // layer, so Classic, NEW and the Studio say one sentence. Was: 'Filmed on a smartphone: hand tremor … lived-in surroundings.'
+      'AUTHENTIC': unfocusLib.UNFOCUS_LAYER,
       'HIGH-END': 'Shot on a cinema camera: subtle lens vignetting, gentle highlight halation, fine organic film grain, controlled light with soft falloff and true shadows, photorealistic skin keeping pores and micro-texture, restrained filmic grade, natural body weight and visible breath, never posed stillness.',
     };
     // Footwear is stated explicitly because the influencer's own full-body

@@ -33,6 +33,7 @@ const RULES = {
   mainLabel: 'The writer\'s placeholder MAIN is always replaced by the influencer\'s name (lobby run 1: "walks beside MAIN").',
   phaseLength:    'Phases inside one take (no cut) shorter than 1.5 s are merged into a neighbour: Alibaba recommends 2-5 s segments and G63 run 1 came back as 13 one-second phases (1,119 words).',
   wanAudio:       'Wan adds dialogue and music unless told: "No dialogue. No background music." (Wan research, 2026-09-07).',
+  phoneLayer:     'Every phone-look video ends with the old-phone layer (unfocus.js), students included (Mike, 2026-10-20). Cinema-look videos keep none.',
   unfocus:        'Real Unfocus Look (owner switch): the old-phone layer only. The autofocus moment is added to the finished video (focusblur.js) since 2026-10-14: Wan rendered no dip on two takes that carried a timed sentence.',
 };
 
@@ -247,7 +248,10 @@ function compile(spec, opts = {}) {
   });
 
   const tail = [];
-  if (opts.unfocus) { // RULE unfocus
+  // RULE phoneLayer (Mike, 2026-10-20: "can we use this on all non high end videos we make?" → "yes build it"):
+  // the old-phone layer rides on EVERY phone-look video, not only when the owner's unfocus switch is on. A
+  // cinema-look source keeps no phone layer, unless the switch turns it into a phone video (RULE unfocus).
+  if (opts.unfocus || S.look !== 'cinema') {
     tail.push(UNFOCUS_LAYER);   // the autofocus moment is added after generation (focusblur.js), never prompted
   }
   if (!multi) tail.push('Generate single shot.');

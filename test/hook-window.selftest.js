@@ -136,7 +136,7 @@ t('footwear / no-music / avoid-list exist ONLY in the tombstone', () => {
     assert(!LIVE.includes(x), 'still live in code: ' + x));
 });
 t('the realism layers themselves survived', () => {
-  assert(/Filmed on a smartphone/.test(LIVE) && /Shot on a cinema camera/.test(LIVE));
+  assert(/'AUTHENTIC': unfocusLib\.UNFOCUS_LAYER/.test(LIVE) && /Shot on a cinema camera/.test(LIVE))   // AUTHENTIC = the canonical old-phone layer since 2026-10-20 (unfocus.js);
 });
 t('STEP 3 no longer promises a "negative suffix" it does not append', () => {
   assert(!/the negative suffix in code/.test(SRC), 'stale instruction survived');

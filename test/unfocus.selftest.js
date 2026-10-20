@@ -33,6 +33,20 @@ t('NEW compile: the switch adds the layer + moments and never the cinema look; o
   assert.ok(/^Realistic vertical smartphone video/.test(on), 'on: never the cinema look');
   assert.ok(on.includes(UNFOCUS_LAYER) && !/autofocus/i.test(on), on.slice(-600));
 });
+t('phoneLayer: every PHONE-look video carries the old-phone layer exactly once, switch on or off; cinema keeps none (2026-10-20)', () => {
+  const spec = { look: 'phone', setting: 'a rooftop', outfit: { top_name: 'a satin shirt' }, shots: [{ start: 0, main_events: ['laughs'], camera: { move: 'fixed' } }] };
+  for (const unfocus of [false, true]) {
+    const p = compile(spec, { name: 'Kryfex', durationSec: 7, unfocus }).prompt;
+    assert.strictEqual(p.split(UNFOCUS_LAYER).length - 1, 1, 'unfocus=' + unfocus + ': ' + p.slice(-400));
+  }
+  const cinema = compile({ ...spec, look: 'cinema' }, { name: 'Kryfex', durationSec: 7 }).prompt;
+  assert.ok(!cinema.includes(UNFOCUS_LAYER), 'a cinema source stays cinema');
+});
+t('Classic: the AUTHENTIC lane IS the canonical old-phone layer (one sentence everywhere); HIGH-END untouched', () => {
+  const SRC = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  assert.ok(/'AUTHENTIC': unfocusLib\.UNFOCUS_LAYER,/.test(SRC), 'AUTHENTIC lane');
+  assert.ok(/'HIGH-END': 'Shot on a cinema camera:/.test(SRC), 'cinema lane');
+});
 t('the 3-minute caches never serve an unfocus answer to an off request (or back)', () => {
   const SRC = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
   const body = SRC.slice(SRC.indexOf('function cloneJoinKey(b)'), SRC.indexOf('function cloneJoinKey(b)') + 1500);
