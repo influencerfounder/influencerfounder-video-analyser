@@ -19,8 +19,10 @@ ok(A.check(R('POST', '/api/temp-video'), { ...env, ANALYSER_SECRET_MODE: 'requir
 ok(A.check(R('GET', '/api/temp-video/a/b'), { ...env, ANALYSER_SECRET_MODE: 'require' }).allow === false, 'require: no path tricks past the open list');
 ok(A.check(R('POST', '/api/clone'), { ANALYSER_SECRET_MODE: 'require' }).allow === false, 'require with NO secret configured refuses (fail closed)');
 ok(A.check(R('POST', '/api/clone', ''), { ANALYSER_SECRET_MODE: 'require', ANALYSER_SECRET: '' }).allow === false, 'require: empty key never matches an empty secret');
-ok(A.check(R('POST', '/api/clone'), env).allow === true && A.check(R('POST', '/api/clone'), env).reason === 'missing_key_logged', 'log mode: served but logged');
-ok(A.check(R('POST', '/api/clone'), {}).allow === true, 'nothing configured: served (stage 0, today\'s behaviour)');
+ok(A.check(R('POST', '/api/clone'), { ...env, ANALYSER_SECRET_MODE: 'log' }).allow === true && A.check(R('POST', '/api/clone'), { ...env, ANALYSER_SECRET_MODE: 'log' }).reason === 'missing_key_logged', 'explicit log mode (rotation): served but logged');
+ok(A.check(R('POST', '/api/clone'), env).allow === false, 'mode UNSET with a secret: refused (fail closed by default)');
+ok(A.check(R('POST', '/api/clone'), {}).allow === false, 'nothing configured at all (variables deleted): refused, never silently open');
+ok(A.check(R('GET', '/api/temp-video/t'), {}).allow === true, 'nothing configured: the open file links still serve');
 // real Express
 (async () => {
   const run = async (mode) => {
@@ -35,7 +37,7 @@ ok(A.check(R('POST', '/api/clone'), {}).allow === true, 'nothing configured: ser
   };
   const req_ = await run('require');
   ok(req_.noKey === 401 && req_.key === 200 && req_.file === 200, `Express require: no key ${req_.noKey}, key ${req_.key}, file ${req_.file}`);
-  const log_ = await run('');
+  const log_ = await run('log');
   ok(log_.noKey === 200 && log_.logs.length === 1 && log_.key === 200, `Express log: no key ${log_.noKey} (logged ${log_.logs.length}), key ${log_.key}`);
   // wired into the real server before the body parser
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');

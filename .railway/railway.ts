@@ -17,7 +17,7 @@ export default defineRailway(() => {
     // (deprecated Config-as-Code, migrated 2026-09-09).
     healthcheck: "/",
     healthcheckTimeout: 300,
-    env: { ANTHROPIC_API_KEY: preserve(), APIFY_API_KEY: preserve(), GROQ_API_KEY: preserve(), KIE_API_KEY: preserve(), GEMINI_API_KEY: preserve() },   // GEMINI: shot-log test B, set in the dashboard 2026-10-04
+    env: { ANTHROPIC_API_KEY: preserve(), APIFY_API_KEY: preserve(), GROQ_API_KEY: preserve(), KIE_API_KEY: preserve(), GEMINI_API_KEY: preserve(), ANALYSER_SECRET: preserve(), ANALYSER_SECRET_MODE: preserve() },   // GEMINI: shot-log test B, set in the dashboard 2026-10-04 · ANALYSER_SECRET(+_MODE): the tool's shared key, 2026-10-20 (analyserAuth.js)
   });
 
   return project("influencerfounder-video-analyser", {

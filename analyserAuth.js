@@ -7,10 +7,10 @@
 // OPEN on purpose — fetched by vendors (Kie, fal) and browsers that cannot carry a header, each behind an
 // unguessable token: GET /, GET /health, GET /api/temp-video/:token, GET /api/faceswap/download/:jobId.
 //
-// Rollout in two stages, so no deploy order can break recreates:
-//   ANALYSER_SECRET set, ANALYSER_SECRET_MODE unset → 'log': a missing/wrong key is logged, still served.
-//   ANALYSER_SECRET_MODE=require                     → refused with 401.
-// require with no secret set refuses everything (fail closed), never "open because unset".
+// FAIL CLOSED by default since the rollout finished (2026-10-20, reviewer): a missing or wrong key is refused
+// unless ANALYSER_SECRET_MODE=log is set EXPLICITLY (serve + log — only for a key rotation). No secret set
+// refuses everything. So a variable deleted by a `railway config apply` (both are preserve()d in
+// .railway/railway.ts) makes a loud outage, never a silently open analyser.
 const crypto = require('crypto');
 
 const HEADER = 'x-if-analyser-key';
@@ -31,17 +31,17 @@ function keyMatches(given, secret) {
 function check(req, env = process.env) {
   if (isOpen(req.method, req.path)) return { allow: true, reason: 'open' };
   const secret = env.ANALYSER_SECRET || '';
-  const require_ = String(env.ANALYSER_SECRET_MODE || '').toLowerCase() === 'require';
+  const require_ = String(env.ANALYSER_SECRET_MODE || '').toLowerCase() !== 'log';
   const ok = keyMatches(req.get ? req.get(HEADER) : (req.headers || {})[HEADER], secret);
   if (ok) return { allow: true, reason: 'key' };
   if (require_) return { allow: false, reason: secret ? 'bad_key' : 'no_secret_configured' };
-  return { allow: true, reason: secret ? 'missing_key_logged' : 'not_configured' };
+  return { allow: true, reason: 'missing_key_logged' };
 }
 function middleware(log = console.log) {
   return (req, res, next) => {
     const d = check(req);
     if (d.reason === 'missing_key_logged') log(`[auth] ${req.method} ${req.path} without a valid ${HEADER} (served: mode is log)`);
-    if (!d.allow) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    if (!d.allow) { log(`[auth] refused ${req.method} ${req.path} (${d.reason})`); return res.status(401).json({ success: false, error: 'Unauthorized' }); }
     next();
   };
 }
