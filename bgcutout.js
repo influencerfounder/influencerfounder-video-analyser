@@ -243,15 +243,21 @@ async function download(url, file) {
 // Guard words (2026-10-19 rewrite, /toolscan §6.4): the first guard matched a 4+ letter brief word as a plain
 // SUBSTRING, so a Dutch brief answered in English ("strand" vs "beach") and plurals were rejected — losing the
 // per-shot lines — while "park" matched "parking". Now: whole words, singular/plural folded, and Claude names the
-// new place in English itself ("place"), so the check works whatever language the brief is in.
+// new place in English in a SEPARATE text-only call that sees only the brief, never the frames — so the check
+// works whatever language the brief is in, and the words it checks against cannot come from the answer they
+// check (reviewer 2026-10-20: a station prompt with place "train station" passed its own check).
 const GUARD_STOP = new Set(['with', 'that', 'this', 'from', 'into', 'over', 'under', 'very', 'some', 'busy', 'evening', 'night', 'morning', 'visible', 'behind', 'street', 'open', 'side',
   'the', 'and', 'een', 'het', 'met', 'naar', 'voor', 'achter', 'bij', 'avond', 'nacht', 'ochtend', 'straat', 'place', 'background', 'scene', 'light', 'soft']);
-function stem(w) { return w.replace(/(ies)$/, 'y').replace(/(sses|shes|ches|xes)$/, (m) => m.slice(0, -2)).replace(/([^s])s$/, '$1'); }
+const placeFromBriefSafe = (p) => Promise.resolve(p).then((x) => String(x || '').slice(0, 80), () => '');
+// Plural folding: compare by dropping a final -s/-es/-ies both ways (rough on purpose: "niches"/"niche" and
+// "buses"/"bus" must meet, so a final "e" is dropped too after the s is gone).
+function stem(w) { return w.replace(/ies$/, 'y').replace(/([^s])s$/, '$1').replace(/e$/, '').replace(/([^s])s$/, '$1'); }
 function guardWords(text) {
   return [...new Set((String(text || '').toLowerCase().match(/[a-zà-ÿ]{4,}/g) || []).filter((w) => !GUARD_STOP.has(w)).map(stem))];
 }
 /** Does `prompt` name the place? true when it contains, as a whole word (plural folded), at least one guard word
- *  of the brief OR half (at least one) of the guard words of Claude's own English place phrase. */
+ *  of the brief OR half (at least one) of the guard words of `place` — the brief restated in English by
+ *  placeFromBrief(), which saw no frames. */
 function namesPlace(prompt, brief, place) {
   const have = new Set(guardWords(prompt));
   const b = guardWords(brief), pl = guardWords(place);
@@ -259,6 +265,20 @@ function namesPlace(prompt, brief, place) {
   if (b.some((w) => have.has(w))) return true;
   if (pl.length && pl.filter((w) => have.has(w)).length >= Math.max(1, Math.ceil(pl.length / 2))) return true;
   return false;
+}
+
+/** The brief, restated as 2-6 plain English words, from the brief ALONE (no frames, so it cannot drift to the
+ *  original location). '' when it fails — the guard then checks the brief's own words only. */
+async function placeFromBrief(anthropicKey, brief) {
+  try {
+    const r = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-5', max_tokens: 60, thinking: { type: 'disabled' },
+      system: 'Restate the place the user describes as 2-6 plain English words (translate if needed). Return only those words, no punctuation, no quotes.',
+      messages: [{ role: 'user', content: String(brief).slice(0, 400) }],
+    }, { headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout: 20000 });
+    const t = (r.data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join(' ');
+    return t.replace(/["'`.\n]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').slice(0, 8).join(' ');
+  } catch (e) { console.warn('[bgcutout] place restatement failed (brief words only):', e.message); return ''; }
 }
 
 /** Claude writes the background prompt in the SOURCE's light (the lesson that mattered most). */
@@ -274,8 +294,8 @@ async function lightMatchedPrompt({ anthropicKey, brief, frameJpeg, shotFrames }
       model: 'claude-sonnet-5', max_tokens: 1400, thinking: { type: 'disabled' },
       system: 'You write background prompts for a video inpainting model. The people in the video stay exactly as filmed; the space behind them is REPLACED by a NEW place, shot by shot. The NEW place is the one the user asks for — never the place you see in the frames. Use the frames ONLY for the light and the camera angle; never describe their location, architecture, columns, floors or objects. So the new background must be lit like the ORIGINAL frames or the composite looks fake: match brightness, light softness/hardness, colour temperature, light direction, how blurred the background is. Never describe the people. Never ask for readable text or signs.\n'
         + 'You get one frame per shot. Write ONE shared base prompt for the place and its light, plus a short addition per shot saying what this camera angle shows: which way the camera looks (along the street, towards a wall, across), and what is directly under, in front of and behind the people. RULE: wherever people stand or walk (and the floor visible around their feet or below the frame edge) is solid ground — a street, quay, pavement or floor. Water, drops, roads with traffic or sky are only to the side or further back, never under or directly in front of a person.\n'
-        + 'Write everything in English, whatever language the request is in. "place" is the NEW place in 2-6 plain English words, and the base prompt must use those words.\n'
-        + 'Return ONLY JSON: {"place":"2-6 English words","prompt":"base, 50-90 words","negative":"10-25 words, include anything clashing with the original light and \'water under people, walking on water\'","shots":[{"shot":1,"add":"10-30 words"}, ...]}',
+        + 'Write everything in English, whatever language the request is in, and name the NEW place in the base prompt.\n'
+        + 'Return ONLY JSON: {"prompt":"base, 50-90 words","negative":"10-25 words, include anything clashing with the original light and \'water under people, walking on water\'","shots":[{"shot":1,"add":"10-30 words"}, ...]}',
       messages: [{ role: 'user', content: [
         { type: 'text', text: `NEW PLACE (describe this, not the frames' location): ${brief}` },
         ...(shotFrames && shotFrames.length ? shotFrames : [{ shot: 1, jpeg: frameJpeg }]).flatMap((f) => [
@@ -290,12 +310,13 @@ async function lightMatchedPrompt({ anthropicKey, brief, frameJpeg, shotFrames }
     return JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
   };
   let place = '', rejected = '';
+  const placeP = placeFromBrief(anthropicKey, brief);   // in parallel with the first prompt; awaited before any check
   try {
     // Guard (2026-10-18): with eight frames Claude once described the ORIGINAL station and dropped the brief.
     // A prompt that does not name the place gets ONE more try with the mistake pointed out, then the fallback.
     for (let attempt = 0; attempt < 2; attempt++) {
       const j = await ask(attempt ? rejected.slice(0, 160) : '');
-      place = String(j.place || place || '').slice(0, 80);
+      if (!attempt) place = await placeFromBriefSafe(placeP);
       if (!(j.prompt && j.prompt.length > 20)) continue;
       if (!namesPlace(j.prompt, brief, place)) {
         rejected = String(j.prompt).slice(0, 300);
@@ -306,7 +327,8 @@ async function lightMatchedPrompt({ anthropicKey, brief, frameJpeg, shotFrames }
       return { prompt: j.prompt, negative: j.negative || fallback.negative, shots, place, source: 'claude', ...(attempt ? { retried: true, rejected } : {}) };
     }
   } catch (e) { console.warn('[bgcutout] prompt writer failed, fallback used:', e.message); }
-  // English place phrase when Claude gave one (a Dutch brief must not reach the video model raw)
+  // English place (from the brief alone) when we have one — a Dutch brief must not reach the video model raw
+  if (!place) place = await placeFromBriefSafe(placeP);
   return { ...fallbackFor(place), shots: {}, source: 'fallback', ...(rejected ? { rejected } : {}) };
 }
 
@@ -449,4 +471,4 @@ async function runBgCutout(ctx) {
   }
 }
 
-module.exports = { runBgCutout, encoder, probe, lightMatchedPrompt, namesPlace, guardWords, detectCuts, firmMatte, matteClean, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };
+module.exports = { runBgCutout, encoder, probe, lightMatchedPrompt, namesPlace, guardWords, placeFromBrief, detectCuts, firmMatte, matteClean, lightParams, compositeFrame, vaceInputs, boxBlur1, ringMean };

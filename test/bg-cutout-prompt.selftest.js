@@ -4,9 +4,9 @@
 // station again. Executes the real lightMatchedPrompt with a scripted Anthropic reply.
 const path = require('path');
 const axiosPath = require.resolve('axios', { paths: [path.join(__dirname, '..')] });
-let reply = '', sent = null, queue = null, calls = 0;
-require.cache[axiosPath] = { id: axiosPath, filename: axiosPath, loaded: true, exports: { post: async (_u, body) => { sent = body; calls++; const t = queue && queue.length ? queue.shift() : reply; return { data: { content: [{ type: 'text', text: t }] } }; } } };
-const { lightMatchedPrompt, namesPlace } = require('../bgcutout');
+let reply = '', sent = null, queue = null, calls = 0, placeReply = 'Amsterdam canal shopping street', placeCalls = 0, placeSent = null;
+require.cache[axiosPath] = { id: axiosPath, filename: axiosPath, loaded: true, exports: { post: async (_u, body) => { if (typeof body.messages[0].content === 'string') { placeCalls++; placeSent = body; return { data: { content: [{ type: 'text', text: placeReply }] } }; } sent = body; calls++; const t = queue && queue.length ? queue.shift() : reply; return { data: { content: [{ type: 'text', text: t }] } }; } } };
+const { lightMatchedPrompt, namesPlace, guardWords } = require('../bgcutout');
 let p = 0, f = 0; const ok = (c, m) => { c ? p++ : (f++, console.log('  x ' + m)); };
 const brief = 'an open-air Amsterdam canal-side shopping street in the evening, canal houses and a canal visible behind';
 const frames = [{ shot: 1, jpeg: Buffer.from('x') }, { shot: 2, jpeg: Buffer.from('y') }];
@@ -29,8 +29,11 @@ const frames = [{ shot: 1, jpeg: Buffer.from('x') }, { shot: 2, jpeg: Buffer.fro
   ok(!namesPlace('Interior transit concourse with sandstone columns', 'een Amsterdamse grachtenstraat', 'Amsterdam canal street'), 'the original-station prompt still fails with a Dutch brief');
   ok(namesPlace('Soft bokeh', 'busy street at night', ''), 'a brief of stop words only is not checkable and passes');
   // the retry: wrong place first, right place second → Claude's answer is kept (with its shot lines), 2 calls
-  const wrong = JSON.stringify({ place: 'Amsterdam canal street', prompt: 'Interior transit concourse with tall sandstone-clad columns and a polished grey stone floor, spotlights.', shots: [] });
-  const right = JSON.stringify({ place: 'Amsterdam canal street', prompt: 'An Amsterdam canal street at dusk, gabled houses along the water, soft light, strong bokeh.', shots: [{ shot: 1, add: 'quay underfoot' }] });
+  // reviewer 2026-10-20: the place words must NOT come from the reply they check — a wrong reply naming its own
+  // wrong place ("train station") passed. The reply's own `place` is now ignored entirely.
+  placeReply = 'Amsterdam canal street';
+  const wrong = JSON.stringify({ place: 'train station platform', prompt: 'A train station platform interior with tall sandstone-clad columns and a polished grey stone floor, spotlights.', shots: [] });
+  const right = JSON.stringify({ prompt: 'An Amsterdam canal street at dusk, gabled houses along the water, soft light, strong bokeh.', shots: [{ shot: 1, add: 'quay underfoot' }] });
   calls = 0; queue = [wrong, right];
   const c = await lightMatchedPrompt({ anthropicKey: 'k', brief: 'een Amsterdamse grachtenstraat', shotFrames: frames });
   ok(c.source === 'claude' && c.retried === true && c.shots[1] === 'quay underfoot' && calls === 2, 'a wrong place gets one retry and the second answer is kept (calls ' + calls + ')');
@@ -39,7 +42,22 @@ const frames = [{ shot: 1, jpeg: Buffer.from('x') }, { shot: 2, jpeg: Buffer.fro
   calls = 0; queue = [wrong, wrong];
   const d = await lightMatchedPrompt({ anthropicKey: 'k', brief: 'een Amsterdamse grachtenstraat', shotFrames: frames });
   ok(d.source === 'fallback' && /^Amsterdam canal street\./.test(d.prompt) && !/grachtenstraat/.test(d.prompt) && calls === 2, 'after two misses the fallback uses the English place, not the Dutch brief');
-  ok(/"place"/.test(sent.system) && /in English/.test(sent.system), 'the system prompt asks for the English place phrase');
+  ok(/in English/.test(sent.system) && !/"place"/.test(sent.system), 'the prompt writer writes English and is no longer asked to grade itself with a place phrase');
+  ok(placeSent && placeSent.messages[0].content === 'een Amsterdamse grachtenstraat' && !JSON.stringify(placeSent).includes('"image"'), 'the place restatement sees ONLY the brief, no frames');
+  // the reviewer's two cases, end to end: a station prompt naming its own station must not pass
+  placeReply = 'Amsterdam canal at sunset'; calls = 0; queue = [wrong, wrong];
+  const e = await lightMatchedPrompt({ anthropicKey: 'k', brief: 'Amsterdam canal at sunset', shotFrames: frames });
+  ok(e.source === 'fallback' && calls === 2, 'English brief + a station prompt with place "train station platform" → rejected twice, fallback');
+  placeReply = 'Amsterdam canals'; calls = 0; queue = [wrong, wrong];
+  const g = await lightMatchedPrompt({ anthropicKey: 'k', brief: 'grachten in Amsterdam', shotFrames: frames });
+  ok(g.source === 'fallback' && /^Amsterdam canals\./.test(g.prompt), 'Dutch brief + station prompt → rejected; fallback in the brief-only English place');
+  // the place call failing never blocks: brief words alone decide
+  placeReply = ''; calls = 0; queue = [right];
+  const h = await lightMatchedPrompt({ anthropicKey: 'k', brief: 'Amsterdam canal street', shotFrames: frames });
+  ok(h.source === 'claude' && calls === 1, 'no place restatement → the brief words alone still accept a right prompt');
+  // plural folding meets both ways (reviewer nit: niches/buses)
+  const same = (a, b) => guardWords(a).join() === guardWords(b).join();
+  ok(['houses|house', 'beaches|beach', 'glasses|glass', 'niches|niche', 'cities|city', 'mountains|mountain', 'classes|class'].every((x) => same(...x.split('|'))) && !same('parking', 'park'), 'singular and plural meet; parking is not park');
   queue = null;
   console.warn = warn;
   console.log(f ? `bg-cutout-prompt: ${f} FAILED, ${p} passed` : `bg-cutout-prompt: ${p} checks passed`);
