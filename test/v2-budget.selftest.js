@@ -39,7 +39,7 @@ const t = async (n, fn) => { try { await fn(); pass++; console.log('  ok  ' + n)
     if (!fs.existsSync(tool)) { console.log('      (tool repo not beside this one — skipped)'); return; }
     const s = fs.readFileSync(tool, 'utf8');
     const i = s.indexOf("app.post('/api/studio/recreate-v2/analyse'");
-    const m = /timeout:\s*(\d+)/.exec(s.slice(i, i + 3000));
+    const m = /timeout:\s*(\d+)/.exec(s.slice(i, i + 5000));   // 5000: the route grows (product only, 2026-10-21 pushed it past 3000)
     assert.ok(m, 'tool timeout not found');
     assert.ok(Number(m[1]) >= v2.V2_BUDGET_MS + 15000, `tool waits ${m[1]} ms, budget ${v2.V2_BUDGET_MS}`);
   });
