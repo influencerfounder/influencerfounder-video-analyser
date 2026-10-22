@@ -113,6 +113,12 @@ function garmentClause(side, outfit, name) {
  */
 function compile(spec, opts = {}) {
   const name = clean(opts.name) || 'the main person';
+  // 📦 PRODUCT ONLY (2026-10-22, Mike: "the prompt is really short … only on product recreation videos"). No
+  // influencer: the person of the original stays as the first frame shows them, and the PRODUCT gets its own line
+  // per shot from s.product_events (what the replaced object does — motion only, never its looks: RULE R3). Every
+  // branch below is guarded by productOnly, so a normal recreate compiles byte-for-byte as before.
+  const productOnly = opts.productOnly === true;
+  const productName = clean(opts.productName) || 'the product';
   const model = opts.model === 'seedance' ? 'seedance' : 'wan';
   const whole = model === 'seedance';
   const dur = Number(opts.durationSec) || Number(spec && spec.durationSec) || 0;
@@ -187,7 +193,9 @@ function compile(spec, opts = {}) {
   const BARE_TOP = /\b(shirtless|topless|no top|bare[- ]chest(ed)?|bare[- ]torso)\b/i;
   const bareTop = BARE_TOP.test(`${outfit.top_name || ''} ${outfit.top_front || ''}`) || (!top && skin.some(x => x === 'chest' || x === 'belly'));
   const bareSome = bareTop || skin.some(x => ['shoulders', 'chest', 'belly', 'back', 'legs', 'feet'].includes(x));
-  if (bareTop) {
+  const noMainPerson = productOnly && !shots.some(x => x.main_visible !== false);   // visible counts, even without actions (reviewer)
+  if (noMainPerson) { /* 📦 nobody to dress — the outfit lines would describe a person who is not there */ }
+  else if (bareTop) {
     parts.push(sentence(`${name} is shirtless${rest.length ? `, wearing ${rest.join(', ')}` : ''} — the same in every shot, the bare chest, belly and back showing ${name}'s own skin from the reference images`));
     log.push({ rule: 'bareTop' });
   } else if (top || rest.length) {
@@ -215,7 +223,7 @@ function compile(spec, opts = {}) {
   const label = Object.fromEntries(cast.map(p => [p.id, clean(p.label)]));
   if (cast.length) {
     parts.push(sentence(`Also in the video: ${cast.map(p => clean(p.label) + (known(p.look) ? ` (${clean(p.look)})` : '')).join('; ')}`));
-    if (S.people_move !== false) parts.push('The people around ' + name + ' keep moving naturally throughout; nobody is frozen.');
+    if (S.people_move !== false) parts.push(noMainPerson ? 'The people in the video keep moving naturally throughout; nobody is frozen.' : 'The people around ' + name + ' keep moving naturally throughout; nobody is frozen.');
   }
 
   // ── Segments ────────────────────────────────────────────────────────────────────────────
@@ -232,7 +240,11 @@ function compile(spec, opts = {}) {
     bits.push(sentence([frame, camS].filter(Boolean).join(', ')));
     const ev = (Array.isArray(s.main_events) ? s.main_events : []).map(noTempo).filter(Boolean); // RULE noTempoWords
     if (ev.length && s.main_visible !== false) bits.push(sentence(`${name} ${ev.join(', then ')}`));
-    else if (s.main_visible === false) bits.push(sentence(`${name} is not in this shot`));
+    else if (s.main_visible === false && !productOnly) bits.push(sentence(`${name} is not in this shot`));
+    if (productOnly) {   // 📦 the product's own action in this shot — the hook (shot 1) gets the most detail upstream
+      const pev = (Array.isArray(s.product_events) ? s.product_events : []).map(noTempo).filter(Boolean);
+      if (pev.length) bits.push(sentence(`${productName} ${pev.join(', then ')}`));
+    }
     const g = s.main_visible === false ? '' : garmentClause(clean(s.garment_side).toLowerCase(), outfit, name); // RULE garmentSide
     if (g) bits.push(sentence(g));
     for (const o of (Array.isArray(s.others) ? s.others : [])) {

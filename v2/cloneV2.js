@@ -15,7 +15,7 @@ const { execFile, spawn } = require('child_process');
 const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 
-const V2_VERSION = 'v2-1.7.0';
+const V2_VERSION = 'v2-1.8.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -112,8 +112,8 @@ async function frameAt(ff, video, t, width, out) {
 // Contact sheets: ONE ffmpeg pass, consecutive frames at `rate` fps tiled 4×2 — sheet k, cell j
 // is the frame at (8k + j) / rate seconds. The writer gets each sheet's exact timestamps as text
 // (grid mode beat plain frames on 3/3 sources, 2026-10-04).
-async function sheets(ff, video, duration, dir) {
-  const rate = Math.min(4, 96 / Math.max(duration, 1));
+async function sheets(ff, video, duration, dir, maxFrames = 96) {
+  const rate = Math.min(4, maxFrames / Math.max(duration, 1));
   const pat = path.join(dir, 'sheet-%02d.jpg');
   await run(ff, ['-v', 'error', '-i', video, '-vf', `fps=${rate},scale=240:-2,tile=4x2:padding=4:color=white`, '-q:v', '5', '-y', pat], { timeout: 120000 });
   const files = fs.readdirSync(dir).filter(f => /^sheet-\d+\.jpg$/.test(f)).sort();
@@ -557,7 +557,8 @@ function mount(app, deps) {
       const out = compile(b.spec, { name: String(b.name || '').slice(0, 40), gender: ['male', 'female'].includes(b.gender) ? b.gender : null,
         model: b.model === 'seedance' ? 'seedance' : 'wan', cuts: Array.isArray(b.cuts) ? b.cuts.map(Number).filter(Number.isFinite) : [],
         camera: Array.isArray(b.camera) ? b.camera : null, durationSec: Number(b.durationSec) || 0, refs,
-        unfocus: b.unfocus === true, focus: Array.isArray(b.focus) ? b.focus.slice(0, 10) : [] });
+        unfocus: b.unfocus === true, focus: Array.isArray(b.focus) ? b.focus.slice(0, 10) : [],
+        ...(b.productOnly === true ? { productOnly: true, productName: String(b.productName || '').slice(0, 80) } : {}) });
       res.json({ success: true, version: V2_VERSION, ...out });
     } catch (e) { res.status(500).json({ success: false, error: String(e.message || e).slice(0, 200) }); }
   });
@@ -595,6 +596,64 @@ function mount(app, deps) {
         size: [full.W, full.H], png: fs.readFileSync(full.path).toString('base64') });
     } catch (e) {
       console.warn('[clone-v2] moment failed:', e.message);
+      res.status(500).json({ success: false, error: String(e.message || e).slice(0, 200) });
+    } finally { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {} }
+  });
+
+  // 📦 PRODUCT EVENTS (2026-10-22, Mike: "the prompt is really short … give it more details"). Product only has no
+  // person to hang the actions on, so the analysis kept only each shot's setting and end state: what the replaced object
+  // DOES (rides, launches, lands) never reached the prompt, not even in the hook. This watches the source once and
+  // returns, per shot, the object's own movements in order. Motion, direction, path and end position only — never the
+  // object's colour, shape, material, logo or text (RULE R3: the product photos supply its looks). Called only by the
+  // tool's Product only path; nothing else reads `product_events`.
+  app.post('/api/clone-v2/product-events', async (req, res) => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'v2prodev-'));
+    try {
+      const b = req.body || {};
+      const videoUrl = String(b.videoUrl || '');
+      const replaces = String(b.replaces || '').replace(/[\r\n"`<>{}\[\]]/g, ' ').trim().slice(0, 120);
+      const shots = (b.spec && Array.isArray(b.spec.shots) ? b.spec.shots : []).map((x) => Number(x && x.start)).filter(Number.isFinite).sort((a, c) => a - c);
+      if (!/^https:\/\//i.test(videoUrl)) return res.status(400).json({ success: false, error: 'Missing videoUrl' });
+      if (!replaces) return res.status(400).json({ success: false, error: 'Missing replaces' });
+      if (!shots.length) return res.status(400).json({ success: false, error: 'Missing shots' });
+      const kieKey = typeof b.kieApiKey === 'string' ? b.kieApiKey.trim().slice(0, 200) : '';
+      const key = kieKey ? '' : process.env.ANTHROPIC_API_KEY;
+      if (!key && !kieKey) return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY not configured' });
+      const deadline = Date.now() + 150000;
+      const video = path.join(tmp, 'video.mp4');
+      const r = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 60000, maxContentLength: 200 * 1024 * 1024 });
+      fs.writeFileSync(video, Buffer.from(r.data));
+      const probe = await run(ffmpegBin, ['-hide_banner', '-i', video], { timeout: 20000 });
+      const dm = /Duration:\s*(\d+):(\d+):([\d.]+)/.exec(probe.stderr);
+      const duration = dm ? (+dm[1]) * 3600 + (+dm[2]) * 60 + parseFloat(dm[3]) : 0;
+      // 64 frames over the WHOLE video = 8 sheets, all sent (reviewer 2026-10-22: the default 96-frame rate with only the
+      // first 6 sheets sent saw a 20 s source up to 11.75 s, so every later shot was guessed).
+      const sh = await sheets(ffmpegBin, video, duration || 30, tmp, 64);
+      const img = (buf) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: buf.toString('base64') } });
+      const windows = shots.map((st, i) => ({ start: st, end: i + 1 < shots.length ? shots[i + 1] : (duration || st + 1) }));
+      const content = [];
+      sh.slice(0, 8).forEach((x, k) => { content.push({ type: 'text', text: `CONTACT SHEET ${k + 1} (left→right, top→bottom) at ${x.times.join(', ')} s:` }); content.push(img(x.buf)); });
+      content.push({ type: 'text', text: `THE OBJECT: ${replaces}. THE SHOTS (start → end, s): ${JSON.stringify(windows)}.\n`
+        + 'For EVERY shot, list in order what THE OBJECT does in that shot: where it starts, every movement (direction, path, rotation, what it moves on or through), and where it ends. '
+        + 'Shot 1 is the hook: describe it most precisely, every small movement. Later shots: 1–3 short items each. '
+        + 'Call it only "it" (never by a name, a colour, a shape, a material, a logo or any text on it). No speed or tempo words (slowly, gently, quickly). '
+        + 'If the object is not visible in a shot, give that shot an empty list.\n'
+        + 'Return ONLY JSON: {"shots":[{"start":<the shot start, exactly as given>,"events":["…","…"]}]} — one entry per shot, in order.' });
+      const system = 'You watch a short video frame by frame and describe the movement of one object, precisely and in order, for a video model. Answer with JSON only.';
+      const w = await callWriter({ system, content, key, kieKey, deadline, maxTokens: 1500 });
+      const j = parseSpec(w.text);
+      const rows = j && Array.isArray(j.shots) ? j.shots : [];
+      // Drop a line that describes the OBJECT's looks (its colour, logo …). Not a plain colour word: "rides up the steel
+      // ramp" is about the set, and dropping it would cut the very action this pass exists for.
+      const LOOKS = /\bits\s+(colou?rs?|logos?|brand|text|lettering|material|shape|finish|fabric)\b/i;
+      const out = windows.map((wd, i) => {
+        const row = rows.find((x) => Math.abs(Number(x && x.start) - wd.start) < 0.05) || rows[i] || {};
+        const events = (Array.isArray(row.events) ? row.events : []).map((e) => String(e).replace(/\s+/g, ' ').trim().slice(0, 200)).filter((e) => e && !LOOKS.test(e)).slice(0, i === 0 ? 8 : 3);
+        return { start: wd.start, events };
+      });
+      res.json({ success: true, version: V2_VERSION, shots: out });
+    } catch (e) {
+      console.warn('[clone-v2] product-events failed:', e.message);
       res.status(500).json({ success: false, error: String(e.message || e).slice(0, 200) });
     } finally { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {} }
   });

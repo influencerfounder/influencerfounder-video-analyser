@@ -212,5 +212,36 @@ t('a camera direction with brackets in it never throws (it used to fail the whol
   assert.strictEqual(cameraSentence({ move: 'pans', direction: 'left' }, null, [], 1), 'the camera pans left');
 });
 
+// 📦 PRODUCT ONLY (2026-10-22): the product's own line per shot — and nothing changes for any other recreate.
+const NOBODY = {
+  look: 'cinema', setting: 'a dark studio', outfit: { top_name: 'a grey hoodie' },
+  cast: [{ id: 'P1', label: 'the stagehand in black', look: 'short hair' }], people_move: true,
+  shots: [
+    { start: 0, size: 'wide', camera: { move: 'fixed' }, main_visible: false, main_events: [], product_events: ['rolls up the curved wall', 'tips over the top edge'], end_state: 'it is in the air' },
+    { start: 4, cut_before: true, size: 'medium', camera: { move: 'fixed' }, main_visible: false, main_events: [], product_events: ['comes down onto the floor'], end_state: 'it stands still' },
+  ],
+};
+t('productOnly OFF: product_events are ignored and the output is unchanged', () => {
+  const plain = { ...NOBODY, shots: NOBODY.shots.map(({ product_events, ...x }) => x) };
+  const a = compile(NOBODY, { name: '', cuts: [4], durationSec: 8 }).prompt, b2 = compile(plain, { name: '', cuts: [4], durationSec: 8 }).prompt;
+  assert.strictEqual(a, b2);
+  assert.ok(/is not in this shot/.test(a), 'a normal compile still says the main person is not in the shot');
+  assert.strictEqual(compile(LOBBY, base).prompt, compile(LOBBY, { ...base, productOnly: false, productName: 'X' }).prompt, 'the person path must not change');
+});
+t('productOnly ON: each shot gets the product line, no outfit for a person who is not there, no "not in this shot"', () => {
+  const out = compile(NOBODY, { name: '', cuts: [4], durationSec: 8, productOnly: true, productName: 'Stane-Desk-Oak' }).prompt;
+  assert.ok(/Shot 1 \[[^\]]+\]:[^\n]*Stane-Desk-Oak rolls up the curved wall, then tips over the top edge\./.test(out), out);
+  assert.ok(/Shot 2 \[[^\]]+\]:[^\n]*Stane-Desk-Oak comes down onto the floor\./.test(out), out);
+  assert.ok(!/is not in this shot/.test(out), 'no "not in this shot" line');
+  assert.ok(!/wears a grey hoodie/.test(out), 'no outfit line when nobody is in the video');
+  assert.ok(/The people in the video keep moving naturally/.test(out) && !/people around/.test(out), 'the cast line names no main person');
+});
+t('productOnly ON with a visible person: the person keeps their line and outfit, the product gets its own', () => {
+  const withPerson = { ...NOBODY, shots: [{ ...NOBODY.shots[0], main_visible: true, main_events: ['pushes it toward the wall'] }, NOBODY.shots[1]] };
+  const out = compile(withPerson, { name: '', cuts: [4], durationSec: 8, productOnly: true, productName: 'Stane-Desk-Oak' }).prompt;
+  assert.ok(/the main person pushes it toward the wall/i.test(out) && /wears a grey hoodie/.test(out), out);
+  assert.ok(/Stane-Desk-Oak rolls up the curved wall/.test(out), out);
+});
+
 console.log(`\nv2-compile: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
