@@ -31,7 +31,9 @@ function optionsFor(p, rnd = Math.random) {
   const opts = [];
   if (!HAIR_HIDDEN.test(text)) {
     opts.push({ kind: 'parting', text: 'the hair parted on the other side' });
-    opts.push({ kind: 'shade', text: rnd() < 0.5 ? 'the hair one shade darker' : 'the hair one shade lighter' });
+    // No colour shift (2026-10-23, first take): "one shade lighter" on a dark-haired man came back grey and ~15 years
+    // older. A styling change keeps colour and length (Mike: "keep age, baldness and hair length exactly the same").
+    opts.push({ kind: 'combed', text: 'the hair combed straight back' });
   }
   if (sex === 'man' && !FACIAL_WORDS.test(text)) {
     if (fh === 'none') opts.push({ kind: 'facial', text: 'light stubble' });

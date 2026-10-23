@@ -46,7 +46,7 @@ t('never against the label: a bearded label gets no beard change, a cap hides th
   const o1 = optionsFor({ label: 'the man with a full beard', sex: 'man', facial_hair: 'beard', glasses: false }, () => 0);
   assert.ok(!o1.some((o) => o.kind === 'facial'));
   const o2 = optionsFor({ label: 'the man in a black cap', sex: 'man', facial_hair: 'none', glasses: false }, () => 0);
-  assert.ok(!o2.some((o) => o.kind === 'parting' || o.kind === 'shade'));
+  assert.ok(!o2.some((o) => o.kind === 'parting' || o.kind === 'combed'));
   const o3 = optionsFor({ label: 'the woman', look: 'round sunglasses on her head', sex: 'woman', glasses: false }, () => 0);
   assert.ok(!o3.some((o) => o.kind === 'glasses'));
 });
@@ -56,6 +56,10 @@ t('facial hair only for men', () => {
   assert.ok(!o.some((x) => x.kind === 'facial'));
   const m = optionsFor({ label: 'the man in white', sex: 'man', facial_hair: 'none', glasses: true }, () => 0);
   assert.ok(m.some((x) => x.kind === 'facial' && x.text === 'light stubble'));
+});
+
+t('no hair colour change anywhere (lighter read as grey → older, 2026-10-23)', () => {
+  for (const r of [0, 0.25, 0.5, 0.75, 0.99]) for (const o of optionsFor({ label: 'a man', sex: 'man', facial_hair: 'none', glasses: false }, () => r)) assert.ok(!/shade|darker|lighter|colou?r|grey|gray/i.test(o.text), o.text);
 });
 
 t('glasses only as a last resort (an object, not a face or hair change)', () => {
