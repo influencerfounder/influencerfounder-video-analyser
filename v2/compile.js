@@ -15,6 +15,7 @@
 
 'use strict';
 const { UNFOCUS_LAYER } = require('../unfocus');
+const { castChangeText } = require('./castChange');
 
 // ── The rule gate (process, enforced in review + selftest) ──────────────────────────────────
 // A new rule needs ALL THREE: (a) a failure seen on ≥ 2 test-set sources, (b) a scorecard
@@ -34,6 +35,7 @@ const RULES = {
   phaseLength:    'Phases inside one take (no cut) shorter than 1.5 s are merged into a neighbour: Alibaba recommends 2-5 s segments and G63 run 1 came back as 13 one-second phases (1,119 words).',
   wanAudio:       'Wan adds dialogue and music unless told: "No dialogue. No background music." (Wan research, 2026-09-07).',
   phoneLayer:     'Every phone-look video ends with the old-phone layer (unfocus.js), students included (Mike, 2026-10-20). Cinema-look videos keep none.',
+  castChange:     'Each clearly visible background person carries its one small change (v2/castChange.js, picked once at analysis) after its label, the same change the first frame drew, so a later shot does not pull the original look back (Mike, 2026-10-23, VQL case 2026-10-23-01). Product-only runs keep everyone as the source shows them.',
   unfocus:        'Real Unfocus Look (owner switch): the old-phone layer only. The autofocus moment is added to the finished video (focusblur.js) since 2026-10-14: Wan rendered no dip on two takes that carried a timed sentence.',
 };
 
@@ -222,7 +224,9 @@ function compile(spec, opts = {}) {
   const cast = (Array.isArray(S.cast) ? S.cast : []).filter(p => known(p.label));
   const label = Object.fromEntries(cast.map(p => [p.id, clean(p.label)]));
   if (cast.length) {
-    parts.push(sentence(`Also in the video: ${cast.map(p => clean(p.label) + (known(p.look) ? ` (${clean(p.look)})` : '')).join('; ')}`));
+    // RULE castChange — the label stays the id everywhere; the change rides once, here, after the clothing.
+    const withChange = (p) => { const c = productOnly ? '' : castChangeText(p); if (c) log.push({ rule: 'castChange', id: p.id }); return c; };
+    parts.push(sentence(`Also in the video: ${cast.map(p => { const c = withChange(p); const look = known(p.look) ? clean(p.look) : ''; return clean(p.label) + (look || c ? ` (${[look, c && 'with ' + c].filter(Boolean).join('; ')})` : ''); }).join('; ')}`));
     if (S.people_move !== false) parts.push(noMainPerson ? 'The people in the video keep moving naturally throughout; nobody is frozen.' : 'The people around ' + name + ' keep moving naturally throughout; nobody is frozen.');
   }
 
