@@ -17,7 +17,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.96.2';
+const ANALYSER_VERSION = '2.97.0';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const bgCutout = require('./bgcutout');
@@ -1559,10 +1559,21 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
        text: costs the video prompt nothing on any video without layers. */
     const LAYERED_OUTFIT_RULE = "🧥 IF [INFLUENCER] wears more than one layer on the upper body — an open jacket, blazer, shirt or overshirt worn over a tee, tank, top or shirt — write the inner layer as what covers the chest and stomach (for example \"a white tank under the open black jacket, covering the chest and stomach\"), and name that inner layer again in every shot or line where the outer layer hangs open. If [INFLUENCER] wears a single layer, add nothing about this.";
 
+    /* 💪 CHEST: OPEN|COVERED + FOREARMS: BARE|COVERED (2.97.0, 2026-10-26, Video Quality Lab case
+       2026-10-26-01). Same job as the LEGS line, for the upper body: which identity REFERENCES travel.
+       On a clothed scene the tool sends the front master cut at the neck and no full body, so a shirt
+       worn open at the chest made the chest ink up, and short sleeves made the FOREARM sleeves up —
+       two café takes of Kryfex came back with rose sleeves instead of his mandala sleeves, a different
+       design each take. Only the writer knows the outfit it is writing and which person is
+       [INFLUENCER] (trigger-must-be-the-observer). Read by name; stripped before the prompt is used.
+       Unsure → COVERED, which is exactly the behaviour before this line existed. */
+    const SKIN_LINES_RULE = 'Also output, on two lines of their own directly after the LEGS line (before the blank line that starts the prompt): exactly "CHEST: OPEN" if the prompt you are about to write leaves [INFLUENCER]\'s OWN chest skin visible below the collarbones in any shot (no top, a shirt unbuttoned or worn open at the chest, a deep V, an open jacket over nothing), otherwise "CHEST: COVERED"; then exactly "FOREARMS: BARE" if [INFLUENCER]\'s OWN forearms are bare and on screen in any shot (short sleeves, rolled-up sleeves, sleeveless, no top), otherwise "FOREARMS: COVERED" (long sleeves, a jacket, out of frame, or you cannot tell). Judge [INFLUENCER] ALONE — never anyone else in the scene. When unsure, answer COVERED.';
+
     const sysSend = [
       sysFinal,
       (shotCuts && !isBgSwap && promptStyle !== 'improve' && promptStyle !== 'hookfirst') ? SHOT_CUTS_RULE : '',
       HOOK_FIRST_RULE,
+      !isBgSwap ? SKIN_LINES_RULE : '',
       // 🧭 OPENING: SHOWN|ABSENT (hookfirst only, 2026-10-01). The tool anchors the video on the
       // influencer swapped into the source's FIRST frame; when the source opens on someone else
       // (measured: a Rolls-Royce clip opens on the BODYGUARD while the main character is still in
@@ -1860,6 +1871,21 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
         console.warn(`[clone] no LEGS: line in the model output (promptStyle=${promptStyle}) — legsBare defaults to false, so the leg portraits are withheld`);
       }
     }
+    // 💪 CHEST / FOREARMS — by name, like LEGS. Absent => null (unknown): the tool then behaves as before.
+    let chestOpen = null, forearmsBare = null;
+    {
+      const c = basePrompt.match(/^[*_\s]*CHEST[*_\s]*:[*_\s]*(OPEN|COVERED)\b.*$/im);   // tolerant: a decorated line must never reach the prompt
+      if (c) {
+        chestOpen = c[1].toUpperCase() === 'OPEN';
+        basePrompt = (basePrompt.slice(0, c.index) + basePrompt.slice(c.index + c[0].length)).replace(/^\n+/, '').trim();
+      }
+      const f = basePrompt.match(/^[*_\s]*FOREARMS[*_\s]*:[*_\s]*(BARE|COVERED)\b.*$/im);
+      if (f) {
+        forearmsBare = f[1].toUpperCase() === 'BARE';
+        basePrompt = (basePrompt.slice(0, f.index) + basePrompt.slice(f.index + f[0].length)).replace(/^\n+/, '').trim();
+      }
+      if (!isBgSwap && (!c || !f)) console.warn(`[clone] no ${!c ? 'CHEST' : ''}${!c && !f ? '/' : ''}${!f ? 'FOREARMS' : ''} line in the model output (promptStyle=${promptStyle}) — the tool keeps the covered-skin references`);
+    }
     // 🧭 OPENING: SHOWN|ABSENT — by name, like LEGS. Absent line => null (unknown), never "shown".
     let influencerInOpening = null;
     {
@@ -1994,6 +2020,8 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       transcriptLowConfidence: transcriptLowConfidence || undefined,
       talkingHead,
       legsBare,
+      chestOpen,
+      forearmsBare,
       influencerInOpening,
       hookGuard: hookGuard || undefined,
       hookMotion: hookMotion || undefined,
