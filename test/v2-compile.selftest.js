@@ -118,11 +118,13 @@ t('seedance: whole seconds and @Image bindings; Wan: "Image N"', () => {
   assert.ok(/@Image 1 shows Kryfex's face; @Image 2 shows the outfit from the front; @Image 3 shows the outfit from the back\./.test(s));
   assert.ok(/(^|[^@])Image 1 shows Kryfex's face/.test(w) && !/@Image/.test(w));
 });
-t('single take: no cuts → "Generate single shot." and phases continue seamlessly', () => {
+t('single take: no cuts → "Generate single shot.", phases as "[a-bs]" lines with no Shot labels (oneHeaderPerTake)', () => {
   const spec = { outfit: { top_name: 'a grey hoodie' }, shots: [{ start: 0, camera: { move: 'follows' }, main_events: ['walks toward the camera'] }, { start: 7, camera: { move: 'fixed' }, main_events: ['hands something to the driver'] }] };
   const r = compile(spec, { name: 'Kryfex', cuts: [], camera: [], durationSec: 23, model: 'wan' });
   assert.ok(/Generate single shot\./.test(r.prompt));
-  assert.ok(/Shot 2 \[7-23s\]: Seamlessly continue from the last frame\./.test(r.prompt), r.prompt);
+  assert.ok(/^\[0-7s\] The camera follows\. Kryfex walks toward the camera\.$/m.test(r.prompt), r.prompt);
+  assert.ok(/^\[7-23s\] The camera now holds still\. Kryfex hands something to the driver\.$/m.test(r.prompt), r.prompt);
+  assert.ok(!/\bShot \d/.test(r.prompt) && !/Seamlessly/.test(r.prompt), 'no Shot label and no seam sentence in one take');
   assert.ok(!/Hard cut/.test(r.prompt));
 });
 t('a measured cut the writer skipped is reported, not invented', () => {
@@ -160,8 +162,8 @@ t('camera: free text in the move field is cut to the controlled words', () => {
 t('phaseLength: 1 s phases in one take are merged; the hook stays its own phase; events are kept in order', () => {
   const spec = { outfit: {}, shots: [0, 1, 2, 4, 6, 7].map((st, i) => ({ start: st, cut_before: false, camera: { move: 'fixed' }, main_events: ['e' + i] })) };
   const r = compile(spec, { name: 'K', cuts: [], durationSec: 9, model: 'wan' });
-  const lines = r.prompt.split('\n').filter(l => /^Shot/.test(l));
-  assert.ok(/^Shot 1 \[0-1s\]: .*K e0\./.test(lines[0]), lines[0]);
+  const lines = r.prompt.split('\n').filter(l => /^\[/.test(l));
+  assert.ok(/^\[0-1s\] .*K e0\./.test(lines[0]), lines[0]);
   assert.ok(lines.every((l, k) => k === 0 || (() => { const m = /\[([\d.]+)-([\d.]+)s\]/.exec(l); return m[2] - m[1] >= 1.5; })()), lines.join('\n'));
   const all = r.prompt.replace(/[^e\d]/g, ' ');
   assert.ok(/e0[\s\S]*e1[\s\S]*e2[\s\S]*e3[\s\S]*e4[\s\S]*e5/.test(r.prompt), 'order kept');
@@ -183,6 +185,105 @@ t('phase 3 bindings: opening frame, face, dressed front/back are named in order 
   assert.ok(/Image 1 is the opening frame — the video starts exactly as this image; Image 2 shows Kryfex's face; Image 3 shows Kryfex wearing the outfit, from the front; Image 4 shows Kryfex wearing the outfit, from the back\./.test(r.prompt), r.prompt.slice(0, 900));
 });
 
+// ── 2026-10-30: VQL case 2026-10-30-01 (plaza, rj_mvuhalai9rlh) — the spec as the writer returned it,
+// rebuilt from the compiled prompt. One measured cut (the passer-by wipe at 2.1 s); the writer also
+// marked a cut at 4.1 s, and framed one walk-in take as full body → medium → close-up.
+const PLAZA = {
+  look: 'phone', setting: 'a sunlit cobblestone plaza in front of a grand stone building with columns, daytime',
+  outfit: { top_name: 'a black short-sleeve knit shirt with a camp collar', top_front_short: 'plain black knit, open collar', bottom: 'black wide-leg trousers', shoes: 'black leather shoes', accessories: 'wristwatch, dark sunglasses (carried then worn)' },
+  props: ['dark sunglasses folded in MAIN\'s right hand'],
+  shots: [
+    { start: 0, size: 'full body', angle: 'eye level', camera: { move: 'fixed' }, garment_side: 'front', main_events: ['walks toward the camera from the building entrance', 'brings right hand to chin', 'lowers hand briefly', 'looks to screen-right', 'turns head forward again'] },
+    { start: 1.5, size: 'full body', angle: 'eye level', camera: { move: 'fixed' }, garment_side: 'front', main_events: ['continues walking forward', 'holds sunglasses in one hand', 'glances down at the sunglasses'] },
+    { start: 2.1, cut_before: true, size: 'full body', angle: 'eye level', camera: { move: 'fixed' }, garment_side: 'front', main_events: ['puts sunglasses on with both hands', 'keeps walking forward', 'smiles and looks toward screen-right'] },
+    { start: 4.1, cut_before: true, size: 'medium', angle: 'eye level', camera: { move: 'fixed' }, garment_side: 'front', end_state: 'MAIN looking to screen-right, expression serious',
+      main_events: ['stands in place smiling, looking toward screen-right', 'turns head slightly forward', 'continues smiling', 'smiles broadly toward screen-right', 'adjusts posture slightly', 'keeps smiling at the camera', 'continues smiling, looking just off camera', 'slightly tilts head', 'smiles and raises the right hand toward the sunglasses', 'takes the sunglasses off with the right hand', 'smiles again, lowering the hand', 'points finger toward camera', 'tilts head slightly to the side', 'continues smiling, mouth open as if laughing', 'turns head to look toward screen-right', 'narrows eyes slightly, expression becomes more serious'] },
+    { start: 9, size: 'close-up', angle: 'eye level', camera: { move: 'fixed' }, garment_side: 'front', main_events: ['keeps looking toward screen-right', 'turns shoulder away from camera', 'moves out of frame'] },
+  ],
+};
+const plaza = () => compile(PLAZA, { name: 'Kryfex', gender: 'male', cuts: [2.1], camera: [], durationSec: 10.1, model: 'wan' });
+t('plaza: only the MEASURED cut opens a new Shot; the writer\'s extra cut at 4.1 s is dropped and logged', () => {
+  const r = plaza();
+  assert.deepStrictEqual((r.prompt.match(/^Shot \d+ \[[^\]]+\]:/gm) || []), ['Shot 1 [0-2.1s]:', 'Shot 2 [2.1-10.1s]:'], r.prompt);
+  assert.strictEqual((r.prompt.match(/Hard cut\./g) || []).length, 1, r.prompt);
+  assert.ok(/End of the shot:[^\n]*Hard cut\.\n|Hard cut\.\nShot 2/.test(r.prompt) || /Hard cut\.\nShot 2/.test(r.prompt), r.prompt);
+  assert.ok(r.log.some(l => l.rule === 'measuredCuts' && l.dropped === 4.1));
+  assert.ok(!/Seamlessly/.test(r.prompt));
+  assert.deepStrictEqual(r.segments.map(s => s.cut_before), [false, false, true, false, false]);
+});
+t('plaza: inside the take the framing tightens, it is never a new size with a held camera (framingInTake)', () => {
+  const r = plaza();
+  assert.ok(/^\[4\.1-9s\] Kryfex has come closer: within the same take the framing is now a medium shot, the camera still does not move\./m.test(r.prompt), r.prompt);
+  assert.ok(/^\[9-10\.1s\] Kryfex has come closer: within the same take the framing is now a close-up, the camera still does not move\./m.test(r.prompt), r.prompt);
+  assert.strictEqual((r.prompt.match(/the camera does not move/g) || []).length, 2, 'once per take, at its start: ' + r.prompt);
+  // an unchanged framing inside a take is not repeated
+  assert.ok(/^\[1\.5-2\.1s\] Kryfex /m.test(r.prompt), r.prompt);
+});
+t('plaza: the sunglasses are placed in the hook, the hook keeps every movement (propsPlaced, hookFirst)', () => {
+  const r = plaza();
+  const hook = r.prompt.split('\n').find(l => l.startsWith('[0-1.5s]'));
+  assert.ok(/At the start: dark sunglasses folded in Kryfex's right hand\./.test(hook), hook);
+  assert.ok(/walks toward the camera from the building entrance, then brings right hand to chin, then lowers hand briefly, then looks to screen-right, then turns head forward again/.test(hook), hook);
+  assert.strictEqual((r.prompt.match(/At the start:/g) || []).length, 1);
+});
+t('plaza: the crowded phase sheds filler and micro-moves, keeps the object actions and the last action (fewerActions)', () => {
+  const r = plaza();
+  const l = r.prompt.split('\n').find(x => x.startsWith('[4.1-9s]'));
+  const n = (l.match(/, then /g) || []).length + 1;
+  assert.ok(n <= Math.ceil(4.9 * 1.5), `${n} actions: ${l}`);
+  assert.ok(/takes the sunglasses off with the right hand/.test(l) && /raises the right hand toward the sunglasses/.test(l), l);
+  assert.ok(/narrows eyes slightly, expression becomes more serious\./.test(l), 'the last action stays: ' + l);
+  assert.ok(!/continues smiling|keeps smiling|adjusts posture slightly/.test(l), l);
+  assert.ok(/puts sunglasses on with both hands/.test(r.prompt), 'the put-on is never trimmed');
+  assert.ok(r.log.some(x => x.rule === 'fewerActions' && x.from === 16));
+});
+t('fewerActions never touches the hook, nor a phase that is already sparse', () => {
+  const ev = ['a', 'continues a', 'continues b', 'slightly c', 'd', 'continues e', 'f'];
+  const spec = { outfit: {}, shots: [{ start: 0, main_events: ev }, { start: 2, main_events: ['walks', 'continues walking'] }] };
+  const r = compile(spec, { name: 'K', cuts: [], durationSec: 6, model: 'wan' });
+  assert.ok(r.prompt.includes('K a, then continues a, then continues b, then slightly c, then d, then continues e, then f.'), r.prompt);
+  assert.ok(r.prompt.includes('K walks, then continues walking.'), r.prompt);
+});
+t('measuredCuts: a writer cut up to 1.2 s off a measured cut is snapped, not lost', () => {
+  const spec = { outfit: {}, shots: [{ start: 0, main_events: ['a'] }, { start: 3, cut_before: true, main_events: ['b'] }] };
+  const r = compile(spec, { name: 'K', cuts: [3.9], durationSec: 7, model: 'wan' });
+  assert.deepStrictEqual(r.segments.map(s => [s.start, s.cut_before]), [[0, false], [3.9, true]]);
+  assert.ok(/^Shot 2 \[3\.9-7s\]: /m.test(r.prompt), r.prompt);
+  // …but a PHASE (no writer cut) is never turned into a cut by the wider window
+  const spec2 = { outfit: {}, shots: [{ start: 0, main_events: ['a'] }, { start: 3, main_events: ['b'] }] };
+  const r2 = compile(spec2, { name: 'K', cuts: [3.9], durationSec: 7, model: 'wan' });
+  assert.ok(r2.log.some(l => l.missing === 3.9), JSON.stringify(r2.log));
+});
+t('seedance: a take of phases keeps whole seconds on both the Shot header and the phase lines', () => {
+  const r = compile(PLAZA, { name: 'Kryfex', cuts: [2.1], camera: [], durationSec: 10.1, model: 'seedance' });
+  assert.ok(/^Shot 1 \[0-2s\]: /m.test(r.prompt) && !/\[2-3s\]/.test(r.prompt) && /^Shot 2 \[2-10s\]:$/m.test(r.prompt) && /^\[4-9s\] /m.test(r.prompt), r.prompt);
+  // contiguous: every line starts where the one before ended (reviewer 2026-10-30: [0-3s] then [2-10s])
+  const phases = [...r.prompt.matchAll(/^\[(\d+)-(\d+)s\]/gm)].map(m => [+m[1], +m[2]]);
+  phases.forEach((x, i) => { assert.ok(x[1] > x[0], 'no empty phase ' + x); if (i) assert.strictEqual(x[0], phases[i - 1][1], 'contiguous ' + JSON.stringify(phases)); });
+});
+
+t('fewerActions stops AT the cap, one action at a time, earliest first (reviewer 2026-10-30)', () => {
+  const ev = ['looks at camera', 'shrugs slightly', 'raises an eyebrow slightly', 'tilts head slightly', 'winks slightly', 'continues looking', 'gives a slight nod'];
+  const spec = { outfit: {}, shots: [{ start: 0, main_events: ['h'] }, { start: 1, main_events: ev }] };
+  const r = compile(spec, { name: 'K', cuts: [], durationSec: 3, model: 'wan' });
+  const l = r.prompt.split('\n').find(x => x.startsWith('[1-3s]'));
+  assert.strictEqual((l.match(/, then /g) || []).length + 1, 3, l);
+  assert.ok(/winks slightly, then gives a slight nod/.test(l), 'the later reactions stay: ' + l);
+});
+t('an ongoing movement is never filler: "continues walking" stays (P10, reviewer 2026-10-30)', () => {
+  const ev = ['continues walking toward the camera', 'continues smiling', 'keeps smiling', 'smiles', 'looks right', 'looks left', 'nods'];
+  const spec = { outfit: {}, shots: [{ start: 0, main_events: ['h'] }, { start: 1.5, main_events: ev }] };
+  const r = compile(spec, { name: 'K', cuts: [], durationSec: 3.5, model: 'wan' });
+  assert.ok(/K continues walking toward the camera, then/.test(r.prompt), r.prompt);
+  assert.ok(!/continues smiling/.test(r.prompt), r.prompt);
+});
+t('framingInTake: a moving camera says how; an unknown size says "moves", never tightens/widens', () => {
+  const spec = { outfit: {}, shots: [{ start: 0, size: 'close-up', camera: { move: 'fixed' }, main_events: ['a'] }, { start: 2, size: 'medium', camera: { move: 'pulls back' }, main_events: ['b'] }, { start: 4, size: 'cowboy shot', camera: { move: 'fixed' }, main_events: ['c'] }] };
+  const r = compile(spec, { name: 'K', cuts: [], durationSec: 6, model: 'wan' });
+  assert.ok(/^\[2-4s\] Within the same take the framing widens to a medium shot, the camera pulls back\./m.test(r.prompt), r.prompt);
+  assert.ok(/^\[4-6s\] Within the same take the framing is now a cowboy shot, the camera still does not move\./m.test(r.prompt), r.prompt);
+});
+
 // ── writer contract ──
 t('writer system carries every WRITER_RULE and the persona pronouns', () => {
   const s = writerSystem({ personaGender: 'male' });
@@ -196,6 +297,10 @@ t('writer system carries every WRITER_RULE and the persona pronouns', () => {
   assert.ok(/"opening":\{"main_in_first_frame":"clear\|small\|obscured\|absent","main_where":""\}/.test(ws), 'the spec asks where MAIN is in the first frame');
   assert.ok(/Decide who MAIN is from the WHOLE video first: the person filling the opening is often a bystander\./.test(ws), 'MAIN is decided from the whole video, not the opening');
   assert.ok(WRITER_RULES.openingWhere, 'recorded in the rules list');
+  // 2026-10-30 (VQL 2026-10-30-01): props placed at the start, later shots list only changes.
+  assert.ok(/"bare_skin":\[\]\},"props":\[\],"cast"/.test(ws), 'the spec asks for props');
+  assert.ok(/where it is in the VERY FIRST frame/.test(ws) && /never write "continues …", "keeps …" or "still …"/.test(ws), 'props + changes-only rules reach the writer');
+  assert.ok(WRITER_RULES.changesOnly && WRITER_RULES.propsAtStart);
   const parsed = parseSpec(JSON.stringify({ outfit: {}, opening: { main_in_first_frame: 'small', main_where: 'seated at a table at the back' }, shots: [{ start: 0, main_events: [] }] }));
   assert.strictEqual(parsed.opening.main_where, 'seated at a table at the back', 'the field survives parsing');
 });
