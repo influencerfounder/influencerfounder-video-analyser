@@ -17,7 +17,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.98.0';
+const ANALYSER_VERSION = '2.98.1';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const bgCutout = require('./bgcutout');

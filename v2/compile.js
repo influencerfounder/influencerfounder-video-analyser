@@ -271,7 +271,9 @@ function compile(spec, opts = {}) {
     const t = tag(i + 1);
     if (r.kind === 'face') return `${t} shows ${name}'s face`;
     // 2026-10-12: a tattooed influencer's own master photos (the Classic recreate's video references).
-    if (r.kind === 'identity') return `${t} shows ${name} — the face, hair, body and every tattoo`;
+    // 2026-10-30 (VQL 2026-10-30-02): "body" only where skin shows — on a clothed scene the word pointed the model at the
+    // masters' bare torso (a henley close-up came back shirtless); there the pictures are for face, hair and ink only.
+    if (r.kind === 'identity') return `${t} shows ${name} — the face, hair${bareSome ? ', body' : ''} and every tattoo`;
     if (r.kind === 'outfit_front') return `${t} shows the outfit from the front`;
     if (r.kind === 'outfit_back') return `${t} shows the outfit from the back`;
     if (r.kind === 'first_frame') return `${t} is the opening frame — the video starts exactly as this image`;

@@ -64,7 +64,13 @@ t('outfitOnce: one outfit sentence with front AND back, "same outfit … every s
 });
 t('identity refs (a tattooed influencer\'s own masters) are bound by name (2026-10-12)', () => {
   const r = compile(LOBBY, { ...base, model: 'wan', refs: [{ kind: 'first_frame' }, { kind: 'identity' }, { kind: 'identity' }] });
-  assert.ok(/Image 2 shows Kryfex — the face, hair, body and every tattoo; Image 3 shows Kryfex — the face, hair, body and every tattoo/.test(r.prompt), r.prompt.slice(0, 900));
+  assert.ok(/Image 2 shows Kryfex — the face, hair and every tattoo; Image 3 shows Kryfex — the face, hair and every tattoo/.test(r.prompt), r.prompt.slice(0, 900));
+  assert.ok(!/body and every tattoo/.test(r.prompt), 'clothed scene: "body" points the model at the bare-torso masters (VQL 2026-10-30-02)');
+});
+t('identity label keeps "body" where skin shows (2026-10-30)', () => {
+  const BARE = { ...LOBBY, outfit: { ...LOBBY.outfit, top_name: 'no top worn, shirtless', bare_skin: ['chest', 'belly'] } };
+  const r = compile(BARE, { ...base, model: 'wan', refs: [{ kind: 'identity' }] });
+  assert.ok(/Image 1 shows Kryfex — the face, hair, body and every tattoo/.test(r.prompt), r.prompt.slice(0, 600));
 });
 t('bareTop: a shirtless source is said as shirtless, never "fully dressed" (2026-10-12)', () => {
   const SHIRTLESS = { ...LOBBY, outfit: { top_name: 'no top worn, shirtless', top_front: 'not shown, bare chest', top_back: 'not shown, bare back', bottom: 'black athletic shorts', shoes: 'black sneakers', accessories: 'black duffel bag carried with shoulder strap', bare_skin: ['arms', 'shoulders', 'chest', 'belly', 'back', 'legs'] } };
