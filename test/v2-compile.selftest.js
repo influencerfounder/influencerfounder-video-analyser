@@ -81,6 +81,29 @@ t('bareTop: a shirtless source is said as shirtless, never "fully dressed" (2026
   const h2 = compile(SHORTS, { ...base, model: 'wan' }).prompt.split('\n\n')[0];
   assert.ok(/the same outfit in every shot/.test(h2) && !/fully dressed/.test(h2), 'bare legs: same outfit, not "fully dressed": ' + h2);
 });
+t('bareTop: an OPEN shirt is never shirtless, even when its front says "bare chest" (2026-10-31, VQL 2026-10-26-01)', () => {
+  const OPEN = { ...LOBBY, outfit: { top_name: "black ribbed knit short-sleeve polo shirt, worn open at the collar", top_front: 'plain black ribbed polo, unbuttoned, bare chest visible', top_back: 'not shown', bottom: 'beige pleated trousers', shoes: 'brown loafers', bare_skin: ['arms', 'chest'] } };
+  const head = compile(OPEN, { ...base, model: 'wan' }).prompt.split('\n\n')[0];
+  assert.ok(!/is shirtless/.test(head) && /Kryfex wears black ribbed knit short-sleeve polo shirt/.test(head), head);
+  for (const name of ['open black shirt over a bare chest', 'unbuttoned denim jacket, bare torso underneath']) {
+    const h = compile({ ...LOBBY, outfit: { ...OPEN.outfit, top_name: name } }, { ...base, model: 'wan' }).prompt.split('\n\n')[0];
+    assert.ok(!/is shirtless/.test(h), name + ' → ' + h);
+  }
+  // still shirtless: no named top, or a name that is only the shirtless words
+  const NONE = compile({ ...LOBBY, outfit: { ...OPEN.outfit, top_name: 'none', top_front: 'bare chest' } }, { ...base, model: 'wan' }).prompt.split('\n\n')[0];
+  assert.ok(/Kryfex is shirtless/.test(NONE), NONE);
+  const TOPLESS = compile({ ...LOBBY, outfit: { ...OPEN.outfit, top_name: 'shirtless, bare torso', top_front: 'not shown' } }, { ...base, model: 'wan' }).prompt.split('\n\n')[0];
+  assert.ok(/Kryfex is shirtless/.test(TOPLESS), TOPLESS);
+  // reviewer round 1: "no shirt" names no garment; the no-top list matches the tool's
+  for (const name of ['no shirt, bare chest', 'shirtless (no shirt)', 'bare-chested, no shirt', 'barechested']) {
+    const h = compile({ ...LOBBY, outfit: { ...OPEN.outfit, top_name: name } }, { ...base, model: 'wan' }).prompt.split('\n\n')[0];
+    assert.ok(/Kryfex is shirtless/.test(h), name + ' → ' + h);
+  }
+  for (const name of ['unknown', 'nothing', 'cannot be determined.']) {
+    const h = compile({ ...LOBBY, outfit: { ...OPEN.outfit, top_name: name, top_front: 'bare chest' } }, { ...base, model: 'wan' }).prompt.split('\n\n')[0];
+    assert.ok(/Kryfex is shirtless/.test(h), name + ' → ' + h);
+  }
+});
 t('measuredCamera: the writer\'s "pans right" is flipped to the measured LEFT and logged', () => {
   const r = compile(LOBBY, { ...base, model: 'wan' });
   const l3 = r.prompt.split('\n').find(l => l.startsWith('Shot 3'));

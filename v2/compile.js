@@ -253,8 +253,18 @@ function compile(spec, opts = {}) {
   // bare-torso video. A shirtless outfit is said as such; any other outfit that leaves torso or legs bare drops
   // "fully dressed" (it still says "same outfit in every shot").
   const skin = Array.isArray(outfit.bare_skin) ? outfit.bare_skin.map(x => String(x).toLowerCase()) : [];
-  const BARE_TOP = /\b(shirtless|topless|no top|bare[- ]chest(ed)?|bare[- ]torso)\b/i;
-  const bareTop = BARE_TOP.test(`${outfit.top_name || ''} ${outfit.top_front || ''}`) || (!top && skin.some(x => x === 'chest' || x === 'belly'));
+  // 2026-10-31 (VQL 2026-10-26-01): an OPEN top is not "no top". A café polo "worn open at the collar" whose front read
+  // "… bare chest" compiled as "Kryfex is shirtless …" while every shot named the polo, and the take went shirtless twice.
+  // The shirtless words count only in the top's NAME, and not when that name is a garment ("no shirt" is not one); the
+  // front description decides only when no top is named. Twin of the tool's rlIdentityMode (RL_SHIRTLESS, RL_TOP_GARMENT,
+  // RL_NO_TOP, RL_NEG_GARMENT) — keep the four lists identical.
+  const BARE_TOP = /\b(shirtless|topless|no top|bare[- ]?chest(ed)?|bare[- ]torso)\b/i;
+  const TOP_GARMENT = /\b(shirt|t-shirt|tee|polo|henley|blouse|jacket|blazer|coat|hoodie|sweater|jumper|cardigan|overshirt|jersey|vest|waistcoat|kimono|robe|suit)\b/i;
+  const NEG_GARMENT = /\b(no|without)\s+(an?\s+)?(shirt|t-shirt|tee|polo|henley|blouse|jacket|blazer|coat|hoodie|sweater|jumper|cardigan|overshirt|jersey|vest|waistcoat|kimono|robe|suit)s?\b/gi;
+  const NO_TOP = /^(|none|n\/?a|unknown|not shown|not visible|cannot be determined|no top|nothing|-)\.?$/i;
+  const topName = String(outfit.top_name || '');
+  const bareTop = (BARE_TOP.test(topName) && !TOP_GARMENT.test(topName.replace(NEG_GARMENT, '')))
+    || (NO_TOP.test(topName.trim()) && (BARE_TOP.test(`${outfit.top_front || ''}`) || skin.some(x => x === 'chest' || x === 'belly')));
   const bareSome = bareTop || skin.some(x => ['shoulders', 'chest', 'belly', 'back', 'legs', 'feet'].includes(x));
   const noMainPerson = productOnly && !shots.some(x => x.main_visible !== false);   // visible counts, even without actions (reviewer)
   if (noMainPerson) { /* 📦 nobody to dress — the outfit lines would describe a person who is not there */ }
