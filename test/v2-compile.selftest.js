@@ -255,6 +255,11 @@ t('plaza: the sunglasses are placed in the hook, the hook keeps every movement (
   assert.ok(/walks toward the camera from the building entrance, then brings right hand to chin, then lowers hand briefly, then looks to screen-right, then turns head forward again/.test(hook), hook);
   assert.strictEqual((r.prompt.match(/At the start:/g) || []).length, 1);
 });
+t('a prop written as an object prints its words, never [object Object] (propsPlaced, 2026-10-31)', () => {
+  const r = compile({ ...PLAZA, props: [{ name: 'a black holdall', location_first_frame: 'on the chair beside MAIN' }, { foo: 1 }] }, { name: 'Kryfex', gender: 'male', cuts: [2.1], camera: [], durationSec: 10.1, model: 'wan' });
+  assert.ok(!/object Object/.test(r.prompt), r.prompt);
+  assert.ok(/At the start: a black holdall, on the chair beside Kryfex\./.test(r.prompt), r.prompt.split('\n').find(l => l.startsWith('[0-')));
+});
 t('plaza: the crowded phase sheds filler and micro-moves, keeps the object actions and the last action (fewerActions)', () => {
   const r = plaza();
   const l = r.prompt.split('\n').find(x => x.startsWith('[4.1-9s]'));

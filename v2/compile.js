@@ -178,7 +178,10 @@ function compile(spec, opts = {}) {
   const outfit = S.outfit || {};
   // RULE propsPlaced — where each object MAIN uses later sits at the start (VQL 2026-10-30-01: the
   // sunglasses appeared from nowhere — the prompt never said they were in his hand from the first frame).
-  const props = (Array.isArray(S.props) ? S.props : []).map(x => known(noTempo(x))).filter(x => x && x.length <= 120 && !IDENTITY.test(x)).slice(0, 3);
+  // The writer sometimes answers an object ({name, location_first_frame}) instead of the line: it printed as
+  // "At the start: [object Object]" (2026-10-31, Dorzy AR15 bag). Read the object's words; anything else is dropped.
+  const propLine = (x) => typeof x === 'string' ? x : x && typeof x === 'object' ? [x.name, x.location_first_frame || x.where || x.location].map(v => typeof v === 'string' ? v.trim() : '').filter(Boolean).join(', ') : '';
+  const props = (Array.isArray(S.props) ? S.props : []).map(x => known(noTempo(propLine(x)))).filter(x => x && x.length <= 120 && !IDENTITY.test(x)).slice(0, 3);
   let shots = Array.isArray(S.shots) ? S.shots.map(x => ({ ...x })) : [];
   shots.sort((a, b) => (+a.start || 0) - (+b.start || 0));
 
