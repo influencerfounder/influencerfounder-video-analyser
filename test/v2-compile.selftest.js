@@ -382,5 +382,26 @@ t('productOnly ON with a visible person: the person keeps their line and outfit,
   assert.ok(/Stane-Desk-Oak rolls up the curved wall/.test(out), out);
 });
 
+t('outfitEachTake: after a hard cut the take restates the bottom and shoes (VQL 2026-11-03-01)', () => {
+  const r = plaza();
+  const s2 = r.prompt.split(/^Shot 2 /m)[1] || '';
+  assert.ok(/Kryfex wears black wide-leg trousers, black leather shoes\./.test(s2), 'Shot 2 must restate bottom + shoes: ' + s2);
+  assert.ok(!/Kryfex wears a black short-sleeve knit shirt/.test(s2), 'the top is not repeated when the line already names its front');
+  const s1 = r.prompt.split(/^Shot 2 /m)[0].split(/^Shot 1 /m)[1] || '';
+  assert.ok(!/Kryfex wears/.test(s1), 'take 1 sits under the outfit sentence: no restate');
+});
+t('outfitEachTake: a take without a garment line names the top too; garment-set tops pointing at images are left out', () => {
+  const { takeWear } = require('../v2/compile');
+  assert.strictEqual(takeWear({ top_name: 'a leopard print top', bottom: 'a black mini skirt', shoes: 'knee-high black boots' }, false, false), 'a leopard print top, a black mini skirt, knee-high black boots');
+  assert.strictEqual(takeWear({ top_name: 'the Hoodie from the garment images, exactly as photographed', bottom: 'jeans' }, false, false), 'jeans');
+  assert.strictEqual(takeWear({ top_name: 'no top', bottom: 'swim shorts', shoes: 'none' }, false, true), 'swim shorts');
+  assert.strictEqual(takeWear({ top_name: 'a tee', bottom: 'jeans, tattooed calves' }, true, false), 'jeans', 'identity words stripped (identityFromRefs)');
+});
+t('outfitEachTake: a shot without MAIN after the cut gets no outfit line', () => {
+  const spec = { ...PLAZA, shots: [PLAZA.shots[0], { ...PLAZA.shots[2], main_visible: false }] };
+  const r = compile(spec, { name: 'Kryfex', cuts: [2.1], camera: [], durationSec: 6, model: 'wan' });
+  assert.ok(!/^Shot 2 .*Kryfex wears/m.test(r.prompt), r.prompt);
+});
+
 console.log(`\nv2-compile: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

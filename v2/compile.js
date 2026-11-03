@@ -40,6 +40,7 @@ const RULES = {
   framingInTake:  'Inside one take a size change is written as the framing moving within the take, never as a new size with a held camera (which only a cut can deliver); an unchanged framing is not repeated. Evidence: plaza 9.0 s medium → close-up = a jump.',
   fewerActions:   'Later phases (never the hook) shed repeats, "continues/keeps" restatements and "slightly" micro-moves down to ~1.5 actions per second; object actions and the last action stay. Evidence: plaza phase of 19 actions in 4.9 s; the sunglasses went on between two frames.',
   propsPlaced:    'An object MAIN puts on, takes off, picks up or hands over later is placed in the opening ("At the start: sunglasses folded in the right hand"), so it does not pop in. Evidence: plaza sunglasses (2026-10-30) — the source hid the put-on behind a passer-by, our take had neither the passer-by nor the starting place.',
+  outfitEachTake: 'The first line of every take after a cut names what MAIN wears (top unless already said, bottom, shoes), short and positive. Evidence (2026-11-03, VQL 2026-11-03-01): 4 of 9 Leilaa recreates switched to the masters\' lingerie and black trainers, all where only the top was ever restated per shot — supermarket, beach bar, rodeo, plaza; R6: restating per shot 3/10 lost → 4/4 kept.',
   unfocus:        'Real Unfocus Look (owner switch): the old-phone layer only. The autofocus moment is added to the finished video (focusblur.js) since 2026-10-14: Wan rendered no dip on two takes that carried a timed sentence.',
 };
 
@@ -109,6 +110,15 @@ function garmentClause(side, outfit, name) {
   if (side === 'front' && front) return `the front of ${name}'s ${top.replace(/^(a|an|the)\s+/i, '')} faces the camera: ${front}`;
   if (side === 'back' && back) return `the back of ${name}'s ${top.replace(/^(a|an|the)\s+/i, '')} faces the camera: ${back}`;
   return '';
+}
+
+// RULE outfitEachTake — the short "what MAIN wears" restated at the start of every take after a cut: the top's name (unless the line
+// already names the top's side, MAIN is shirtless, or the top is a garment-set sentence that points at images), the bottom
+// and the shoes. Accessories stay in the opening description only (length).
+function takeWear(outfit, topSaid, bareTop) {
+  const top = known(outfit.top_name);
+  const t = top && !topSaid && !bareTop && top.length <= 60 && !/\bimages?\b/i.test(top) ? top : '';
+  return [t, known(stripIdentity(outfit.bottom)), known(stripIdentity(outfit.shoes))].filter(Boolean).join(', ');
 }
 
 // RULE framingInTake — shot sizes from tight to wide, to say whether a framing tightens or widens.
@@ -368,6 +378,16 @@ function compile(spec, opts = {}) {
       }
       const g = s.main_visible === false ? '' : garmentClause(clean(s.garment_side).toLowerCase(), outfit, name); // RULE garmentSide
       if (g) bits.push(sentence(g));
+      // RULE outfitEachTake (2026-11-03, VQL 2026-11-03-01): the outfit was said once at the top and per shot only the top's
+      // front/back — the bottom and shoes never again, and a profile shot nothing at all. After a hard cut the model filled
+      // those regions from the reference pictures (Leilaa: lingerie + the masters' black trainers where the prompt asked for
+      // knee-high boots). The first line of every take AFTER A CUT now names what MAIN wears, short (the first take sits
+      // right under the outfit sentence). Restating per shot took a test from 3/10 lost to 4/4 kept (R6). Positive words
+      // only — naming what must not appear draws it.
+      if (k > 0 && j === 0 && s.main_visible !== false && !productOnly) {
+        const w = takeWear(outfit, !!g, bareTop);
+        if (w) bits.push(sentence(`${name} wears ${w}`));
+      }
       for (const o of (Array.isArray(s.others) ? s.others : [])) {
         const who = label[o.id] || known(o.label);
         const oev = (Array.isArray(o.events) ? o.events : []).map(noTempo).filter(Boolean);
@@ -405,4 +425,4 @@ function compile(spec, opts = {}) {
   return { prompt, words: prompt.split(/\s+/).filter(Boolean).length, segments: shots.map(s => ({ start: s.start, end: s.end, cut_before: !!s.cut_before })), log, rules: Object.keys(RULES) };
 }
 
-module.exports = { compile, RULES, RULE_GATE, measuredCameraFor, cameraSentence, garmentClause, stripIdentity, nameMain };
+module.exports = { compile, RULES, RULE_GATE, measuredCameraFor, cameraSentence, garmentClause, takeWear, stripIdentity, nameMain };
