@@ -31,6 +31,9 @@ assert.notStrictEqual(k0, v2JoinKey({ ...base, mainHint: 'the man in the cap' })
 assert.notStrictEqual(k0, v2JoinKey({ ...base, userChanges: 'red car' }));
 assert.notStrictEqual(k0, v2JoinKey({ ...base, sourceAuthor: 'x' }));
 assert.strictEqual(k0, v2JoinKey({ ...base }));
+// 2026-11-03 (VQL 2026-11-03-03): the frame gets only what the opening shows — a note about a later hit restaged the pen.
+assert.ok(/the top-level field opening_changes: ONLY the part of these changes that is visible in the very first frame/.test(userFacts({ userChanges: 'x' }).join(' ')), 'the writer is asked for opening_changes');
+assert.ok(!/opening_changes/.test(userFacts({ mainHint: 'the man' }).join(' ')), 'no changes = no extra field asked');
 console.log('v2-user-notes selftest: OK');
 // The second opinion (Gemini picks its own MAIN) is skipped once the user has named MAIN.
 const src = require('fs').readFileSync(require('path').join(__dirname, '../v2/cloneV2.js'), 'utf8');

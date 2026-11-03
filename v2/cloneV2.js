@@ -16,7 +16,7 @@ const { writerSystem, validateSpec, parseSpec } = require('./spec');
 const { compile } = require('./compile');
 const { pickCastChanges } = require('./castChange');
 
-const V2_VERSION = 'v2-1.10.5';
+const V2_VERSION = 'v2-1.10.6';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -909,7 +909,7 @@ function userFacts(b) {
   return [
     u.author ? `POSTED BY: @${u.author}. When the handle names or describes a person (a character, a lookalike, a name), the person it is about is usually MAIN — even when someone else fills the opening. Use it only as a hint: when the video clearly makes someone else its subject, that person is MAIN.` : '',
     u.mainHint ? `WHO MAIN IS — the user says, and this OVERRIDES your own choice: ${u.mainHint}. Every MAIN field (outfit, shots, opening, main_where) is about that person; everyone else goes in cast.` : '',
-    u.changes ? `THE USER'S CHANGES FOR THE REMAKE: ${u.changes}. Write the spec as if the video already showed these changes — in the outfit, cast, background and every shot where it is visible. Change nothing else: everything the user did not mention stays exactly as the video shows.` : '',
+    u.changes ? `THE USER'S CHANGES FOR THE REMAKE: ${u.changes}. Write the spec as if the video already showed these changes — in the outfit, cast, background and every shot where it is visible. Change nothing else: everything the user did not mention stays exactly as the video shows. Also add the top-level field opening_changes: ONLY the part of these changes that is visible in the very first frame of the video (the opening instant, before anything happens), written as a change to that still picture; leave it empty when the changes are about something that happens later (an action, a hit, a fall, what someone does next).` : '',
   ].filter(Boolean);
 }
 function joinIdentical(handler, runRecorded, { inflight = new Map(), recent = new Map(), now = () => Date.now() } = {}) {
