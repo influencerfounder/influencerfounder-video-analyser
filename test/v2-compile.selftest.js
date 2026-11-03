@@ -403,5 +403,19 @@ t('outfitEachTake: a shot without MAIN after the cut gets no outfit line', () =>
   assert.ok(!/^Shot 2 .*Kryfex wears/m.test(r.prompt), r.prompt);
 });
 
+t('sheer fabric is not bare skin: the writer is told so (VQL 2026-11-03-02)', () => {
+  assert.ok(/Skin seen through sheer, mesh, lace or fishnet fabric is NOT bare/.test(writerSystem({})));
+});
+t('garmentSide: a back shot names the top\'s back even when the source never showed it; no top = nothing (VQL 2026-11-03-02)', () => {
+  const { garmentClause } = require('../v2/compile');
+  assert.strictEqual(garmentClause('back', { top_name: 'a sports bra', top_back: 'not shown' }, 'Leilaa'), "the back of Leilaa's sports bra faces the camera");
+  assert.strictEqual(garmentClause('back', { top_name: 'not shown' }, 'Leilaa'), '');
+  assert.strictEqual(garmentClause('front', { top_name: 'a sports bra' }, 'Leilaa'), '', 'a front shot without front text stays silent');
+  for (const tn of ['shirtless', 'no top', 'nothing', '-', 'topless', 'bare chest', 'no shirt', 'none'])
+    assert.strictEqual(garmentClause('back', { top_name: tn, top_back: 'not shown' }, 'Kryfex'), '', 'a no-top name must not become a top: ' + tn);
+  assert.strictEqual(garmentClause('back', { top_name: "Leilaa's own signature outfit, exactly as in the reference images" }, 'Leilaa'), '', 'own outfit points at images');
+  assert.strictEqual(garmentClause('back', { top_name: 'the complete Dorzy-BlackSuit outfit from the outfit images, exactly as photographed — every garment, the shoes and the accessories' }, 'Dorzy'), '', 'complete outfit sentence');
+});
+
 console.log(`\nv2-compile: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

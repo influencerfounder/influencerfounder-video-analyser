@@ -102,6 +102,8 @@ function cameraSentence(cam, measured, log, shotNo) {
   return clean(s);
 }
 
+// A top name that means NO top (twin of bareTop's BARE_TOP + NO_TOP words in compile()).
+const NO_TOP_NAME = /(^\s*(none|n\/?a|no top|nothing|-)\.?\s*$)|\b(shirtless|topless|no top|no shirt|bare[- ]?chest(ed)?|bare[- ]torso)\b/i;
 function garmentClause(side, outfit, name) {
   const top = known(outfit.top_name) || 'top';
   // The SHORT side descriptions are what gets repeated per shot (lobby run 1 was 888 words
@@ -109,6 +111,12 @@ function garmentClause(side, outfit, name) {
   const front = known(outfit.top_front_short) || known(outfit.top_front), back = known(outfit.top_back_short) || known(outfit.top_back);
   if (side === 'front' && front) return `the front of ${name}'s ${top.replace(/^(a|an|the)\s+/i, '')} faces the camera: ${front}`;
   if (side === 'back' && back) return `the back of ${name}'s ${top.replace(/^(a|an|the)\s+/i, '')} faces the camera: ${back}`;
+  // 2026-11-03 (VQL 2026-11-03-02): a back shot whose top's back the source never showed said nothing, and the only picture
+  // of her back was a bare-skin crop — the rodeo take lost the sports bra's band. Name the garment's back, nothing invented.
+  // Only for a real, short garment name: never a no-top word ("shirtless", "no shirt", "nothing") — it would name a top that
+  // is not there — and never a garment-set / complete-outfit sentence that points at images (reviewer, same guard as takeWear).
+  const tn = known(outfit.top_name);
+  if (side === 'back' && tn && tn.length <= 60 && !/\bimages?\b/i.test(tn) && !NO_TOP_NAME.test(tn)) return `the back of ${name}'s ${top.replace(/^(a|an|the)\s+/i, '')} faces the camera`;
   return '';
 }
 
