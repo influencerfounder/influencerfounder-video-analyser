@@ -448,6 +448,8 @@ t('layeredOutfit: an open shirt / deep V / no layer keeps the chest; a written o
   assert.ok(/plain white, worn under a closed navy bomber jacket/.test(w.top_front), w.top_front);
   assert.deepStrictEqual(w.bare_skin, []);
   assert.strictEqual(normalizeOutfit({ top_name: 'a hoodie', top_front: 'grey', outer_layer: 'none' }).outer_layer, '');
+  const rerun = normalizeOutfit({ outer_layer: 'an open dark-brown leather biker jacket with wide lapels and zip pockets', top_name: 'an olive-brown fitted T-shirt', top_front: 'plain olive-brown, no visible graphics, worn open under the leather jacket with wide lapels and zip pockets', bare_skin: ['chest'] });
+  assert.deepStrictEqual(rerun.bare_skin, [], 'the red-carpet re-run spec: "worn open under the leather jacket" is about the jacket');
   assert.deepStrictEqual(normalizeOutfit({ top_name: 'a zip-up hoodie', top_front: 'unzipped halfway', bare_skin: ['chest'] }).bare_skin, ['chest'], 'open zip keeps the chest (R6)');
   assert.strictEqual(normalizeOutfit({ top_name: 'a black tee', top_front: 'logo half hidden under the jacket strap' }).outer_layer, '', 'a garment part is not a layer');
   assert.strictEqual(normalizeOutfit({ top_name: 'a black tee', top_front: 'plain, under a denim jacket strap' }).outer_layer, '', 'a/an + strap is not a layer either');

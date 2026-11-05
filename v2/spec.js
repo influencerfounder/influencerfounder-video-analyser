@@ -74,6 +74,7 @@ function parseSpec(text) {
 const LAYER_WORDS = 'jacket|blazer|coat|overcoat|topcoat|overshirt|shacket|cardigan|vest|waistcoat|bomber|parka|trench|gilet';
 // "a/an" only, and never a part of a garment ("half hidden under the jacket strap" is not a layer — reviewer).
 const LAYER_IN_TEXT = new RegExp(`\\b(?:worn\\s+)?under(?:neath)?\\s+(an?\\s+[^,;.()]{0,60}?\\b(?:${LAYER_WORDS})s?)\\b(?!\\s+(?:straps?|pockets?|zips?|zippers?|sleeves?|collars?|linings?|hems?|buttons?|lapels?|flaps?)\\b)`, 'i');
+const LAYER_ABOUT = new RegExp(`(?:\\bworn\\s+)?(?:\\bopen\\s+)?\\bunder(?:neath)?\\s+(?:an?|the)\\s+[^,;.()]{0,60}?\\b(?:${LAYER_WORDS})s?\\b`, 'gi');
 const NO_LAYER = /^(|none|n\/?a|no|nothing|not shown|not visible|unknown|cannot be determined|-)\.?$/i;
 const CLOSED_TOP = /\b(t-?shirts?|tees?|crew[- ]?neck|round[- ]?neck|turtle[- ]?neck|mock[- ]?neck|sweaters?|jumpers?|sweatshirts?|hoodies?)\b/i;
 const OPEN_NECK = /\b(open|unbuttoned|undone|unzipped|zipped (?:down|open)|half[- ]?zip|v-?neck|deep|plunging|low[- ]?cut|scoop|cut-?outs?|cropped|crop top|tank|sleeveless|bare chest|chest (?:shows|showing|visible|exposed)|shirtless|topless)\b/i;
@@ -96,7 +97,9 @@ function normalizeOutfit(o) {
     }
   }
   if (Array.isArray(out.bare_skin) && out.bare_skin.some(x => String(x).toLowerCase() === 'chest') && CLOSED_TOP.test(String(out.top_name || ''))) {
-    const strip = (t) => String(t || '').replace(LAYER_IN_TEXT, ' ').split(layer || '\u0000').join(' ');
+    // For this test only: every "(worn) (open) under a/an/the … jacket" phrase is about the layer, not the top — the writer
+    // wrote "worn open under the leather jacket" on the red-carpet re-run and the 'open' kept the chest crop (2.98.8).
+    const strip = (t) => String(t || '').replace(LAYER_ABOUT, ' ').split(layer || '\u0000').join(' ');
     const desc = `${strip(out.top_name)} ${strip(out.top_front)} ${strip(out.top_front_short)}`;
     if (!OPEN_NECK.test(desc)) out.bare_skin = out.bare_skin.filter(x => String(x).toLowerCase() !== 'chest');
   }
