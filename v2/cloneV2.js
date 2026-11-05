@@ -16,7 +16,7 @@ const { writerSystem, validateSpec, parseSpec, normalizeOutfit } = require('./sp
 const { compile } = require('./compile');
 const { pickCastChanges } = require('./castChange');
 
-const V2_VERSION = 'v2-1.10.8';
+const V2_VERSION = 'v2-1.10.9';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 

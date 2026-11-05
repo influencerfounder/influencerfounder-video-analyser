@@ -287,7 +287,7 @@ function compile(spec, opts = {}) {
   // RULE outfitOnce
   const top = known(outfit.top_name);
   const layer = layerOf(outfit);   // RULE layeredOutfit
-  const sides = [known(layer ? withoutLayer(outfit.top_front) : outfit.top_front) && `front: ${clean(layer ? withoutLayer(outfit.top_front) : outfit.top_front)}`, known(outfit.top_back) && `back: ${clean(outfit.top_back)}`].filter(Boolean);
+  const sides = [known(layer ? withoutLayer(outfit.top_front, layer) : outfit.top_front) && `front: ${clean(layer ? withoutLayer(outfit.top_front, layer) : outfit.top_front)}`, known(outfit.top_back) && `back: ${clean(outfit.top_back)}`].filter(Boolean);
   const rest = [known(stripIdentity(outfit.bottom)), known(stripIdentity(outfit.shoes)), known(stripIdentity(outfit.accessories))].filter(Boolean);
   // RULE bareTop (2026-10-12): a SHIRTLESS source was compiled as "Kryfex wears no top worn, shirtless (front: not
   // shown, bare chest …) — the same outfit, fully dressed, in every shot": the prompt contradicted itself on every

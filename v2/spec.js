@@ -107,6 +107,10 @@ function normalizeOutfit(o) {
 }
 
 // The top's text without the "worn under <layer>" words (the compiler names the layer itself, once).
-function withoutLayer(t) { return String(t || '').replace(new RegExp(`[,;]?\\s*${LAYER_IN_TEXT.source}`, 'i'), '').replace(/\s+/g, ' ').trim(); }
+function withoutLayer(t, layer = '') {
+  // The whole layer first ("worn under an open … jacket with wide lapels and zip pockets"): the regex below stops at the
+  // garment word and left "with wide lapels and zip pockets" on the tee (red-carpet re-run, 2.98.9).
+  if (layer) { const e = String(layer).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); t = String(t || '').replace(new RegExp(`[,;]?\\s*(?:worn\\s+)?(?:open\\s+)?under(?:neath)?\\s+${e}`, 'i'), ''); }
+  return String(t || '').replace(new RegExp(`[,;]?\\s*${LAYER_IN_TEXT.source}`, 'i'), '').replace(/\s+/g, ' ').trim(); }
 
 module.exports = { writerSystem, validateSpec, parseSpec, WRITER_RULES, normalizeOutfit, withoutLayer };
