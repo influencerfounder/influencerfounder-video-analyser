@@ -16,6 +16,7 @@
 'use strict';
 const { UNFOCUS_LAYER } = require('../unfocus');
 const { castChangeText } = require('./castChange');
+const { normalizeOutfit, withoutLayer } = require('./spec');
 
 // ── The rule gate (process, enforced in review + selftest) ──────────────────────────────────
 // A new rule needs ALL THREE: (a) a failure seen on ≥ 2 test-set sources, (b) a scorecard
@@ -40,6 +41,7 @@ const RULES = {
   framingInTake:  'Inside one take a size change is written as the framing moving within the take, never as a new size with a held camera (which only a cut can deliver); an unchanged framing is not repeated. Evidence: plaza 9.0 s medium → close-up = a jump.',
   fewerActions:   'Later phases (never the hook) shed repeats, "continues/keeps" restatements and "slightly" micro-moves down to ~1.5 actions per second; object actions and the last action stay. Evidence: plaza phase of 19 actions in 4.9 s; the sunglasses went on between two frames.',
   propsPlaced:    'An object MAIN puts on, takes off, picks up or hands over later is placed in the opening ("At the start: sunglasses folded in the right hand"), so it does not pop in. Evidence: plaza sunglasses (2026-10-30) — the source hid the put-on behind a passer-by, our take had neither the passer-by nor the starting place.',
+  layeredOutfit:  'A layer worn over the top (outer_layer) is named with the top in the outfit sentence and in every take after a cut ("<layer> over <top> that covers the chest"); a back shot names the layer\'s back. 0 words without a layer. Evidence: Classic LAYERED_OUTFIT_RULE 2.51.0 (Rolls tank under an open jacket, kept 1/1) + VQL 2026-11-05-01 (red-carpet leather jacket named once, both close-ups after a cut shirtless).',
   outfitEachTake: 'The first line of every take after a cut names what MAIN wears (top unless already said, bottom, shoes), short and positive. Evidence (2026-11-03, VQL 2026-11-03-01): 4 of 9 Leilaa recreates switched to the masters\' lingerie and black trainers, all where only the top was ever restated per shot — supermarket, beach bar, rodeo, plaza; R6: restating per shot 3/10 lost → 4/4 kept.',
   unfocus:        'Real Unfocus Look (owner switch): the old-phone layer only. The autofocus moment is added to the finished video (focusblur.js) since 2026-10-14: Wan rendered no dip on two takes that carried a timed sentence.',
 };
@@ -103,6 +105,12 @@ function cameraSentence(cam, measured, log, shotNo) {
 }
 
 // A top name that means NO top (twin of bareTop's BARE_TOP + NO_TOP words in compile()).
+// RULE layeredOutfit — the layer worn over the top, unless the top is a garment-set sentence (a swapped-in garment
+// replaces the source's whole top, its jacket included).
+function layerOf(outfit) {
+  const l = known(outfit && outfit.outer_layer);
+  return l && l.length <= 80 && !/\bimages?\b/i.test(String((outfit && outfit.top_name) || '')) ? l : '';
+}
 const NO_TOP_NAME = /(^\s*(none|n\/?a|no top|nothing|-)\.?\s*$)|\b(shirtless|topless|no top|no shirt|bare[- ]?chest(ed)?|bare[- ]torso)\b/i;
 function garmentClause(side, outfit, name) {
   const top = known(outfit.top_name) || 'top';
@@ -115,6 +123,8 @@ function garmentClause(side, outfit, name) {
   // of her back was a bare-skin crop — the rodeo take lost the sports bra's band. Name the garment's back, nothing invented.
   // Only for a real, short garment name: never a no-top word ("shirtless", "no shirt", "nothing") — it would name a top that
   // is not there — and never a garment-set / complete-outfit sentence that points at images (reviewer, same guard as takeWear).
+  const layer = layerOf(outfit);
+  if (side === 'back' && layer) return `the back of ${name}'s ${layer.replace(/^(a|an|the)\s+/i, '')} faces the camera${back ? `: ${back}` : ''}`;   // RULE layeredOutfit
   const tn = known(outfit.top_name);
   if (side === 'back' && tn && tn.length <= 60 && !/\bimages?\b/i.test(tn) && !NO_TOP_NAME.test(tn)) return `the back of ${name}'s ${top.replace(/^(a|an|the)\s+/i, '')} faces the camera`;
   return '';
@@ -125,7 +135,16 @@ function garmentClause(side, outfit, name) {
 // and the shoes. Accessories stay in the opening description only (length).
 function takeWear(outfit, topSaid, bareTop) {
   const top = known(outfit.top_name);
-  const t = top && !topSaid && !bareTop && top.length <= 60 && !/\bimages?\b/i.test(top) ? top : '';
+  const okTop = top && !bareTop && top.length <= 60 && !/\bimages?\b/i.test(top) ? top : '';
+  let t = okTop && !topSaid ? okTop : '';
+  // RULE layeredOutfit (VQL 2026-11-05-01): the side line names only the inner top, so the layer is said here even when
+  // the top's side was — "the open leather jacket over the olive tee that covers the chest", the chest words only when
+  // the chest is not bare.
+  const layer = layerOf(outfit);
+  if (layer) {
+    const skin = Array.isArray(outfit.bare_skin) ? outfit.bare_skin.map(x => String(x).toLowerCase()) : [];
+    t = okTop ? `${layer} over ${okTop}${skin.includes('chest') ? '' : ' that covers the chest'}` : layer;
+  }
   return [t, known(stripIdentity(outfit.bottom)), known(stripIdentity(outfit.shoes))].filter(Boolean).join(', ');
 }
 
@@ -193,7 +212,7 @@ function compile(spec, opts = {}) {
   const cuts = (opts.cuts || []).filter(c => c > 0.15 && (!dur || c < dur - 0.15)).sort((a, b) => a - b);
   const log = [];
   const S = spec || {};
-  const outfit = S.outfit || {};
+  const outfit = normalizeOutfit(S.outfit || {}) || {};   // 🧥 RULE layeredOutfit — idempotent, also run on the stored spec
   // RULE propsPlaced — where each object MAIN uses later sits at the start (VQL 2026-10-30-01: the
   // sunglasses appeared from nowhere — the prompt never said they were in his hand from the first frame).
   // The writer sometimes answers an object ({name, location_first_frame}) instead of the line: it printed as
@@ -267,7 +286,8 @@ function compile(spec, opts = {}) {
   parts.push(sentence(`${look}${dur ? `, ${Math.round(dur)} seconds` : ''}${known(S.setting) ? `, ${clean(S.setting)}` : ''}`));
   // RULE outfitOnce
   const top = known(outfit.top_name);
-  const sides = [known(outfit.top_front) && `front: ${clean(outfit.top_front)}`, known(outfit.top_back) && `back: ${clean(outfit.top_back)}`].filter(Boolean);
+  const layer = layerOf(outfit);   // RULE layeredOutfit
+  const sides = [known(layer ? withoutLayer(outfit.top_front) : outfit.top_front) && `front: ${clean(layer ? withoutLayer(outfit.top_front) : outfit.top_front)}`, known(outfit.top_back) && `back: ${clean(outfit.top_back)}`].filter(Boolean);
   const rest = [known(stripIdentity(outfit.bottom)), known(stripIdentity(outfit.shoes)), known(stripIdentity(outfit.accessories))].filter(Boolean);
   // RULE bareTop (2026-10-12): a SHIRTLESS source was compiled as "Kryfex wears no top worn, shirtless (front: not
   // shown, bare chest …) — the same outfit, fully dressed, in every shot": the prompt contradicted itself on every
@@ -290,10 +310,11 @@ function compile(spec, opts = {}) {
   const noMainPerson = productOnly && !shots.some(x => x.main_visible !== false);   // visible counts, even without actions (reviewer)
   if (noMainPerson) { /* 📦 nobody to dress — the outfit lines would describe a person who is not there */ }
   else if (bareTop) {
-    parts.push(sentence(`${name} is shirtless${rest.length ? `, wearing ${rest.join(', ')}` : ''} — the same in every shot, the bare chest, belly and back showing ${name}'s own skin from the reference images`));
+    parts.push(sentence(`${name} is shirtless${layer ? ` under ${layer}` : ''}${rest.length ? `, wearing ${rest.join(', ')}` : ''} — the same in every shot, the bare chest, belly and back showing ${name}'s own skin from the reference images`));
     log.push({ rule: 'bareTop' });
   } else if (top || rest.length) {
-    parts.push(sentence(`${name} wears ${top || 'the outfit'}${sides.length ? ` (${sides.join('; ')})` : ''}${rest.length ? `, ${rest.join(', ')}` : ''} — the same outfit${bareSome ? '' : ', fully dressed,'} in every shot`));
+    if (layer) log.push({ rule: 'layeredOutfit' });
+    parts.push(sentence(`${name} wears ${layer && top ? `${layer} over ` : ''}${top || (layer || 'the outfit')}${sides.length ? ` (${sides.join('; ')})` : ''}${rest.length ? `, ${rest.join(', ')}` : ''} — the same outfit${bareSome ? '' : ', fully dressed,'} in every shot`));
   }
   // References — bindings come from the caller (phase 2+): Wan "Image N", Seedance "@Image N".
   const tag = (n) => (model === 'seedance' ? `@Image ${n}` : `Image ${n}`);

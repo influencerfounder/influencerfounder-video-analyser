@@ -5,6 +5,7 @@
 'use strict';
 
 const WRITER_RULES = {
+  layers: 'A jacket/blazer/coat/cardigan/overshirt/vest worn over the top goes in outer_layer; a T-shirt under an open jacket is not a bare chest (VQL 2026-11-05-01: the jacket was named once and the close-ups went shirtless).',
   hookFirst: 'Shot 1 is the hook: every movement of MAIN in it is listed, in order, nothing merged or dropped (Mike 2026-10-01: 80% of the effort).',
   oneMain: 'Exactly one MAIN — the person the video is about. Everyone else goes in cast by a visible label (one-reference-person rule).',
   noIdentity: 'Never describe MAIN\'s face, hair, skin, body, tattoos or age — identity comes from the reference images; only the clothing.',
@@ -23,7 +24,7 @@ function writerSystem({ personaGender }) {
 
 RULES
 1. MAIN is the one person the video is about (most screen time, the one the hook is about). MAIN will be played by someone else (pronouns: ${pro}). Never describe MAIN's face, hair, skin, body shape, tattoos or age. DO describe MAIN's clothing precisely.
-2. OUTFIT: one outfit unless the video visibly shows a change. A top whose back shows a print and whose front shows something else is ONE garment — describe "top_front" and "top_back" separately (exact text, colours, logo size and position). If a side is never shown, write "not shown". Name the garment type in "top_name" (e.g. "a black crew-neck T-shirt"). Also give "top_front_short" and "top_back_short": the same sides in at most 8 words each (e.g. "plain black, small gold crown on the chest") — these are repeated in every shot. "accessories" is only things WORN (glasses, jewellery, a watch, a bag) — never tattoos, hair or skin. "bare_skin": every part of MAIN's body that shows bare skin anywhere in the video, from this list only: "arms" (forearms/upper arms), "shoulders", "chest", "belly", "back", "legs", "feet" — e.g. a T-shirt with shorts = ["arms","legs"], a tank top = ["arms","shoulders"], long sleeves and trousers = [], shirtless = ["arms","shoulders","chest","belly","back"]. Hands and face never count. Skin seen through sheer, mesh, lace or fishnet fabric is NOT bare — leave that part out of "bare_skin" and describe the see-through part in "top_front"/"top_back" (e.g. "sheer black mesh sleeves").
+2. OUTFIT: one outfit unless the video visibly shows a change. A top whose back shows a print and whose front shows something else is ONE garment — describe "top_front" and "top_back" separately (exact text, colours, logo size and position). If a side is never shown, write "not shown". Name the garment type in "top_name" (e.g. "a black crew-neck T-shirt"). Also give "top_front_short" and "top_back_short": the same sides in at most 8 words each (e.g. "plain black, small gold crown on the chest") — these are repeated in every shot. "accessories" is only things WORN (glasses, jewellery, a watch, a bag) — never tattoos, hair or skin. "bare_skin": every part of MAIN's body that shows bare skin anywhere in the video, from this list only: "arms" (forearms/upper arms), "shoulders", "chest", "belly", "back", "legs", "feet" — e.g. a T-shirt with shorts = ["arms","legs"], a tank top = ["arms","shoulders"], long sleeves and trousers = [], shirtless = ["arms","shoulders","chest","belly","back"]. Hands and face never count. Skin seen through sheer, mesh, lace or fishnet fabric is NOT bare — leave that part out of "bare_skin" and describe the see-through part in "top_front"/"top_back" (e.g. "sheer black mesh sleeves"). LAYERS: a jacket, blazer, coat, cardigan, overshirt or vest worn OVER the top goes in "outer_layer" with how it is worn (e.g. "an open dark-brown leather biker jacket"); "top_name"/"top_front" then describe the garment under it. No layer = "". "chest" is bare only where the chest skin itself shows (no top, an open or unbuttoned shirt, a deep V) — a T-shirt or crew-neck under an open jacket covers the chest.
 3. SHOTS: the first shot starts at 0. A new shot with "cut_before": true starts EXACTLY at every MEASURED CUT time given below, and nowhere else. You MAY split a long shot into phases (consecutive entries with "cut_before": false) when the action clearly changes. Phases are 2–5 s long — never shorter than 2 s, except that the hook (the first 1–1.5 s) may be its own phase. Put several small actions in one phase rather than making a phase per second.
 4. HOOK: shot 1 is the scroll-stopper. List EVERY movement MAIN makes in it, in order, including small ones (a head turn, a hand to the face, a knee bouncing) — use the dense hook frames.
 5. "main_events": short present-tense actions with simple verbs, in order ("walks toward the camera", "raises the right hand to the mouth", "turns toward screen-left"). Real-time speed: never "slowly", "gently", "calmly", "unhurried". Never merge two actions into one. After the hook (shot 1), list only what CHANGES: never write "continues …", "keeps …" or "still …" for an expression or a pose, and keep to about one action per second. An ongoing movement (walking, dancing, driving) is stated once in every phase it lasts ("continues walking toward the camera"). An action that puts on, takes off, picks up, puts down or hands over an object is always its own item.
@@ -38,7 +39,7 @@ RULES
 14. "props": every object MAIN puts on, takes off, picks up, puts down or hands over during the video (sunglasses, a cap, a phone, a bag), one short line each saying where it is in the VERY FIRST frame ("dark sunglasses folded in MAIN's right hand", "a cap worn backwards on MAIN's head"). Only objects you can actually see in the frames; [] when there are none.
 
 Return ONLY this JSON (no markdown):
-{"look":"phone|cinema","setting":"one short line: place, light, time of day","outfit":{"top_name":"","top_front":"","top_back":"","top_front_short":"","top_back_short":"","bottom":"","shoes":"","accessories":"","bare_skin":[]},"props":[],"cast":[{"id":"P1","label":"","look":"","sex":"man|woman|child|unknown","face":"clear|small|hidden","facial_hair":"none|stubble|beard|unknown","glasses":false}],"people_move":true,"overlay_text":"","hook":"one sentence: what makes the first 1-2 seconds stop the scroll","opening":{"main_in_first_frame":"clear|small|obscured|absent","main_where":""},"shots":[{"start":0,"cut_before":false,"size":"full body|medium|medium close-up|close-up|extreme close-up|wide","angle":"eye level|low angle|high angle|from behind|...","camera":{"move":"","direction":""},"main_visible":true,"garment_side":"front|back|side|not visible","main_events":[""],"others":[{"id":"P1","events":[""]}],"background":"moving background details, if any","end_state":"what the frame shows at the end of this shot","confidence":"high|medium|low","unknown":[""]}]}`;
+{"look":"phone|cinema","setting":"one short line: place, light, time of day","outfit":{"outer_layer":"","top_name":"","top_front":"","top_back":"","top_front_short":"","top_back_short":"","bottom":"","shoes":"","accessories":"","bare_skin":[]},"props":[],"cast":[{"id":"P1","label":"","look":"","sex":"man|woman|child|unknown","face":"clear|small|hidden","facial_hair":"none|stubble|beard|unknown","glasses":false}],"people_move":true,"overlay_text":"","hook":"one sentence: what makes the first 1-2 seconds stop the scroll","opening":{"main_in_first_frame":"clear|small|obscured|absent","main_where":""},"shots":[{"start":0,"cut_before":false,"size":"full body|medium|medium close-up|close-up|extreme close-up|wide","angle":"eye level|low angle|high angle|from behind|...","camera":{"move":"","direction":""},"main_visible":true,"garment_side":"front|back|side|not visible","main_events":[""],"others":[{"id":"P1","events":[""]}],"background":"moving background details, if any","end_state":"what the frame shows at the end of this shot","confidence":"high|medium|low","unknown":[""]}]}`;
 }
 
 function validateSpec(spec) {
@@ -57,7 +58,52 @@ function parseSpec(text) {
   let t = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
   const a = t.indexOf('{'), b = t.lastIndexOf('}');
   if (a < 0 || b < a) return null;
-  try { return JSON.parse(t.slice(a, b + 1)); } catch (_) { return null; }
+  let j; try { j = JSON.parse(t.slice(a, b + 1)); } catch (_) { return null; }
+  if (j && j.outfit && typeof j.outfit === 'object' && !Array.isArray(j.outfit)) j.outfit = normalizeOutfit(j.outfit);   // 🧥 every written spec
+  return j;
 }
 
-module.exports = { writerSystem, validateSpec, parseSpec, WRITER_RULES };
+// 🧥 LAYERED OUTFIT (2026-11-05, VQL 2026-11-05-01): an open leather jacket over an olive tee lived only inside top_front
+// ("… worn under an open dark brown leather biker jacket"), so no shot line after a cut named it, the chest crop went out
+// because the low neckline was counted as bare chest, and the two close-ups after a cut came back shirtless (a copy of the
+// chest picture). Port of the Classic LAYERED_OUTFIT_RULE (2.51.0, case 2026-10-01-04). normalizeOutfit — applied to the
+// stored spec AND inside compile, idempotent — (1) finds the layer when the writer left it in top_front/top_name, (2) keeps
+// the layer written in top_front too, because the tool's first-frame, chat and Lab outfit text read only top_name/top_front,
+// and (3) drops "chest" from bare_skin when the named top is a closed one (tee, crew-neck, sweater, hoodie) and nothing
+// outside the layer's own words says the neck is open — so no bare-chest picture is sent for a covered chest (R23).
+const LAYER_WORDS = 'jacket|blazer|coat|overcoat|topcoat|overshirt|shacket|cardigan|vest|waistcoat|bomber|parka|trench|gilet';
+// "a/an" only, and never a part of a garment ("half hidden under the jacket strap" is not a layer — reviewer).
+const LAYER_IN_TEXT = new RegExp(`\\b(?:worn\\s+)?under(?:neath)?\\s+(an?\\s+[^,;.()]{0,60}?\\b(?:${LAYER_WORDS})s?)\\b(?!\\s+(?:straps?|pockets?|zips?|zippers?|sleeves?|collars?|linings?|hems?|buttons?|lapels?|flaps?)\\b)`, 'i');
+const NO_LAYER = /^(|none|n\/?a|no|nothing|not shown|not visible|unknown|cannot be determined|-)\.?$/i;
+const CLOSED_TOP = /\b(t-?shirts?|tees?|crew[- ]?neck|round[- ]?neck|turtle[- ]?neck|mock[- ]?neck|sweaters?|jumpers?|sweatshirts?|hoodies?)\b/i;
+const OPEN_NECK = /\b(open|unbuttoned|undone|unzipped|zipped (?:down|open)|half[- ]?zip|v-?neck|deep|plunging|low[- ]?cut|scoop|cut-?outs?|cropped|crop top|tank|sleeveless|bare chest|chest (?:shows|showing|visible|exposed)|shirtless|topless)\b/i;
+function normalizeOutfit(o) {
+  if (!o || typeof o !== 'object') return o;
+  const out = { ...o };
+  // A swapped-in garment set / complete outfit replaces the source's whole top, its jacket included (reviewer: the source
+  // jacket was written back into the blanked top_front of a BlackSuit swap).
+  if (/\bimages?\b/i.test(String(out.top_name || ''))) { if ('outer_layer' in out) out.outer_layer = ''; return out; }
+  let layer = String(out.outer_layer || '').replace(/\s+/g, ' ').trim();
+  if (NO_LAYER.test(layer)) layer = '';
+  if (!layer) { const m = LAYER_IN_TEXT.exec(`${out.top_front || ''} ; ${out.top_name || ''}`); if (m) layer = m[1].trim(); }
+  if (layer.length > 80) layer = '';   // a sentence, not a garment
+  out.outer_layer = layer;
+  if (layer) {
+    const head = layer.toLowerCase().split(/\s+/).slice(-2).join(' ');
+    if (!String(out.top_front || '').toLowerCase().includes(head)) {
+      const f = String(out.top_front || '').trim();
+      out.top_front = /^(|not shown|cannot be determined)$/i.test(f) ? `worn under ${layer}` : `${f.replace(/[.;,\s]+$/, '')}, worn under ${layer}`;
+    }
+  }
+  if (Array.isArray(out.bare_skin) && out.bare_skin.some(x => String(x).toLowerCase() === 'chest') && CLOSED_TOP.test(String(out.top_name || ''))) {
+    const strip = (t) => String(t || '').replace(LAYER_IN_TEXT, ' ').split(layer || '\u0000').join(' ');
+    const desc = `${strip(out.top_name)} ${strip(out.top_front)} ${strip(out.top_front_short)}`;
+    if (!OPEN_NECK.test(desc)) out.bare_skin = out.bare_skin.filter(x => String(x).toLowerCase() !== 'chest');
+  }
+  return out;
+}
+
+// The top's text without the "worn under <layer>" words (the compiler names the layer itself, once).
+function withoutLayer(t) { return String(t || '').replace(new RegExp(`[,;]?\\s*${LAYER_IN_TEXT.source}`, 'i'), '').replace(/\s+/g, ' ').trim(); }
+
+module.exports = { writerSystem, validateSpec, parseSpec, WRITER_RULES, normalizeOutfit, withoutLayer };

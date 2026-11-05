@@ -12,11 +12,11 @@ const path = require('path');
 const axios = require('axios');
 const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
-const { writerSystem, validateSpec, parseSpec } = require('./spec');
+const { writerSystem, validateSpec, parseSpec, normalizeOutfit } = require('./spec');
 const { compile } = require('./compile');
 const { pickCastChanges } = require('./castChange');
 
-const V2_VERSION = 'v2-1.10.6';
+const V2_VERSION = 'v2-1.10.7';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -826,6 +826,7 @@ function mount(app, deps) {
       // 🎭 4c. One small change per clearly visible background person (Mike, 2026-10-23), picked ONCE here and stored on
       // the spec, so the tool's first frame and every compile (now, the late second opinion, Generate) read the same one.
       spec = pickCastChanges(spec);
+      if (spec && spec.outfit) spec.outfit = normalizeOutfit(spec.outfit);   // 🧥 RULE layeredOutfit after the second opinion too (VQL 2026-11-05-01) — the tool reads bare_skin from here
       // 5. COMPILE for both models (no reference bindings yet — the tool adds them per job).
       const copts = { name, gender: personaGender, cuts, camera: camera && camera.segments, durationSec: duration };
       const wan = compile(spec, { ...copts, model: 'wan' });

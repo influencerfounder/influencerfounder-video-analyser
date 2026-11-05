@@ -417,5 +417,66 @@ t('garmentSide: a back shot names the top\'s back even when the source never sho
   assert.strictEqual(garmentClause('back', { top_name: 'the complete Dorzy-BlackSuit outfit from the outfit images, exactly as photographed — every garment, the shoes and the accessories' }, 'Dorzy'), '', 'complete outfit sentence');
 });
 
+const { normalizeOutfit: normalizeOutfitT } = require('../v2/spec');
+// 🧥 RULE layeredOutfit (VQL 2026-11-05-01) — the red-carpet spec as the writer wrote it: the jacket only in top_front,
+// "chest" in bare_skin, close-ups after hard cuts that came back shirtless.
+const RED = () => ({
+  look: 'phone', setting: 'outdoor red carpet event at a film festival, overcast early evening light',
+  outfit: { top_name: 'an olive-green crew-neck T-shirt', top_front: 'plain olive-green crew-neck T-shirt, no visible graphics, worn under an open dark brown leather biker jacket', top_front_short: 'plain olive-green, no graphics', top_back: 'not shown', bottom: 'black slim-fit jeans', shoes: 'cannot be determined', accessories: 'a thin gold chain necklace', bare_skin: ['chest'] },
+  shots: [
+    { start: 0, size: 'medium', camera: { move: 'pans', direction: 'right' }, garment_side: 'front', main_events: ['walks forward along the red carpet'] },
+    { start: 5.7, cut_before: true, size: 'close-up', camera: { move: 'fixed' }, garment_side: 'front', main_events: ['looks toward screen-left'] },
+    { start: 6.7, cut_before: true, size: 'close-up', camera: { move: 'fixed' }, garment_side: 'side', main_events: ['turns the head further left'] },
+    { start: 8.1, cut_before: true, size: 'full body', camera: { move: 'fixed' }, garment_side: 'back', main_events: ['walks up the stairs'] },
+  ],
+});
+t('layeredOutfit: a jacket left in top_front becomes outer_layer; a covered chest leaves bare_skin; idempotent', () => {
+  const { normalizeOutfit } = require('../v2/spec');
+  const o = normalizeOutfit(RED().outfit);
+  assert.strictEqual(o.outer_layer, 'an open dark brown leather biker jacket');
+  assert.deepStrictEqual(o.bare_skin, [], 'a crew-neck tee under an open jacket is not a bare chest');
+  assert.deepStrictEqual(normalizeOutfit(o), o, 'idempotent');
+  assert.ok(/worn under an open dark brown leather biker jacket/.test(o.top_front), 'the layer stays in top_front for the tool');
+});
+t('layeredOutfit: an open shirt / deep V / no layer keeps the chest; a written outer_layer lands in top_front', () => {
+  const { normalizeOutfit } = require('../v2/spec');
+  assert.deepStrictEqual(normalizeOutfit({ top_name: 'a white linen shirt', top_front: 'unbuttoned to the sternum', bare_skin: ['chest'] }).bare_skin, ['chest'], 'not a closed top');
+  assert.deepStrictEqual(normalizeOutfit({ top_name: 'a black V-neck T-shirt', top_front: 'plain black', bare_skin: ['chest'] }).bare_skin, ['chest'], 'V-neck');
+  assert.deepStrictEqual(normalizeOutfit({ top_name: 'a white T-shirt', top_front: 'deep scoop neck, plain white', bare_skin: ['chest', 'arms'] }).bare_skin, ['chest', 'arms'], 'scoop');
+  assert.deepStrictEqual(normalizeOutfit({ top_name: 'no top', top_front: 'bare chest', bare_skin: ['chest'], outer_layer: 'an open black blazer' }).bare_skin, ['chest'], 'shirtless under a blazer');
+  const w = normalizeOutfit({ outer_layer: 'a closed navy bomber jacket', top_name: 'a white T-shirt', top_front: 'plain white', bare_skin: ['chest'] });
+  assert.ok(/plain white, worn under a closed navy bomber jacket/.test(w.top_front), w.top_front);
+  assert.deepStrictEqual(w.bare_skin, []);
+  assert.strictEqual(normalizeOutfit({ top_name: 'a hoodie', top_front: 'grey', outer_layer: 'none' }).outer_layer, '');
+  assert.deepStrictEqual(normalizeOutfit({ top_name: 'a zip-up hoodie', top_front: 'unzipped halfway', bare_skin: ['chest'] }).bare_skin, ['chest'], 'open zip keeps the chest (R6)');
+  assert.strictEqual(normalizeOutfit({ top_name: 'a black tee', top_front: 'logo half hidden under the jacket strap' }).outer_layer, '', 'a garment part is not a layer');
+  assert.strictEqual(normalizeOutfit({ top_name: 'a black tee', top_front: 'plain, under a denim jacket strap' }).outer_layer, '', 'a/an + strap is not a layer either');
+  assert.strictEqual(parseSpec(JSON.stringify(RED())).outfit.outer_layer, 'an open dark brown leather biker jacket', 'parseSpec normalizes every written spec');
+});
+t('layeredOutfit: every take after a cut names the jacket over the tee; a back shot names the jacket\'s back; no layer = no change', () => {
+  const r = compile(RED(), { ...base, cuts: [5.7, 6.7, 8.1], camera: [], durationSec: 15 });
+  const p = r.prompt;
+  assert.ok(/Kryfex wears an open dark brown leather biker jacket over an olive-green crew-neck T-shirt \(front: plain olive-green crew-neck T-shirt, no visible graphics\)/.test(p), p.split('\n')[0]);
+  for (const n of [2, 3]) {
+    const seg = p.split(new RegExp(`^Shot ${n} `, 'm'))[1].split(/^Shot \d/m)[0];
+    assert.ok(/Kryfex wears an open dark brown leather biker jacket over an olive-green crew-neck T-shirt that covers the chest, black slim-fit jeans\./.test(seg), `Shot ${n}: ` + seg);
+  }
+  const s4 = p.split(/^Shot 4 /m)[1];
+  assert.ok(/the back of Kryfex's open dark brown leather biker jacket faces the camera/i.test(s4), s4);
+  assert.ok(r.log.some(l => l.rule === 'layeredOutfit'));
+  const plain = RED(); plain.outfit.top_front = 'plain olive-green crew-neck T-shirt'; plain.outfit.bare_skin = [];
+  const q = compile(plain, { ...base, cuts: [5.7, 6.7, 8.1], camera: [], durationSec: 15 }).prompt;
+  assert.ok(!/jacket|covers the chest/.test(q), 'no layer = 0 words');
+});
+t('layeredOutfit: a swapped-in garment set drops the source jacket', () => {
+  for (const top_name of ['the Hoodie from the garment images, exactly as photographed', 'the complete Dorzy-BlackSuit outfit from the outfit images, exactly as photographed — every garment, the shoes and the accessories']) {
+    const sp = RED(); sp.outfit = { ...normalizeOutfitT(sp.outfit), top_front: '', top_back: '', top_front_short: '', top_back_short: '', top_name };   // the tool's rlGarmentOutfit shape
+    const out = compile(sp, { ...base, cuts: [5.7, 6.7, 8.1], camera: [], durationSec: 15 }).prompt;
+    assert.ok(!/jacket|worn under|covers the chest/.test(out), out.split('\n')[0]);
+  }
+  const { takeWear } = require('../v2/compile');
+  assert.strictEqual(takeWear({ outer_layer: 'an open leather jacket', top_name: 'the Hoodie from the garment images, exactly as photographed', bottom: 'jeans' }, false, false), 'jeans');
+});
+
 console.log(`\nv2-compile: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
