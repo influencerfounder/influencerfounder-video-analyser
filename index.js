@@ -17,7 +17,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.98.9';
+const ANALYSER_VERSION = '2.99.0';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const bgCutout = require('./bgcutout');
@@ -91,6 +91,39 @@ async function fetchVideoBuf(u) {
     return Buffer.from((await axios.get(u, opts)).data);
   }
 }
+// 🔞 18+ BACKUP SCRAPE (2.99.0, Mike 2026-11-07: "the restricted downloads are really annoying … especially
+// Leilaa videos with much skin"). apify/instagram-reel-scraper browses LOGGED OUT, and Instagram shows its
+// sensitive-content gate to logged-out viewers only SOMETIMES: Leilaa's DfC-THDMkhZ and Kryfex's Dc-_OQ5NDO4 were
+// both refused ("private or restricted", ~5 s) on the morning of 11-07 and both fetched fine on 5 of 5 runs an hour
+// later. Leilaa's posts get hit twice: logged out, Instagram hands over a VIDEO-ONLY VP9 rendition, so the slow
+// re-host scrape runs for the sound and gives the gate a second chance to refuse.
+// intropix/instagram-posts-reels-scraper reads through LOGGED-IN sessions the vendor runs (we send only the post
+// link — no cookie, no account of ours). MEASURED 2026-11-07 on the same two posts:
+//   DfC-THDMkhZ  ours: vp9 720x1280 @ 1397 kb/s, NO audio · intropix: h264 720x1280 @ 1664 kb/s + AAC
+//   Dc-_OQ5NDO4  ours: h264 720x1280 @ 977 kb/s + AAC    · intropix: byte-identical file
+// So its file is never worse than ours, and it is used ONLY when ours is refused, empty, unfetchable or silent.
+// ~$0.007 a call (run start + one post), a failed lookup is not charged. Vendor-run sessions can stop working
+// without notice — then this returns null and the old path runs exactly as before. Kill switch without a deploy:
+// IG_AGEGATE_ACTOR=off (or another actor id with the same input/output shape).
+const IG_SHORTCODE_RE = /instagram\.com\/(?:[^/?#]+\/)?(?:p|reels?|tv)\/([A-Za-z0-9_-]+)/i;
+async function ageGateItemUrl(videoUrl, apifyKey) {
+  const actor = String(process.env.IG_AGEGATE_ACTOR || 'intropix~instagram-posts-reels-scraper').trim();
+  if (!actor || actor === 'off') return null;
+  const resp = await axios.post(
+    `https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?token=${apifyKey}`,
+    { postUrls: [videoUrl], maxPosts: 1 },
+    // 60 s, not 120 (reviewer): measured 18 s end to end; a hanging vendor must not eat the tool's 170 s
+    // temp-video budget before the old path even starts.
+    { timeout: 60000 }
+  );
+  const it = Array.isArray(resp.data) ? resp.data[0] : null;
+  if (!it) return null;
+  // Never analyse a DIFFERENT post than the one asked for: when both sides name a shortcode they must match.
+  const want = (String(videoUrl).match(IG_SHORTCODE_RE) || [])[1];
+  if (want && it.shortcode && it.shortcode !== want) return null;
+  const vid = (Array.isArray(it.media) ? it.media : []).find(m => m && m.media_type === 'video' && m.media_url);
+  return vid ? vid.media_url : null;
+}
 // Which CDN edge served it (e.g. instagram.frec35-1 = Recife): the far-edge failures are judged from this.
 const cdnHost = (u) => { try { return new URL(u).hostname; } catch (_) { return '?'; } };
 const cdnErr = (e) => `${e?.response?.status || e?.code || ''} ${String(e?.message || e).slice(0, 120)}`.trim();
@@ -102,6 +135,11 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
 
   // 1. FAST: metadata + Instagram's own file. Kept only when it downloads AND carries audio.
   // A failed fast scrape (timeout, Apify 5xx) is not the end: the slow scrape below is the old path (reviewer).
+  // 🔇 The fast file when it had picture but NO sound — kept as the LAST resort (Mike, 2026-11-07: "If sound is an
+  // issue we can leave the sound, it is not needed for trial reels"). Before 2.99.0 a refused re-host scrape threw
+  // the whole job away although the picture was already on disk. Silent sources already flow through the old path
+  // ("this post really is silent to us"), so every caller copes; the analysis then simply hears no speech.
+  let silentFast = null;
   const fast = await apifyReelItem(videoUrl, apifyKey, false).catch((e) => { console.warn(`[ig-download] fast scrape failed (${String(e.message).slice(0, 140)}) — trying the re-host scrape`); return null; });
   if (fast?.videoUrl) {
     try {
@@ -112,6 +150,7 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
         const mi = fast.musicInfo || null;
         return { audioPath: null, sourceAudio: mi ? { title: String(mi.song_name || ''), artist: String(mi.artist_name || ''), original: !!mi.uses_original_audio } : null };
       }
+      silentFast = buf;
       console.warn('[ig-download] fast file has NO audio stream — running the re-host scrape for an audio source');
     } catch (e) {
       console.warn(`[ig-download] direct CDN fetch failed (${cdnErr(e)}, ${cdnHost(fast.videoUrl)}) — running the re-host scrape`);
@@ -119,9 +158,43 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
     try { fs.unlinkSync(outputPath); } catch (_) {}
   }
 
+  // 1b. 🔞 18+ BACKUP — reached only when the fast path did not return (refused, empty, unfetchable, or silent).
+  // A file with sound wins outright; anything less falls through to the old slow path below, unchanged.
+  try {
+    const bu = await ageGateItemUrl(videoUrl, apifyKey);
+    if (bu) {
+      const buf = await fetchVideoBuf(bu);
+      fs.writeFileSync(outputPath, buf);
+      if (await hasAudioStream(outputPath)) {
+        console.log(`[ig-download] 18+ backup path ${Math.round((Date.now() - t0) / 100) / 10}s (${Math.round(buf.length / 1024)}KB, ${cdnHost(bu)}; fast: ${fast ? (fast.videoUrl ? 'file not usable' : 'refused/empty') : 'scrape failed'})`);
+        const mi = fast?.musicInfo || null;
+        return { audioPath: null, sourceAudio: mi ? { title: String(mi.song_name || ''), artist: String(mi.artist_name || ''), original: !!mi.uses_original_audio } : null };
+      }
+      console.warn('[ig-download] 18+ backup file has no audio either — running the re-host scrape');
+      try { fs.unlinkSync(outputPath); } catch (_) {}
+    } else {
+      console.warn('[ig-download] 18+ backup returned no video — old path');
+    }
+  } catch (e) {
+    console.warn(`[ig-download] 18+ backup failed (${cdnErr(e)}) — old path`);
+    try { fs.unlinkSync(outputPath); } catch (_) {}
+  }
+
   // 2. SLOW (the old single path, unchanged from here on): videoUrl first, Apify's re-hosted copy as the fallback.
   // A deleted / private post (an error item, no videoUrl) is reported from the fast item — no slow run for it.
-  const item = (fast && !fast.videoUrl && (fast.error || fast.errorDescription)) ? fast : await apifyReelItem(videoUrl, apifyKey, true);
+  const fastMi = fast?.musicInfo || null;
+  const useSilentFast = (why) => {
+    fs.writeFileSync(outputPath, silentFast);
+    console.warn(`[ig-download] ${why} — using the fast file WITHOUT sound rather than failing`);
+    return { audioPath: null, silent: true, sourceAudio: fastMi ? { title: String(fastMi.song_name || ''), artist: String(fastMi.artist_name || ''), original: !!fastMi.uses_original_audio } : null };
+  };
+  let item;
+  try {
+    item = (fast && !fast.videoUrl && (fast.error || fast.errorDescription)) ? fast : await apifyReelItem(videoUrl, apifyKey, true);
+  } catch (e) {
+    if (silentFast) return useSilentFast(`re-host scrape failed (${String(e.message).slice(0, 120)})`);
+    throw e;
+  }
   console.log(`[ig-download] re-host scrape done ${Math.round((Date.now() - t0) / 100) / 10}s after the start`);
   // ORDER MATTERS — MEASURED 2026-09-03 on the @charliewelham_ reel (DWQbxq4CV6_):
   //   videoUrl        = Instagram's own progressive file  → 720x1280 h264 @ 1033 kb/s
@@ -137,6 +210,7 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
   // expose (originalWidth/Height report 1080x1920 but no 1080 URL is returned).
   const candidates = [item?.videoUrl, item?.downloadedVideo].filter(Boolean);
   const remoteVideoUrl = candidates[0];
+  if (!remoteVideoUrl && silentFast) return useSilentFast(`re-host scrape refused (${String(item?.error || item?.errorDescription || 'no file').slice(0, 80)})`);
   if (!remoteVideoUrl) {
     // Apify distinguishes a DELETED post from one that merely is not publicly
     // readable, and that difference is invisible everywhere else: Instagram's
@@ -183,6 +257,7 @@ async function downloadInstagramViaApify(videoUrl, outputPath) {
       break;
     } catch (e) { lastErr = e; }
   }
+  if (!videoBuf && silentFast) return useSilentFast(`every re-host candidate failed to fetch (${cdnErr(lastErr)})`);
   if (!videoBuf) throw new Error('Instagram video download failed: ' + (lastErr?.message || 'no candidate URL fetched'));
   fs.writeFileSync(outputPath, videoBuf);
 
@@ -654,10 +729,13 @@ const cloneHandler = async (req, res) => {
     const isTikTok = /tiktok\.com\/@[^/]+\/video\/|tiktok\.com\/t\//.test(videoUrl);
 
     let sourceAudio = null; // { title, artist, original } from the source post, when known
+    let silentSource = false; // 🔇 2.99.0 — the Instagram download kept a picture-only file (see downloadInstagramViaApify)
     if (isInstagram) {
       try {
         const igDl = await downloadInstagramViaApify(videoUrl, videoPath);
         sourceAudio = (igDl && igDl.sourceAudio) || null;
+        // 🔇 2.99.0: only the picture could be fetched — the analysis hears no speech. Logged AND returned (silentSource).
+        if (igDl && igDl.silent) { silentSource = true; console.warn('[clone] source fetched WITHOUT sound (silent last resort) — speech/script cannot be read'); }
         // The picked rendition had no audio track; this is the other candidate, kept
         // ONLY so Whisper has something to hear. Frames still come from videoPath.
         if (igDl && igDl.audioPath) audioSourcePath = igDl.audioPath;
@@ -2034,6 +2112,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       ...recommendRecreateSpec(duration),
       metadata: { duration: Math.round(duration) + 's', frameCount: frameBase64s.length, hasAudio: !!transcript },
       sourceAudio,
+      silentSource: silentSource || undefined,
       promptStyle,
       targetModel,
       shotCuts: !!(shotCuts && !isBgSwap && promptStyle !== 'improve'),
@@ -2300,6 +2379,7 @@ app.post('/api/temp-video', async (req, res) => {
 
   const token = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+  let tvSilent = false; // 🔇 2.99.0 — set when the Instagram download kept a picture-only file
 
   try {
     const isInstagram = /instagram\.com\/(p|reel|reels)\//.test(videoUrl);
@@ -2307,6 +2387,7 @@ app.post('/api/temp-video', async (req, res) => {
     if (isInstagram) {
       console.log(`[tempvid:${token}] downloading via Apify: ${videoUrl.slice(0, 60)}`);
       const igDl = await downloadInstagramViaApify(videoUrl, outputPath);
+      if (igDl && igDl.silent) { tvSilent = true; console.warn(`[tempvid:${token}] kept a picture-only file (silent last resort) — no sound in this copy`); }
       // A licensed-music reel: the high-quality rendition has NO audio stream (measured 2026-09-13,
       // see downloadInstagramViaApify) and the sound sits in the other rendition. /api/clone already
       // uses that file as its audio source; this route used to ignore it, so a saved reel's kept copy
@@ -2373,7 +2454,7 @@ app.post('/api/temp-video', async (req, res) => {
     // captionCues` — variables that only exist inside the assemble-reel route's
     // scope. That was a copy-paste slip which made EVERY temp-video call throw
     // ReferenceError → 500 (found 2026-08-25). Plain response only.
-    res.json({ success: true, videoUrl: publicUrl, token, durationSec });
+    res.json({ success: true, videoUrl: publicUrl, token, durationSec, ...(tvSilent ? { silent: true } : {}) });
   } catch (err) {
     try { fs.unlinkSync(outputPath); } catch (_) {}
     console.error(`[tempvid:${token}] error:`, err.message);
@@ -4579,7 +4660,9 @@ app.post('/api/extract-audio', async (req, res) => {
     const isTikTok = /tiktok\.com\/@[^/]+\/video\/|tiktok\.com\/t\//.test(videoUrl);
 
     if (isInstagram) {
-      await downloadInstagramViaApify(videoUrl, inputPath);
+      const igA = await downloadInstagramViaApify(videoUrl, inputPath);
+      // 🔇 2.99.0: a picture-only last-resort file has nothing to extract — say so instead of a raw ffmpeg 500 (reviewer).
+      if (igA && igA.silent) return res.status(400).json({ success: false, reason: 'restricted_page', error: 'Instagram only let us fetch this video without its sound right now, so there is no voice to take from it. Try again in a little while.' });
     } else if (isTikTok) {
       await downloadTikTok(videoUrl, inputPath, async () => {
         execSync(`yt-dlp -f "best[ext=mp4]/best" -o "${inputPath}" "${videoUrl}"`, { stdio: 'pipe', timeout: 180000 });
