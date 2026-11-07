@@ -16,7 +16,7 @@ const { writerSystem, validateSpec, parseSpec, normalizeOutfit } = require('./sp
 const { compile } = require('./compile');
 const { pickCastChanges } = require('./castChange');
 
-const V2_VERSION = 'v2-1.10.9';
+const V2_VERSION = 'v2-1.10.10';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -863,7 +863,10 @@ function mount(app, deps) {
       });
     } catch (e) {
       console.error('[clone-v2] failed:', e.message);
-      res.status(e && e.code === 'out_of_time' ? 504 : e && (e.code === 'kie_key' || e.code === 'kie_balance') ? 402 : 500).json({ success: false, error: String(e.message || e).slice(0, 300), ...(e && e.code ? { code: e.code } : {}) });
+      res.status(e && e.code === 'out_of_time' ? 504 : e && (e.code === 'kie_key' || e.code === 'kie_balance') ? 402 : 500).json({ success: false, error: String(e.message || e).slice(0, 300), ...(e && e.code ? { code: e.code } : {}),
+        // The download's verdict (not_found / restricted_page), as /api/clone sends it: the tool's worker re-queues
+        // a refused post on its kept copy only when it knows WHY the fetch failed (tool 2026-11-07).
+        ...(e && typeof e.reason === 'string' ? { reason: e.reason } : {}) });
     } finally {
       try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
     }
