@@ -483,5 +483,156 @@ t('layeredOutfit: a swapped-in garment set drops the source jacket', () => {
   assert.strictEqual(takeWear({ outer_layer: 'an open leather jacket', top_name: 'the Hoodie from the garment images, exactly as photographed', bottom: 'jeans' }, false, false), 'jeans');
 });
 
+// RULE overCap (2026-11-10, VQL 2026-11-10-01) — shaped like the real 67 s one-take Maybach analysis: one long take,
+// no measured cuts, phases with and without MAIN, the last one the ending.
+const MAYBACH = {
+  look: 'phone', setting: 'inside a parked luxury car in a bright showroom',
+  outfit: { top_name: 'a long black coat over a black roll-neck', bottom: 'black trousers', shoes: 'black pumps' },
+  shots: [
+    { start: 0, size: 'full body', camera: { move: 'pushes in' }, main_events: ['climbs into the back seat', 'sits down'] , end_state: 'seated in the back seat' },
+    { start: 2.6, size: 'medium shot', main_events: ['crosses the legs', 'raises the right hand to the chin'] },
+    { start: 6.6, size: 'medium shot', main_events: ['leans back'] },
+    { start: 9.6, size: 'medium close-up', main_events: ['presses the console buttons', 'presses the door buttons', 'looks down'] },
+    { start: 16.6, size: 'close-up', main_events: ['sits back'] },
+    { start: 18.6, size: 'wide', main_visible: false, main_events: [], background: 'empty opposite seats' },
+    { start: 24.6, size: 'wide', main_visible: false, main_events: [] },
+    { start: 26.6, size: 'medium shot', main_events: ['reclines', 'stretches the legs out onto the opposite seat'] },
+    { start: 33.6, size: 'medium shot', main_events: ['sits up'] },
+    { start: 36.6, size: 'medium close-up', main_events: ['picks up the folded tray table', 'unfolds the tray table', 'lowers it over the lap'] },
+    { start: 45.6, size: 'wide', main_visible: false, main_events: [] },
+    { start: 53.6, size: 'close-up', main_visible: false, main_events: [] },
+    { start: 61.6, size: 'medium close-up', main_events: ['rests the hand on the tray table', 'looks toward the camera'], end_state: 'facing the camera, hand on the tray table' },
+  ],
+};
+const LONG = { name: 'Dorzy', gender: 'female', cuts: [], camera: [{ from: 0, to: 2.6, zoom: 'in' }, { from: 2.6, to: 67 }], durationSec: 67.4 };
+t('overCap: a 67 s one-take source becomes 30 s of Shots with hard cuts, never "single shot"', () => {
+  const r = compile(MAYBACH, { ...LONG, model: 'wan' });
+  assert.ok(/, 30 seconds,/.test(r.prompt), r.prompt.slice(0, 200));
+  assert.ok(!/67 seconds|65 seconds/.test(r.prompt));
+  assert.ok(!/Generate single shot/.test(r.prompt), 'single shot must go');
+  const heads = r.prompt.match(/^Shot \d+ \[/gm) || [];
+  assert.ok(heads.length >= 4 && heads.length <= 6, r.prompt);
+  assert.strictEqual(r.segments[r.segments.length - 1].end, 30);
+  assert.ok(r.segments.filter(s => s.cut_before).length >= 3, JSON.stringify(r.segments));
+  assert.strictEqual(r.durationSec, 30); assert.strictEqual(r.sourceSecs, 67.4);
+  assert.ok(r.log.some(l => l.rule === 'overCap'));
+  // every [a-bs] time inside 0..30
+  for (const m of r.prompt.matchAll(/\[(\d+(?:\.\d)?)-(\d+(?:\.\d)?)s\]/g)) assert.ok(+m[2] <= 30 && +m[1] < +m[2], m[0]);
+});
+t('overCap: the hook is kept as the source has it, the last phase (the ending) is always kept', () => {
+  const r = compile(MAYBACH, { ...LONG, model: 'wan' });
+  assert.deepStrictEqual([r.segments[0].srcStart, r.segments[0].start, r.segments[0].end], [0, 0, 2.6]);
+  assert.strictEqual(r.segments[r.segments.length - 1].srcStart, 61.6);
+  assert.ok(/Shot 1 \[0-2\.6s\]: Full body/.test(r.prompt), r.prompt);
+  assert.ok(/looks toward the camera/.test(r.prompt) && /End of the shot: facing the camera/.test(r.prompt));
+});
+t('overCap: a part where Dorzy is visible beats an empty-car phase in the same part', () => {
+  // The empty-car phase carries more listed actions (the writer sometimes lists the camera's own moves) — visibility still wins.
+  const spec = { ...MAYBACH, shots: MAYBACH.shots.map(x => x.start === 18.6 ? { ...x, main_events: ['a', 'b', 'c', 'd', 'e'] } : x) };
+  const r = compile(spec, { ...LONG, model: 'wan' });
+  const srcs = r.segments.map(s => s.srcStart);
+  assert.ok(srcs.includes(26.6) && !srcs.includes(18.6), JSON.stringify(srcs));   // reclining beats the empty seats at 18.6/24.6
+  assert.ok(!srcs.includes(45.6) && !srcs.includes(53.6), JSON.stringify(srcs));
+});
+t('overCap: the measured camera is read at the SOURCE time of the kept phase', () => {
+  // The camera turns left only while she reclines (source 26.6-33.6); that phase now plays earlier in the render.
+  const cam = [{ from: 0, to: 2.6, zoom: 'in' }, { from: 2.6, to: 26.6 }, { from: 26.6, to: 33.6, pan: 'left' }, { from: 33.6, to: 67 }];
+  const r = compile(MAYBACH, { ...LONG, camera: cam, model: 'wan' });
+  assert.ok(/Shot 1 \[0-2\.6s\]: Full body, the camera pushes in/.test(r.prompt), r.prompt.split('\n').find(l => l.startsWith('Shot 1')));
+  const s3 = r.prompt.split('\n').find(l => /^Shot \d+/.test(l) && /reclines/.test(l));
+  assert.ok(/left/.test(s3) && !/fixed shot/.test(s3), s3);
+});
+t('overCap: Seedance gets whole seconds on 30 s too', () => {
+  const r = compile(MAYBACH, { ...LONG, model: 'seedance' });
+  assert.ok(/, 30 seconds,/.test(r.prompt) && !/Generate single shot/.test(r.prompt));
+  const n = (r.prompt.match(/^Shot \d+ \[/gm) || []).length; assert.ok(n >= 4 && n <= 6, n);
+});
+t('overCap: a source within the cap compiles exactly as before (no rule, its own length)', () => {
+  const short = { ...LONG, durationSec: 29.9 };
+  const spec = { ...MAYBACH, shots: MAYBACH.shots.filter(x => x.start < 27) };
+  const r = compile(spec, { ...short, model: 'wan' });
+  assert.ok(!r.log.some(l => l.rule === 'overCap') && r.durationSec === undefined);
+  assert.ok(/, 30 seconds,/.test(r.prompt) && /Generate single shot/.test(r.prompt));
+  const lobby = compile(LOBBY, { ...base, model: 'wan' });
+  assert.ok(!lobby.log.some(l => l.rule === 'overCap'));
+});
+t('overCap: maxSecs from the caller wins (a 15 s ceiling keeps fewer, shorter shots)', () => {
+  const r = compile(MAYBACH, { ...LONG, model: 'wan', maxSecs: 15 });
+  assert.ok(/, 15 seconds,/.test(r.prompt));
+  assert.strictEqual(r.segments[r.segments.length - 1].end, 15);
+  assert.ok(r.segments.length >= 2 && r.segments.length <= 3, r.segments.length);
+});
+
+t('overCap: no kept phase plays slower than in the source; the hook keeps its exact length', () => {
+  for (const sp of [MAYBACH, { ...MAYBACH, shots: [{ ...MAYBACH.shots[0], start: 0 }, { start: 1.3, main_events: ['walks'] }, ...MAYBACH.shots.slice(2)] }]) {
+    const r = compile(sp, { ...LONG, model: 'wan' });
+    const L = r.log.find(l => l.rule === 'overCap');
+    L.kept.forEach(([a, b, d], i) => { if (i < L.kept.length - 1) assert.ok(d <= b - a + 0.051, JSON.stringify(L.kept)); });
+    assert.strictEqual(L.kept[0][2], Math.round((L.kept[0][1] - L.kept[0][0]) * 10) / 10);
+  }
+});
+t('overCap: a 1.3 s hook stays 1.3 s (the 09-30 stretch), a 12 s hook is cut at 40% of the render, not squeezed into 6', () => {
+  const sp = { ...MAYBACH, shots: [{ ...MAYBACH.shots[0] }, { ...MAYBACH.shots[1], start: 1.3 }, ...MAYBACH.shots.slice(2)] };
+  assert.ok(/^Shot 1 \[0-1\.3s\]/m.test(compile(sp, { ...LONG, model: 'wan' }).prompt));
+  const lh = { ...MAYBACH, shots: [{ ...MAYBACH.shots[0] }, ...MAYBACH.shots.slice(4)] };   // hook runs 0-16.6
+  const r = compile(lh, { ...LONG, model: 'wan' });
+  assert.ok(/^Shot 1 \[0-12s\]/m.test(r.prompt), r.prompt.split('\n').find(l => l.startsWith('Shot 1')));
+});
+t('overCap: uneven phases — a short phase is never padded, spare time goes to more phases', () => {
+  const sp = { ...MAYBACH, shots: [{ ...MAYBACH.shots[0], start: 0 }, { start: 3, main_events: ['sits'] }, { start: 7, main_events: ['waves'] }, { start: 9, main_events: ['laughs', 'points'] }, { start: 11, main_events: ['talks', 'nods', 'leans back'] }] };
+  const r = compile(sp, { ...LONG, model: 'wan' });
+  const L = r.log.find(l => l.rule === 'overCap');
+  L.kept.forEach(([a, b, d], i) => { if (i < L.kept.length - 1) assert.ok(d <= b - a + 0.051, JSON.stringify(L.kept)); });
+  assert.strictEqual(r.segments[r.segments.length - 1].end, 30);
+});
+t('overCap: two back-to-back phases stay ONE take, cut short at 30 s — no invented cut', () => {
+  const sp = { ...MAYBACH, shots: [{ ...MAYBACH.shots[0] }, { start: 2.6, main_events: ['talks to the camera', 'laughs', 'waves', 'leans in', 'points', 'nods'] }] };
+  const r = compile(sp, { ...LONG, model: 'wan' });
+  assert.ok(!/^Shot \d/m.test(r.prompt) && /, 30 seconds,/.test(r.prompt), r.prompt);
+  assert.strictEqual(r.segments[r.segments.length - 1].end, 30);
+  assert.ok(/talks to the camera, then laughs/.test(r.prompt) && !/nods/.test(r.prompt), 'cut short keeps the first actions only');
+});
+t('overCap: kept phases that follow each other in the source are one take; a cut only where source time is skipped', () => {
+  const r = compile(MAYBACH, { ...LONG, model: 'wan' });
+  const seg = r.segments;
+  seg.forEach((s, i) => { if (i === 0) return; const p = seg[i - 1]; const shortened = (p.srcEnd - p.srcStart) - (p.end - p.start) > 0.15;
+    assert.strictEqual(s.cut_before, shortened || Math.abs(s.srcStart - p.srcEnd) > 0.05, JSON.stringify(seg)); });
+  // a 30.6 s one-take source is not chopped into back-to-back Shots
+  const one = { ...MAYBACH, shots: [{ start: 0, size: 'medium shot', main_events: ['walks in'] }, { start: 10, main_events: ['sits'] }, { start: 20, main_events: ['waves'] }] };
+  const o = compile(one, { ...LONG, durationSec: 30.6, model: 'wan' });
+  assert.ok(!/Hard cut/.test(o.prompt) && !/^Shot \d/m.test(o.prompt), o.prompt);
+});
+t('overCap: the ending is not stretched while a kept phase still has source left', () => {
+  const sp = { ...MAYBACH, shots: [{ start: 0, size: 'full body', main_events: ['opens the door'] }, { start: 2, main_events: ['sits', 'talks'] }, { start: 50, main_events: ['waves goodbye'], end_state: 'waving' }] };
+  const r = compile(sp, { ...LONG, durationSec: 52, model: 'wan' });
+  const L = r.log.find(l => l.rule === 'overCap');
+  const end = L.kept[L.kept.length - 1];
+  assert.ok(end[2] <= end[1] - end[0] + 0.051, JSON.stringify(L.kept));
+});
+t('overCap: a phase cut short keeps only the actions that fit, and drops its end state', () => {
+  const sp = { ...MAYBACH, shots: [{ ...MAYBACH.shots[0] }, { start: 2.6, main_events: ['a1', 'a2', 'a3', 'a4', 'a5', 'a6'], end_state: 'later moment' }, { start: 20.6, main_events: ['b1'] }, { start: 40, main_events: ['c1'] }, { start: 60, main_events: ['d1'], end_state: 'the end' }] };
+  const r = compile(sp, { ...LONG, model: 'wan' });
+  const line = r.prompt.split('\n').find(l => /a1/.test(l));
+  assert.ok(line && !/a6/.test(line) && !/later moment/.test(line), line);
+});
+t('overCap: a person or object only in dropped phases is not named in the header', () => {
+  const sp = { ...MAYBACH, props: ['a gold lighter in the left hand'], cast: [{ id: 'P1', label: 'the chauffeur in the grey suit' }],
+    shots: MAYBACH.shots.map(x => x.start === 53.6 ? { ...x, others: [{ id: 'P1', events: ['opens the door'] }], main_events: [] } : x) };
+  const r = compile(sp, { ...LONG, model: 'wan' });
+  assert.ok(!/chauffeur/.test(r.prompt) && !/gold lighter/.test(r.prompt), r.prompt.slice(0, 600));
+  const short = compile({ ...sp, shots: sp.shots.filter(x => x.start < 27) }, { ...LONG, durationSec: 29 , model: 'wan' });
+  assert.ok(/gold lighter/.test(short.prompt));   // within the cap nothing is filtered
+});
+
+t('overCap: excess time comes off a phase a cut already follows, so no new cut appears', () => {
+  const sp = { look: 'phone', outfit: { top_name: 'a coat' }, shots: [
+    { start: 0, size: 'medium shot', main_events: ['opens the door'] }, { start: 2, main_events: ['a'] }, { start: 9, main_events: ['b'] },
+    { start: 16, main_visible: false, main_events: [] }, { start: 20, main_events: ['d'] }, { start: 27, main_events: ['e'] }, { start: 34, main_events: ['f'] }] };
+  const r = compile(sp, { name: 'Dorzy', cuts: [], durationSec: 35.5, model: 'wan' });
+  const cuts = r.segments.filter(s => s.cut_before);
+  assert.strictEqual(cuts.length, 1, JSON.stringify(r.segments));
+  assert.strictEqual(cuts[0].srcStart, 20);
+});
+
 console.log(`\nv2-compile: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

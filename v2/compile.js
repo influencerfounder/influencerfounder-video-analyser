@@ -43,6 +43,7 @@ const RULES = {
   propsPlaced:    'An object MAIN puts on, takes off, picks up or hands over later is placed in the opening ("At the start: sunglasses folded in the right hand"), so it does not pop in. Evidence: plaza sunglasses (2026-10-30) — the source hid the put-on behind a passer-by, our take had neither the passer-by nor the starting place.',
   layeredOutfit:  'A layer worn over the top (outer_layer) is named with the top in the outfit sentence and in every take after a cut ("<layer> over <top> that covers the chest"); a back shot names the layer\'s back. 0 words without a layer. Evidence: Classic LAYERED_OUTFIT_RULE 2.51.0 (Rolls tank under an open jacket, kept 1/1) + VQL 2026-11-05-01 (red-carpet leather jacket named once, both close-ups after a cut shirtless).',
   outfitEachTake: 'The first line of every take after a cut names what MAIN wears (top unless already said, bottom, shoes), short and positive. Evidence (2026-11-03, VQL 2026-11-03-01): 4 of 9 Leilaa recreates switched to the masters\' lingerie and black trainers, all where only the top was ever restated per shot — supermarket, beach bar, rodeo, plaza; R6: restating per shot 3/10 lost → 4/4 kept.',
+  overCap:        'A source longer than the render ceiling (30 s) is re-told on the real length with no speed change: the hook at its exact source length, then the strongest moments (MAIN visible, most actions, the ending always), each at most its own source length (cut short with only the actions that fit, never stretched or squeezed); a hard cut only where source time is skipped — moments that follow each other stay one take. Evidence (2026-11-10, VQL 2026-11-10-01): a 67 s one-take Maybach source compiled as a 65 s single take for a 30 s Wan render — every jump morphed (3 compiles, same result); the same story hand-written as Shots on 30 s cut cleanly on 3 takes (Maybach + 2 Rolls-Royce).',
   unfocus:        'Real Unfocus Look (owner switch): the old-phone layer only. The autofocus moment is added to the finished video (focusblur.js) since 2026-10-14: Wan rendered no dip on two takes that carried a timed sentence.',
 };
 
@@ -218,7 +219,7 @@ function compile(spec, opts = {}) {
   // The writer sometimes answers an object ({name, location_first_frame}) instead of the line: it printed as
   // "At the start: [object Object]" (2026-10-31, Dorzy AR15 bag). Read the object's words; anything else is dropped.
   const propLine = (x) => typeof x === 'string' ? x : x && typeof x === 'object' ? [x.name, x.location_first_frame || x.where || x.location].map(v => typeof v === 'string' ? v.trim() : '').filter(Boolean).join(', ') : '';
-  const props = (Array.isArray(S.props) ? S.props : []).map(x => known(noTempo(propLine(x)))).filter(x => x && x.length <= 120 && !IDENTITY.test(x)).slice(0, 3);
+  let props = (Array.isArray(S.props) ? S.props : []).map(x => known(noTempo(propLine(x)))).filter(x => x && x.length <= 120 && !IDENTITY.test(x)).slice(0, 3);
   let shots = Array.isArray(S.shots) ? S.shots.map(x => ({ ...x })) : [];
   shots.sort((a, b) => (+a.start || 0) - (+b.start || 0));
 
@@ -278,12 +279,125 @@ function compile(spec, opts = {}) {
     else { keep.add(cur); continue; }
     log.push({ rule: 'phaseLength', merged: i + 1 });
   }
+  // RULE overCap (2026-11-10, VQL 2026-11-10-01) — the render is capped (Wan / Seedance 2.5: 30 s), the source is not.
+  // Writing the source's own timeline made the model squeeze 65 s of action into 30 s as ONE take, so every jump between
+  // places/poses came out as a morph. Now the story is re-told as hard cuts on the real length, with NO speed change:
+  //  - the hook keeps its exact source length (hook-first; capped only at 40% of the render, its later actions then trimmed);
+  //  - the rest of the source is split into equal windows and each keeps its strongest phase (MAIN visible, most actions,
+  //    the very last phase always — the ending); spare time is filled with the next-strongest phases, never by stretching;
+  //  - every kept phase runs for its own source length (a long one is cut short, never squeezed: fewerActions trims its
+  //    actions to the time it gets), so nothing plays slower or faster than in the source (reviewer 2026-11-10: equal
+  //    slices turned a 2 s phase into 13.5 s = 0.15x, the nearest-second rule's slow-motion cause).
+  // srcStart/srcEnd keep the source times so the measured camera is still read from the right moment.
+  const cap = Number(opts.maxSecs) > 0 ? Number(opts.maxSecs) : 30;
+  const renderDur = dur > cap + 0.5 && shots.length > 1 ? cap : dur;
+  let dropped = [];
+  if (renderDur !== dur) {
+    const r1d = (v) => Math.round(v * 10) / 10;
+    const len = (x) => Math.max(0, x.end - x.start);
+    const hook = shots[0], rest = shots.slice(1);
+    const hookLen = r1d(Math.min(len(hook), cap * 0.4));
+    const room = cap - hookLen;
+    const SEG_MAX = 7, SEG_MIN = 2;                       // one kept phase: 2-7 s (Alibaba: 2-5 s, a little more for an action)
+    const want = (x) => Math.min(len(x), SEG_MAX);
+    const evN = (x) => (Array.isArray(x.main_events) ? x.main_events.length : 0) + (productOnly && Array.isArray(x.product_events) ? x.product_events.length : 0);
+    const score = (x) => (x.main_visible === false && !(productOnly && evN(x)) ? 0 : 100) + evN(x) * 3 + Math.min(5, len(x));
+    const slots = Math.max(1, Math.min(rest.length, Math.round(room / 6)));
+    const r0 = rest[0].start, rEnd = dur;
+    const picks = [rest[rest.length - 1]];                // the ending, always
+    for (let w = 0; w < slots - 1; w++) {
+      const wa = r0 + (rEnd - r0) * w / slots, wb = r0 + (rEnd - r0) * (w + 1) / slots;
+      const inWin = rest.filter(x => !picks.includes(x) && (x.start + x.end) / 2 >= wa && (x.start + x.end) / 2 < wb);
+      const best = inWin.slice().sort((x, y) => score(y) - score(x) || x.start - y.start)[0];
+      // A part of the video with only empty shots gives none while MAIN is visible elsewhere — the fill below takes the
+      // strongest visible phase instead (Maybach fixture: an empty-seat phase pushed out the reclining one).
+      if (best && (score(best) >= 100 || !rest.some(x => score(x) >= 100 && !picks.includes(x)))) picks.push(best);
+    }
+    const used = () => picks.reduce((t, x) => t + want(x), 0);
+    // Spare time → more phases (strongest first), never longer ones.
+    const gap = (x) => Math.min(...[hook, ...picks].map(p => Math.abs((p.start + p.end) / 2 - (x.start + x.end) / 2)));
+    while (used() < room - 0.5) {
+      const x = rest.filter(c => !picks.includes(c) && len(c) >= 1).sort((a, b) => score(b) - score(a) || gap(b) - gap(a))[0];
+      if (!x) break;
+      picks.push(x);
+    }
+    picks.sort((x, y) => x.start - y.start);
+    // Each phase gets its own length; too much in total → the weakest middle phases go (never the ending), then any
+    // remaining excess is taken off the longest phases (cut short, not squeezed); too little → the last phase may run up
+    // to its full source length, and only if the source has nothing more does the ending hold its last moment.
+    while (picks.length > 1 && used() - room > 0 && picks.length * SEG_MIN > room) picks.splice(picks.indexOf(picks.slice(0, -1).sort((x, y) => score(x) - score(y))[0]), 1);
+    let durs = picks.map(want);
+    let over = durs.reduce((t, d) => t + d, 0) - room;
+    // Excess comes off a phase that a cut follows anyway (the next kept phase is not its source continuation), then off the
+    // very end, and only then off any phase — shortening a phase whose next one continues it would put a new cut there.
+    const nextJumps = (k) => k < picks.length - 1 && Math.abs(picks[k + 1].start - picks[k].end) > 0.05;
+    while (over > 0.05) {
+      const room2 = (k) => durs[k] - SEG_MIN;
+      const order = [...durs.keys()].filter(k => room2(k) > 0.05);
+      const free = order.filter(nextJumps), last = order.filter(k => k === picks.length - 1);
+      const pool = free.length ? free : last.length ? last : order;
+      if (!pool.length) break;
+      const i = pool.sort((a, b) => durs[b] - durs[a])[0];
+      const cut = Math.min(over, room2(i));
+      durs[i] -= cut; over -= cut;
+    }
+    if (over > 0.05) { const f = room / durs.reduce((t, d) => t + d, 0); durs = durs.map(d => d * f); }   // only when every phase is at its minimum
+    // Too little: first let phases run longer toward their own source length (most source left first), and only when
+    // every phase is at its full length does the ending hold its last moment (reviewer round 2: a 2 s ending held 21 s
+    // while a 48 s phase was kept at 7).
+    let short = room - durs.reduce((t, d) => t + d, 0);
+    while (short > 0.05) {
+      // A phase the next kept phase continues gets its full length first (short, it would put a cut there).
+      const left = durs.map((d, k) => len(picks[k]) - d);
+      const cont = [...durs.keys()].filter(k => left[k] > 0.05 && k < picks.length - 1 && !nextJumps(k));
+      const i = cont.length ? cont[0] : left.reduce((bi, v, k, arr) => (v > arr[bi] ? k : bi), 0);
+      const add = Math.min(short, len(picks[i]) - durs[i]);
+      if (add <= 0.05) break;
+      durs[i] += add; short -= add;
+    }
+    if (short > 0.05 && durs.length) durs[durs.length - 1] += short;   // the source ran out: the ending holds a little longer
+    const kept = [hook, ...picks];
+    // A phase cut short keeps only the actions that fit the time it gets (in order), and loses its end state, which
+    // described a later moment — cut short, never played faster (reviewer round 2: 6 actions of 18 s in 7 s = 2.6x).
+    const shorten = (x, d) => {
+      const f = len(x) > 0 ? d / len(x) : 1;
+      if (f >= 0.97) return;
+      const part = (ev) => (Array.isArray(ev) && ev.length ? ev.slice(0, Math.max(1, Math.ceil(ev.length * f))) : ev);
+      x.main_events = part(x.main_events);
+      if (x.product_events) x.product_events = part(x.product_events);
+      if (Array.isArray(x.others)) x.others = x.others.map(o => (o ? { ...o, events: part(o.events) } : o));
+      x.end_state = '';
+    };
+    shorten(hook, hookLen);
+    picks.forEach((x, i) => shorten(x, durs[i]));
+    let t0 = hookLen;
+    hook.srcStart = hook.start; hook.srcEnd = hook.end; hook.start = 0; hook.end = picks.length ? hookLen : cap;
+    picks.forEach((x, i) => {
+      x.srcStart = x.start; x.srcEnd = x.end;
+      x.start = r1d(t0); t0 += durs[i];
+      x.end = i === picks.length - 1 ? cap : r1d(t0);
+    });
+    // A hard cut only where the story skips source time; phases that follow each other in the source (and were not
+    // cut short) stay ONE take — "Shot N" at a non-cut is the plaza jump cut (RULE oneHeaderPerTake, VQL 2026-10-30-01).
+    kept.forEach((x, i) => { if (i === 0) return; const p = kept[i - 1]; const shortened = (p.srcEnd - p.srcStart) - (p.end - p.start) > 0.15; x.cut_before = shortened || Math.abs(x.srcStart - p.srcEnd) > 0.05 || !!x.cut_before; });
+    dropped = shots.filter(x => !kept.includes(x));
+    log.push({ rule: 'overCap', sourceSecs: Math.round(dur * 10) / 10, cap, phases: shots.length, kept: kept.map(x => [x.srcStart, x.srcEnd, Math.round((x.end - x.start) * 10) / 10]) });
+    shots = kept;
+  }
+  if (dropped.length) {   // RULE overCap — header lines name only what a kept phase shows (naming a feature draws it)
+    const keptText = shots.map(x => (Array.isArray(x.main_events) ? x.main_events : []).join(' ')).join(' ').toLowerCase();
+    const before = props.length;
+    // The object's own words only — the part before where it sits ("a gold lighter | in the left hand"); "hand" would match anything.
+    const objWords = (p) => (p.toLowerCase().split(/\s+(?:in|on|at|under|beside|next|near|held|folded|resting|lying|tucked|inside|behind|over)\b|,|;/)[0].match(/[a-z]{4,}/g) || []);
+    props = props.filter(p => objWords(p).some(w => keptText.includes(w)));
+    if (props.length < before) log.push({ rule: 'overCap', propsDropped: before - props.length });
+  }
   const multi = shots.some((s, i) => i > 0 && s.cut_before);
 
   // ── Overall description ─────────────────────────────────────────────────────────────────
   const look = S.look === 'cinema' && !opts.unfocus ? 'Cinematic vertical video, real camera, natural light' : 'Realistic vertical smartphone video, natural light'; // RULE unfocus: never the cinema look
   const parts = [];
-  parts.push(sentence(`${look}${dur ? `, ${Math.round(dur)} seconds` : ''}${known(S.setting) ? `, ${clean(S.setting)}` : ''}`));
+  parts.push(sentence(`${look}${renderDur ? `, ${Math.round(renderDur)} seconds` : ''}${known(S.setting) ? `, ${clean(S.setting)}` : ''}`));
   // RULE outfitOnce
   const top = known(outfit.top_name);
   const layer = layerOf(outfit);   // RULE layeredOutfit
@@ -336,7 +450,9 @@ function compile(spec, opts = {}) {
   }).filter(Boolean);
   if (bind.length) parts.push(sentence(bind.join('; ')));
   // RULE stableLabels — the cast, each once, by a visible label.
-  const cast = (Array.isArray(S.cast) ? S.cast : []).filter(p => known(p.label));
+  // RULE overCap — a person who acts only in dropped phases is left out of the cast line.
+  const actsIn = (list, id) => list.some(x => (Array.isArray(x.others) ? x.others : []).some(o => o && o.id === id && Array.isArray(o.events) && o.events.length));
+  const cast = (Array.isArray(S.cast) ? S.cast : []).filter(p => known(p.label) && !(dropped.length && actsIn(dropped, p.id) && !actsIn(shots, p.id)));
   const label = Object.fromEntries(cast.map(p => [p.id, clean(p.label)]));
   if (cast.length) {
     // RULE castChange — the label stays the id everywhere; the change rides once, here, after the clothing.
@@ -371,7 +487,7 @@ function compile(spec, opts = {}) {
       if (!collapsed) prevTb = tb;
       const bits = [];
       const size = known(s.size), angle = known(s.angle);
-      const camS = cameraSentence(s.camera, measuredCameraFor(opts.camera, a, b), log, i + 1); // RULES measuredCamera + fixedShot
+      const camS = cameraSentence(s.camera, measuredCameraFor(opts.camera, s.srcStart ?? a, s.srcEnd ?? b), log, i + 1); // RULES measuredCamera + fixedShot
       if (j === 0) {
         bits.push(sentence([size, angle, camS].filter(Boolean).join(', ')));
       } else {
@@ -451,7 +567,7 @@ function compile(spec, opts = {}) {
   if (!multi) tail.push('Generate single shot.');
   if (model === 'wan') tail.push('No dialogue. No background music.'); // RULE wanAudio
   const prompt = nameMain([parts.join(' '), segs.join('\n'), tail.join(' ')].filter(Boolean).join('\n\n'), name);
-  return { prompt, words: prompt.split(/\s+/).filter(Boolean).length, segments: shots.map(s => ({ start: s.start, end: s.end, cut_before: !!s.cut_before })), log, rules: Object.keys(RULES) };
+  return { prompt, words: prompt.split(/\s+/).filter(Boolean).length, segments: shots.map(s => ({ start: s.start, end: s.end, cut_before: !!s.cut_before, ...(s.srcStart != null ? { srcStart: s.srcStart, srcEnd: s.srcEnd } : {}) })), log, rules: Object.keys(RULES), ...(renderDur !== dur ? { durationSec: renderDur, sourceSecs: dur } : {}) };
 }
 
 module.exports = { compile, RULES, RULE_GATE, measuredCameraFor, cameraSentence, garmentClause, takeWear, stripIdentity, nameMain };
