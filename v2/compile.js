@@ -44,7 +44,7 @@ const RULES = {
   layeredOutfit:  'A layer worn over the top (outer_layer) is named with the top in the outfit sentence and in every take after a cut ("<layer> over <top> that covers the chest"); a back shot names the layer\'s back. 0 words without a layer. Evidence: Classic LAYERED_OUTFIT_RULE 2.51.0 (Rolls tank under an open jacket, kept 1/1) + VQL 2026-11-05-01 (red-carpet leather jacket named once, both close-ups after a cut shirtless).',
   outfitEachTake: 'The first line of every take after a cut names what MAIN wears (top unless already said, bottom, shoes), short and positive. Evidence (2026-11-03, VQL 2026-11-03-01): 4 of 9 Leilaa recreates switched to the masters\' lingerie and black trainers, all where only the top was ever restated per shot — supermarket, beach bar, rodeo, plaza; R6: restating per shot 3/10 lost → 4/4 kept.',
   overCap:        'A source longer than the render ceiling (30 s) is re-told on the real length with no speed change: the hook at its exact source length, then the strongest moments (MAIN visible, most actions, the ending always), each at most its own source length (cut short with only the actions that fit, never stretched or squeezed); a hard cut only where source time is skipped — moments that follow each other stay one take. Evidence (2026-11-10, VQL 2026-11-10-01): a 67 s one-take Maybach source compiled as a 65 s single take for a 30 s Wan render — every jump morphed (3 compiles, same result); the same story hand-written as Shots on 30 s cut cleanly on 3 takes (Maybach + 2 Rolls-Royce).',
-  signatureEnding: 'An influencer\'s own signature ending (char.signatureEnding, e.g. Kryfex: "a confident, sexy smile straight into the camera") rides as ONE sentence on the final phase, only when the writer judged that a closing look-and-smile fits the source\'s ending (spec.ending.closing_smile = "fits") and MAIN is visible there; no field or "no" = 0 characters. The hook is never touched. Not a failure fix: Mike\'s request (2026-11-12, VQL 2026-11-12-01: "analyse first if it fits the video … about 80%").',
+  signatureEnding: 'An influencer\'s own signature ending (char.signatureEnding, e.g. Kryfex: "a confident, sexy smile straight into the camera") rides inside the end-of-shot sentence of the final phase ("End of the shot: X; in the final second NAME ends with …"), only when the writer judged that a closing look-and-smile fits the source\'s ending (spec.ending.closing_smile = "fits") and MAIN is visible there; no field or "no" = 0 characters. The hook is never touched. Not a failure fix: Mike\'s request (2026-11-12, VQL 2026-11-12-01: "analyse first if it fits the video … about 80%").',
   unfocus:        'Real Unfocus Look (owner switch): the old-phone layer only. The autofocus moment is added to the finished video (focusblur.js) since 2026-10-14: Wan rendered no dip on two takes that carried a timed sentence.',
 };
 
@@ -554,13 +554,15 @@ function compile(spec, opts = {}) {
       }
       if (known(s.background)) bits.push(sentence(noTempo(s.background)));
       const lastInTake = j === idxs.length - 1;
+      // RULE signatureEnding — the final phase of the final take only, folded INTO its end-of-shot sentence: a separate
+      // trailing sentence (and a last main_events item) left a neutral face on Wan, the end state gave a smile 3 of 4
+      // (main session, Kryfex AR15 bag takes, 2026-11-12).
+      const sigHere = sig && lastInTake && k === takes.length - 1 && s.main_visible !== false;
       if (known(s.end_state)) {
-        const es = noTempo(s.end_state).replace(/^(the shot ends with|end of the shot:?)\s*/i, '');
-        bits.push(sentence(lastInTake ? `End of the shot: ${es}` : `At ${tb}s: ${es}`));
-      }
-      // RULE signatureEnding — the final phase of the final take only, after its end state; never on the hook alone unless the
-      // whole video is one phase (then it is still the last second, said as such).
-      if (sig && lastInTake && k === takes.length - 1 && s.main_visible !== false) { bits.push(sentence(`In the final second ${name} ends with ${sig}`)); log.push({ rule: 'signatureEnding', shot: i + 1 }); }
+        const es = noTempo(s.end_state).replace(/^(the shot ends with|end of the shot:?)\s*/i, '').replace(/[.!?\s]+$/, '');
+        bits.push(sentence(lastInTake ? `End of the shot: ${es}${sigHere ? `; in the final second ${name} ends with ${sig}` : ''}` : `At ${tb}s: ${es}`));
+      } else if (sigHere) bits.push(sentence(`End of the shot: in the final second ${name} ends with ${sig}`));
+      if (sigHere) log.push({ rule: 'signatureEnding', shot: i + 1 });
       if (lastInTake && k < takes.length - 1) bits.push('Hard cut.');
       if (collapsed) { const prev = lines[lines.length - 1]; prev.body += ' ' + bits.filter(x => !prev.body.includes(x)).join(' '); prev.body = prev.body.trim(); }
       else lines.push({ ta, tb, body: bits.join(' ') });

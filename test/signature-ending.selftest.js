@@ -58,14 +58,13 @@ const spec = (ending, lastVisible = true) => ({
 });
 const FITS = { main_face: 'toward camera', closing_smile: 'fits', why: 'calm finished pose' };
 const opts = (o = {}) => ({ name: 'Kryfex', gender: 'male', cuts: [4], durationSec: 7, model: 'wan', ...o });
-const LINE = /In the final second Kryfex ends with a confident, sexy smile straight into the camera\./;
+const LINE = /End of the shot: Kryfex holds the bag at the chest; in the final second Kryfex ends with a confident, sexy smile straight into the camera\./i;
 
-t('fits + field set → ONE sentence, in the last shot, after its end state', () => {
+t('fits + field set → folded into the last shot\'s End-of-the-shot sentence, once', () => {
   const p = compile(spec(FITS), opts({ signatureEnding: SIG })).prompt;
   assert.strictEqual((p.match(/final second/g) || []).length, 1);
   const shot2 = p.slice(p.indexOf('Shot 2'));
   assert.ok(LINE.test(shot2), shot2);
-  assert.ok(shot2.indexOf('End of the shot') < shot2.indexOf('final second'));
   assert.ok(!/smile/.test(p.slice(0, p.indexOf('Shot 2'))), 'the hook is never touched');
 });
 t('Seedance gets the same sentence', () => assert.ok(LINE.test(compile(spec(FITS), opts({ model: 'seedance', signatureEnding: SIG })).prompt)));
@@ -90,6 +89,10 @@ t('a one-take video gets it on its last phase', () => {
   const p = compile(s, opts({ cuts: [], signatureEnding: SIG })).prompt;
   assert.strictEqual((p.match(/final second/g) || []).length, 1);
   assert.ok(p.lastIndexOf('final second') > p.indexOf('[4-7s]'));
+});
+t('no end state on the last shot → its own End-of-the-shot sentence', () => {
+  const s = spec(FITS); s.shots[1].end_state = '';
+  assert.ok(/End of the shot: in the final second Kryfex ends with a confident, sexy smile straight into the camera\./.test(compile(s, opts({ signatureEnding: SIG })).prompt));
 });
 t('the phrase is cleaned: tempo words dropped (R5), "ends with" not doubled, junk refused', () => {
   assert.strictEqual(signaturePhrase('Ends with a slowly growing confident smile.'), 'a growing confident smile');
