@@ -17,7 +17,7 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.99.1';
+const ANALYSER_VERSION = '2.100.0';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
 const bgCutout = require('./bgcutout');
@@ -1647,11 +1647,19 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
        Unsure → COVERED, which is exactly the behaviour before this line existed. */
     const SKIN_LINES_RULE = 'Also output, on two lines of their own directly after the LEGS line (before the blank line that starts the prompt): exactly "CHEST: OPEN" if the prompt you are about to write leaves [INFLUENCER]\'s OWN chest skin visible below the collarbones in any shot (no top, a shirt unbuttoned or worn open at the chest, a deep V, an open jacket over nothing), otherwise "CHEST: COVERED"; then exactly "FOREARMS: BARE" if [INFLUENCER]\'s OWN forearms are bare and on screen in any shot (short sleeves, rolled-up sleeves, sleeveless, no top), otherwise "FOREARMS: COVERED" (long sleeves, a jacket, out of frame, or you cannot tell). Judge [INFLUENCER] ALONE — never anyone else in the scene. When unsure, answer COVERED.';
 
+    /* 😏 ENDING: FITS|NO (2.100.0, 2026-11-12, Video Quality Lab case 2026-11-12-01). Some influencers have a signature
+       ending set on their library record (Kryfex: a confident smile into the camera, Mike: "analyse first if it fits the
+       video … about 80%"). Only this writer watches the source, so it judges whether a closing look-and-smile would sit
+       naturally on the ending (trigger-must-be-the-observer); the TOOL adds the influencer's own sentence, and only when
+       that influencer has one. Writer-only: the prompt itself is unchanged. Read by name; stripped. Unsure → NO. */
+    const ENDING_LINE_RULE = 'Also output, on its own line directly after the FOREARMS line (before the blank line that starts the prompt), exactly "ENDING: FITS" if a short closing beat in which [INFLUENCER] looks into the camera and smiles would sit naturally on the LAST ~1.5 s of the source — [INFLUENCER] is in the last shot with the face readable (or one quick turn to the camera away), close enough for a smile to read, and the moment is calm, confident or finished (a pose, a walk-up, a look, an action that has just ended) — otherwise "ENDING: NO": [INFLUENCER] absent, seen from behind or walking away at the end, the face too far or hidden, the ending mid-action (a fight, a fall, a jump, a run, driving), or the ending a punchline or reaction the video depends on (shock, fear, crying, anger, a deadpan, laughing at someone else). When unsure, answer NO. This line is a judgement only: never write a closing smile into the prompt yourself.';
+
     const sysSend = [
       sysFinal,
       (shotCuts && !isBgSwap && promptStyle !== 'improve' && promptStyle !== 'hookfirst') ? SHOT_CUTS_RULE : '',
       HOOK_FIRST_RULE,
       !isBgSwap ? SKIN_LINES_RULE : '',
+      !isBgSwap ? ENDING_LINE_RULE : '',
       // 🧭 OPENING: SHOWN|ABSENT (hookfirst only, 2026-10-01). The tool anchors the video on the
       // influencer swapped into the source's FIRST frame; when the source opens on someone else
       // (measured: a Rolls-Royce clip opens on the BODYGUARD while the main character is still in
@@ -1964,6 +1972,15 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       }
       if (!isBgSwap && (!c || !f)) console.warn(`[clone] no ${!c ? 'CHEST' : ''}${!c && !f ? '/' : ''}${!f ? 'FOREARMS' : ''} line in the model output (promptStyle=${promptStyle}) — the tool keeps the covered-skin references`);
     }
+    // 😏 ENDING: FITS|NO — by name, like CHEST. Absent => null: the tool adds no signature ending (the safe direction).
+    let closingSmileFits = null;
+    {
+      const m = basePrompt.match(/^[*_\s]*ENDING[*_\s]*:[*_\s]*(FITS|NO)\b.*$/im);
+      if (m) {
+        closingSmileFits = m[1].toUpperCase() === 'FITS';
+        basePrompt = (basePrompt.slice(0, m.index) + basePrompt.slice(m.index + m[0].length)).replace(/^\n+/, '').trim();
+      }
+    }
     // 🧭 OPENING: SHOWN|ABSENT — by name, like LEGS. Absent line => null (unknown), never "shown".
     let influencerInOpening = null;
     {
@@ -2100,6 +2117,7 @@ Then a blank line, then ONLY the Step 2 base prompt text. No JSON, no explanatio
       legsBare,
       chestOpen,
       forearmsBare,
+      closingSmileFits,
       influencerInOpening,
       hookGuard: hookGuard || undefined,
       hookMotion: hookMotion || undefined,

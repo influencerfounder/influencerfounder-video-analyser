@@ -16,7 +16,7 @@ const { writerSystem, validateSpec, parseSpec, normalizeOutfit } = require('./sp
 const { compile } = require('./compile');
 const { pickCastChanges } = require('./castChange');
 
-const V2_VERSION = 'v2-1.11.0';
+const V2_VERSION = 'v2-1.12.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -559,6 +559,7 @@ function mount(app, deps) {
         model: b.model === 'seedance' ? 'seedance' : 'wan', cuts: Array.isArray(b.cuts) ? b.cuts.map(Number).filter(Number.isFinite) : [],
         camera: Array.isArray(b.camera) ? b.camera : null, durationSec: Number(b.durationSec) || 0, refs,
         unfocus: b.unfocus === true, focus: Array.isArray(b.focus) ? b.focus.slice(0, 10) : [],
+        signatureEnding: typeof b.signatureEnding === 'string' ? b.signatureEnding.slice(0, 160) : '',   // RULE signatureEnding (2026-11-12)
         ...(b.productOnly === true ? { productOnly: true, productName: String(b.productName || '').slice(0, 80) } : {}) });
       res.json({ success: true, version: V2_VERSION, ...out });
     } catch (e) { res.status(500).json({ success: false, error: String(e.message || e).slice(0, 200) }); }
