@@ -16,7 +16,7 @@ const { writerSystem, validateSpec, parseSpec, normalizeOutfit } = require('./sp
 const { compile } = require('./compile');
 const { pickCastChanges } = require('./castChange');
 
-const V2_VERSION = 'v2-1.12.0';
+const V2_VERSION = 'v2-1.12.1';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -678,9 +678,13 @@ function mount(app, deps) {
       console.log(`[clone-v2] ${V2_VERSION} lid=${req.body.locationId || '?'} url=${String(videoUrl).slice(0, 200)}`);
 
       // 1. Download (same helpers as v1).
+      let silentSource = false;
       const video = path.join(tmp, 'video.mp4');
       if (/instagram\.com\/(p|reel|reels)\//.test(videoUrl)) {
-        await downloadInstagramViaApify(videoUrl, video);
+        // 🔇 v2-1.12.1: the download may keep a picture-only file (silent last resort, 2.99.0) — returned as silentSource
+        // so the tool can SAY the original came without sound (toolscan 2026-11-13: the flag had no reader).
+        const igDl = await downloadInstagramViaApify(videoUrl, video);
+        if (igDl && igDl.silent) { silentSource = true; console.warn('[clone-v2] source fetched WITHOUT sound (silent last resort) — speech cannot be read'); }
       } else if (/tiktok\.com\//.test(videoUrl)) {
         await downloadTikTok(videoUrl, video, () => new Promise((resolve, reject) => execFile('yt-dlp', ['-o', video, '-f', 'mp4/best[ext=mp4]/best', '--no-playlist', '--quiet', videoUrl], { timeout: 90000 }, (e) => e ? reject(e) : resolve())));
       } else {
@@ -855,6 +859,7 @@ function mount(app, deps) {
       const thumb = (buf) => 'data:image/jpeg;base64,' + buf.toString('base64');
       res.json({
         success: true, version: V2_VERSION, durationSec: Math.round(duration * 100) / 100,
+        ...(silentSource ? { silentSource: true } : {}),
         measured: { cuts, falseCuts, motionCuts, camera: (camera && camera.segments) || null, hookMotion, beats, focus: (focusM && Array.isArray(focusM.events)) ? focusM.events : [] },
         spec, prompts: { wan, seedance },
         keyframes: shotKeys.map(k => ({ t: k.t, shot: k.shot, dataUrl: thumb(k.b) })),
