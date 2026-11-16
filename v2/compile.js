@@ -44,6 +44,7 @@ const RULES = {
   layeredOutfit:  'A layer worn over the top (outer_layer) is named with the top in the outfit sentence and in every take after a cut ("<layer> over <top> that covers the chest"); a back shot names the layer\'s back. 0 words without a layer. Evidence: Classic LAYERED_OUTFIT_RULE 2.51.0 (Rolls tank under an open jacket, kept 1/1) + VQL 2026-11-05-01 (red-carpet leather jacket named once, both close-ups after a cut shirtless).',
   outfitEachTake: 'The first line of every take after a cut names what MAIN wears (top unless already said, bottom, shoes), short and positive. Evidence (2026-11-03, VQL 2026-11-03-01): 4 of 9 Leilaa recreates switched to the masters\' lingerie and black trainers, all where only the top was ever restated per shot — supermarket, beach bar, rodeo, plaza; R6: restating per shot 3/10 lost → 4/4 kept.',
   overCap:        'A source longer than the render ceiling (30 s) is re-told on the real length with no speed change: the hook at its exact source length, then the strongest moments (MAIN visible, most actions, the ending always), each at most its own source length (cut short with only the actions that fit, never stretched or squeezed); a hard cut only where source time is skipped — moments that follow each other stay one take. Evidence (2026-11-10, VQL 2026-11-10-01): a 67 s one-take Maybach source compiled as a 65 s single take for a 30 s Wan render — every jump morphed (3 compiles, same result); the same story hand-written as Shots on 30 s cut cleanly on 3 takes (Maybach + 2 Rolls-Royce).',
+  headGlasses:    'An influencer whose own pictures show sunglasses pushed up on the head (persona phrase, tool: modules/headGlasses.js) wears THAT pair whenever the source person wears or handles sunglasses: the glasses leave the outfit line, the opening says where her own pair starts (on her eyes with only hair on top, or on top of her head), and put-on / take-off actions become sliding her own pair down from / back up onto her head. No phrase, or no sunglasses in the spec = 0 characters. Evidence: three Dorzy takes with a second pair (VQL 2026-10-14-07, 2026-10-16-03, 2026-10-17-06; Mike 2026-11-16: "on her eyes and on her head").',
   signatureEnding: 'An influencer\'s own signature ending (char.signatureEnding, e.g. Kryfex: "a confident, sexy smile straight into the camera") rides inside the end-of-shot sentence of the final phase ("End of the shot: X; in the final second NAME ends with …"), only when the writer judged that a closing look-and-smile fits the source\'s ending (spec.ending.closing_smile = "fits") and MAIN is visible there; no field or "no" = 0 characters. The hook is never touched. Not a failure fix: Mike\'s request (2026-11-12, VQL 2026-11-12-01: "analyse first if it fits the video … about 80%").',
   unfocus:        'Real Unfocus Look (owner switch): the old-phone layer only. The autofocus moment is added to the finished video (focusblur.js) since 2026-10-14: Wan rendered no dip on two takes that carried a timed sentence.',
 };
@@ -69,6 +70,45 @@ function endingFits(S) {
   const e = S && S.ending;
   if (!e || typeof e !== 'object') return false;
   return String(e.closing_smile || '').trim().toLowerCase() === 'fits' && !/^(absent|hidden)$/i.test(String(e.main_face || '').trim());
+}
+// RULE headGlasses (2026-11-16, VQL 2026-11-16-01) — the influencer's masters show sunglasses pushed up on the head, so
+// that pair is in every frame; a source person who wears or puts on sunglasses then gave her a SECOND pair. These make
+// the spec's sunglasses her own pair. Only sunglasses MAIN uses: the outfit's accessories, MAIN's props, MAIN's events.
+// SUNGLASSES only (reviewer 2026-11-16): a bare "glasses" is champagne on a yacht as often as eyewear.
+const GLASSES = /\b(sun ?glasses|shades)\b/i;
+const OFF_EYES = /\b(on (?:top of )?(?:her|his|their|the|MAIN'?s?) head|pushed (?:up|back)|in (?:her|his|their|the|MAIN'?s?) (?:left |right )?hands?|held|holds?|folded|tucked|hanging|hooked|clipped|on the (?:table|dash\w*|seat|counter))\b/i;
+const NP = String.raw`(?:(?!(?:and|then|with|while|as)\b)[\w'-]+\s+){0,4}?(?:sun ?glasses|shades)`;
+const PUT_ON = new RegExp(String.raw`\b(?:puts?|putting|slides?|sliding|slips?|slipping|pulls?|pulling|lowers?|lowering|flips?|flipping)\s+(?:on\s+|down\s+)?${NP}(?:\s+(?:on|down|back on))?(?:\s+(?:onto|over|to)\s+(?:her|his|their)\s+(?:face|eyes|nose))?(?!\s+(?:the|a|an|top)\b)|\b(?:dons?|donning)\s+${NP}`, 'gi');
+const TAKE_OFF = new RegExp(String.raw`\b(?:takes?|taking|pulls?|pulling|slides?|sliding|pushes?|pushing|lifts?|lifting|removes?|removing|raises?|raising)\s+(?:off\s+|up\s+)?${NP}(?:\s+(?:off|up|back up))?(?:\s+(?:onto|on|to)\s+(?:her|his|their)\s+(?:head|hair|forehead)|\s+(?:from|off)\s+(?:her|his|their)\s+(?:face|eyes|nose))?`, 'gi');
+function headGlassesPhrase(x) {
+  const t = clean(String(x == null ? '' : x).replace(/[\r\n]+/g, ' '));
+  return t && t.length <= 120 && GLASSES.test(t) && /\b(head|hair)\b/i.test(t) && !/[<>{}\[\]]/.test(t) ? t : '';
+}
+// A rewrite only where the action ENDS at the glasses (end, comma, "then", "and" …) and the pair is MAIN's: "puts her
+// sunglasses down on the table", "slides them down her nose" and "pulls the sunglasses off the man's face" stay as
+// written (reviewer 2026-11-16: they became the opposite action or a broken sentence).
+const CLAUSE_END = /^\s*(?:$|[,.;:!?]|(?:then|and|while|as|before|after|again|slowly|quickly)\b)/i;
+const isTakeOff = (m) => /\b(off|up|removes?|removing|lifts?|lifting|raises?|raising|pushes?|pushing)\b/i.test(m);
+const isPutOn = (m) => /\b(on|down|onto|over|dons?|donning|lowers?|lowering)\b/i.test(m);
+function ownPair(m, pos) {
+  if (/'s\b/i.test(m)) return false;
+  const owners = (m.match(/\b(her|his|their)\b/gi) || []).map(x => x.toLowerCase());
+  return owners.every(o => o === pos);
+}
+function headGlassesRewrite(ev, pos) {
+  const ok = (m, off, str) => ownPair(m, pos) && CLAUSE_END.test(str.slice(off + m.length));
+  return String(ev).replace(TAKE_OFF, (m, off, str) => isTakeOff(m) && ok(m, off, str) ? `pushes ${pos} sunglasses back up onto the top of ${pos} head` : m)
+    .replace(PUT_ON, (m, off, str) => isPutOn(m) && ok(m, off, str) ? `slides ${pos} sunglasses down from the top of ${pos} head onto ${pos} eyes` : m);
+}
+// Where her pair starts when only ACTIONS mention sunglasses: the first one decides (taken off first = on her eyes).
+function firstGlassesMove(shots, pos) {
+  for (const x of shots) for (const e of (Array.isArray(x.main_events) ? x.main_events : [])) {
+    const str = String(e); let hit = '';
+    str.replace(TAKE_OFF, (m, off) => { if (!hit && isTakeOff(m) && ownPair(m, pos) && CLAUSE_END.test(str.slice(off + m.length))) hit = 'off'; return m; });
+    str.replace(PUT_ON, (m, off) => { if (!hit && isPutOn(m) && ownPair(m, pos) && CLAUSE_END.test(str.slice(off + m.length))) hit = 'on'; return m; });
+    if (hit) return hit;
+  }
+  return '';
 }
 function known(s) { s = clean(s); return s && !/^(n\/?a|none|unknown|not shown|not visible|cannot be determined)\.?$/i.test(s) ? s : ''; }
 
@@ -235,6 +275,28 @@ function compile(spec, opts = {}) {
   const propLine = (x) => typeof x === 'string' ? x : x && typeof x === 'object' ? [x.name, x.location_first_frame || x.where || x.location].map(v => typeof v === 'string' ? v.trim() : '').filter(Boolean).join(', ') : '';
   let props = (Array.isArray(S.props) ? S.props : []).map(x => known(noTempo(propLine(x)))).filter(x => x && x.length <= 120 && !IDENTITY.test(x)).slice(0, 3);
   let shots = Array.isArray(S.shots) ? S.shots.map(x => ({ ...x })) : [];
+  // RULE headGlasses — her own pair, never a second one. Decided once here; every later line reads the edited copies.
+  let glassesStart = '';
+  const hgPhrase = !productOnly && clean(opts.name) ? headGlassesPhrase(opts.headGlasses) : '';
+  if (hgPhrase) {
+    const acc = String(outfit.accessories || '');
+    const accItems = acc.split(/\s*[,;]\s*/).filter(Boolean);
+    const accG = accItems.filter(x => GLASSES.test(x));
+    const propG = props.filter(x => GLASSES.test(x));
+    const evG = shots.some(x => (Array.isArray(x.main_events) ? x.main_events : []).some(e => GLASSES.test(String(e))));
+    if (accG.length || propG.length || evG) {
+      const pos = opts.gender === 'female' ? 'her' : opts.gender === 'male' ? 'his' : 'their';
+      const ref = propG[0] || accG[0] || '';
+      const onEyes = ref ? !OFF_EYES.test(ref) : firstGlassesMove(shots, pos) === 'off';   // only actions: the first move decides
+      glassesStart = onEyes
+        ? `${name}'s own sunglasses are on ${pos} eyes, the same pair the reference images show on top of ${pos} head, so the top of ${pos} head shows only hair`
+        : `${name}'s own sunglasses are pushed up on top of ${pos} head, as in the reference images`;
+      if (accG.length) { outfit.accessories = accItems.filter(x => !GLASSES.test(x)).join(', '); }
+      props = props.filter(x => !GLASSES.test(x));
+      shots = shots.map(x => Array.isArray(x.main_events) ? { ...x, main_events: x.main_events.map(e => headGlassesRewrite(e, pos)) } : x);
+      log.push({ rule: 'headGlasses', start: onEyes ? 'eyes' : 'head', from: accG.length ? 'outfit' : propG.length ? 'props' : 'events' });
+    }
+  }
   shots.sort((a, b) => (+a.start || 0) - (+b.start || 0));
 
   // RULE measuredCuts — snap shot starts to measured cuts, force cut_before on them, close gaps.
@@ -528,7 +590,7 @@ function compile(spec, opts = {}) {
       prevFrame = { size: size || (prevFrame && prevFrame.size) || '', angle: angle || (prevFrame && prevFrame.angle) || '', cam: camS, mainVisible: s.main_visible !== false };
       const hook = i === 0;
       const ev = trimEvents((Array.isArray(s.main_events) ? s.main_events : []).map(noTempo).filter(Boolean), b - a, hook, log, i + 1); // RULES noTempoWords + fewerActions
-      if (hook && props.length && s.main_visible !== false) bits.push(sentence(`At the start: ${props.join('; ')}`)); // RULE propsPlaced
+      if (hook && (props.length || glassesStart) && s.main_visible !== false) bits.push(sentence(`At the start: ${[...props, glassesStart].filter(Boolean).join('; ')}`)); // RULES propsPlaced + headGlasses
       if (ev.length && s.main_visible !== false) bits.push(sentence(`${name} ${ev.join(', then ')}`));
       else if (s.main_visible === false && !productOnly) bits.push(sentence(`${name} is not in ${idxs.length > 1 ? 'the frame' : 'this shot'}`));
       if (productOnly) {   // 📦 the product's own action in this shot — the hook (shot 1) gets the most detail upstream
@@ -589,4 +651,4 @@ function compile(spec, opts = {}) {
   return { prompt, words: prompt.split(/\s+/).filter(Boolean).length, segments: shots.map(s => ({ start: s.start, end: s.end, cut_before: !!s.cut_before, ...(s.srcStart != null ? { srcStart: s.srcStart, srcEnd: s.srcEnd } : {}) })), log, rules: Object.keys(RULES), ...(renderDur !== dur ? { durationSec: renderDur, sourceSecs: dur } : {}) };
 }
 
-module.exports = { compile, RULES, RULE_GATE, signaturePhrase, endingFits, measuredCameraFor, cameraSentence, garmentClause, takeWear, stripIdentity, nameMain };
+module.exports = { compile, RULES, RULE_GATE, headGlassesPhrase, headGlassesRewrite, signaturePhrase, endingFits, measuredCameraFor, cameraSentence, garmentClause, takeWear, stripIdentity, nameMain };

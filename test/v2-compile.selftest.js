@@ -634,5 +634,68 @@ t('overCap: excess time comes off a phase a cut already follows, so no new cut a
   assert.strictEqual(cuts[0].srcStart, 20);
 });
 
+// RULE headGlasses (VQL 2026-11-16-01): Dorzy's masters show sunglasses pushed up on her head; a source that wears
+// or puts on sunglasses gave her a second pair.
+const { headGlassesRewrite, headGlassesPhrase } = require('../v2/compile');
+const HG = 'tortoiseshell sunglasses pushed up on top of her head';
+const hgSpec = (extra) => ({ look: 'phone', outfit: { top_name: 'a black dress', accessories: 'gold chains, dark sunglasses' }, shots: [
+  { start: 0, size: 'medium shot', main_events: ['steps out of the car'] }, { start: 4, main_events: ['takes off her sunglasses', 'smiles'] }], ...extra });
+t('headGlasses: no phrase = byte-identical to before', () => {
+  const a = compile(hgSpec(), { name: 'Dorzy', gender: 'female', cuts: [], durationSec: 8, model: 'wan' });
+  const b = compile(hgSpec(), { name: 'Dorzy', gender: 'female', cuts: [], durationSec: 8, model: 'wan', headGlasses: '' });
+  assert.strictEqual(a.prompt, b.prompt);
+  assert.ok(/dark sunglasses/.test(a.prompt) && /takes off her sunglasses/.test(a.prompt));
+});
+t('headGlasses: no sunglasses in the spec = 0 characters', () => {
+  const sp = { look: 'phone', outfit: { top_name: 'a black dress' }, shots: [{ start: 0, main_events: ['walks'] }] };
+  const a = compile(sp, { name: 'Dorzy', gender: 'female', cuts: [], durationSec: 5, model: 'wan' });
+  const b = compile(sp, { name: 'Dorzy', gender: 'female', cuts: [], durationSec: 5, model: 'wan', headGlasses: HG });
+  assert.strictEqual(a.prompt, b.prompt);
+});
+t('headGlasses: worn sunglasses leave the outfit line, start on her eyes, take-off goes back up to her head', () => {
+  const r = compile(hgSpec(), { name: 'Dorzy', gender: 'female', cuts: [], durationSec: 8, model: 'wan', headGlasses: HG });
+  assert.ok(!/dark sunglasses/.test(r.prompt), r.prompt);
+  assert.ok(/gold chains/.test(r.prompt), 'other accessories kept');
+  assert.ok(/At the start: Dorzy's own sunglasses are on her eyes, the same pair the reference images show on top of her head/.test(r.prompt), r.prompt);
+  assert.ok(/pushes her sunglasses back up onto the top of her head/.test(r.prompt) && !/takes off/.test(r.prompt), r.prompt);
+  assert.strictEqual((r.prompt.match(/At the start/g) || []).length, 1);
+});
+t('headGlasses: a pair in the hand starts on her head; put-on slides her own pair down', () => {
+  const sp = hgSpec({ outfit: { top_name: 'a black dress' }, props: ['dark sunglasses folded in MAIN\'s right hand', 'a phone in the left hand'] });
+  sp.shots[1].main_events = ['puts on the dark sunglasses'];
+  const r = compile(sp, { name: 'Dorzy', gender: 'female', cuts: [], durationSec: 8, model: 'wan', headGlasses: HG });
+  assert.ok(/At the start: a phone in the left hand; Dorzy's own sunglasses are pushed up on top of her head/.test(r.prompt), r.prompt);
+  assert.ok(/slides her sunglasses down from the top of her head onto her eyes/.test(r.prompt), r.prompt);
+  assert.ok(!/folded/.test(r.prompt));
+});
+t('headGlasses rewrite: never eats other objects or a set-down', () => {
+  assert.strictEqual(headGlassesRewrite('puts her sunglasses on the table', 'her'), 'puts her sunglasses on the table');
+  assert.strictEqual(headGlassesRewrite('puts on the hat and sunglasses', 'her'), 'puts on the hat and sunglasses');
+  assert.strictEqual(headGlassesRewrite('removes the sunglasses from her face, then smiles', 'her'), 'pushes her sunglasses back up onto the top of her head, then smiles');
+  assert.strictEqual(headGlassesRewrite('pulls down her sunglasses', 'her'), 'slides her sunglasses down from the top of her head onto her eyes');
+  assert.strictEqual(headGlassesRewrite('adjusts her sunglasses', 'her'), 'adjusts her sunglasses');
+});
+t('headGlasses: drinking glasses never trigger it (reviewer 2026-11-16)', () => {
+  const sp = { look: 'phone', outfit: { top_name: 'a black dress' }, props: ['two champagne glasses on the table'], shots: [{ start: 0, main_events: ['raises two champagne glasses', 'clinks glasses with the man'] }] };
+  const a = compile(sp, { name: 'Dorzy', gender: 'female', cuts: [], durationSec: 5, model: 'wan' });
+  const b = compile(sp, { name: 'Dorzy', gender: 'female', cuts: [], durationSec: 5, model: 'wan', headGlasses: HG });
+  assert.strictEqual(a.prompt, b.prompt);
+});
+t('headGlasses rewrite: set-downs, other people\'s pairs and moves with a place stay as written', () => {
+  for (const e of ['puts her sunglasses down on the table', 'pulls the sunglasses off the man\'s face', 'slides her sunglasses down her nose', 'takes off his sunglasses', 'puts the sunglasses down next to the phone'])
+    assert.strictEqual(headGlassesRewrite(e, 'her'), e);
+  assert.strictEqual(headGlassesRewrite('takes off her sunglasses and smiles', 'her'), 'pushes her sunglasses back up onto the top of her head and smiles');
+});
+t('headGlasses: only actions, taken off first = her pair starts on her eyes', () => {
+  const sp = { look: 'phone', outfit: { top_name: 'a black dress' }, shots: [{ start: 0, main_events: ['walks'] }, { start: 3, main_events: ['takes off her sunglasses'] }] };
+  const r = compile(sp, { name: 'Dorzy', gender: 'female', cuts: [], durationSec: 6, model: 'wan', headGlasses: HG });
+  assert.ok(/own sunglasses are on her eyes/.test(r.prompt), r.prompt);
+});
+t('headGlasses phrase: only glasses ON the head count', () => {
+  assert.strictEqual(headGlassesPhrase('black sunglasses in hand'), '');
+  assert.strictEqual(headGlassesPhrase('gold hoops'), '');
+  assert.strictEqual(headGlassesPhrase(HG), HG);
+});
+
 console.log(`\nv2-compile: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
