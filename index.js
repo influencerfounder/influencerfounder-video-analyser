@@ -17,9 +17,10 @@ const ffprobeStatic = require('ffprobe-static');
 // One version constant, read by /health AND returned with every recreate prompt, so the
 // tool can record on each video which analyser build wrote its prompt (2026-09-30 —
 // the attribution work: "which prompt change moved virality" needs the version per video).
-const ANALYSER_VERSION = '2.102.0';
+const ANALYSER_VERSION = '2.103.0';
 const unfocusLib = require('./unfocus');
 const focusBlur = require('./focusblur');
+const dehum = require('./dehum');
 const bgCutout = require('./bgcutout');
 const hookGuardLib = require('./hookGuard');
 // Room the hook revision needs: one Claude call on 5 hook frames (~15-30 s) plus the response.
@@ -3306,6 +3307,54 @@ app.post('/api/focus-blur', async (req, res) => {
     res.json({ success: true, videoUrl: `https://${req.get('host')}/api/temp-video/${token}`, token, window: win, plan, cuts, duration });
   } catch (err) {
     console.error(`[focus-blur:${token}] error:`, err.message);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
+  }
+});
+
+// 🔇 POST /api/dehum — remove Wan's steady hum from a FINISHED video (dehum.py finds the tones, dehum.js decides
+// and builds the filter; VQL 2026-11-17-04). Body: { videoUrl, voice? } (voice = the take carries speech: only tones <= 100 Hz). Picture copied untouched (-c:v copy); only the
+// audio is filtered. Returns { skipped:true, reason } when there is no steady hum — the caller keeps the original.
+app.post('/api/dehum', async (req, res) => {
+  const b = req.body || {};
+  if (typeof b.videoUrl !== 'string' || !/^https:\/\//.test(b.videoUrl)) return res.status(400).json({ success: false, error: 'videoUrl (https) required' });
+  const FF = SYSTEM_FFMPEG || process.env.FFMPEG_BIN || ffmpegStatic;
+  if (!FF) return res.status(500).json({ success: false, error: 'no ffmpeg' });
+  const token = `dh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dehum-'));
+  const outputPath = path.join(os.tmpdir(), `tempvid_${token}.mp4`);
+  const { execFile } = require('child_process');
+  const run = (cmd, args, ms) => new Promise((resolve, reject) => execFile(cmd, args, { timeout: ms, maxBuffer: 32 * 1024 * 1024 }, (err, so, se) => err ? reject(new Error(String(se || err.message).slice(-600))) : resolve(String(so || ''))));
+  try {
+    const r = await axios.get(b.videoUrl, { responseType: 'arraybuffer', timeout: 90000, maxContentLength: 400 * 1024 * 1024 });
+    const vid = path.join(tmp, 'in.mp4'); fs.writeFileSync(vid, Buffer.from(r.data));
+    const det = JSON.parse(await run(PYTHON, [path.join(__dirname, 'dehum.py'), vid, FF], 150000));
+    const d = dehum.decide(det, { voice: b.voice === true });
+    if (!d.clean) {
+      console.log(`[dehum:${token}] skipped — ${d.reason}`);
+      return res.json({ success: true, skipped: true, reason: d.reason, detected: det });
+    }
+    const render = (tones) => run(FF, ['-hide_banner', '-loglevel', 'error', '-y', '-i', vid, '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-af', dehum.filterFor(tones), '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', outputPath], 120000);
+    await render(d.tones);
+    // A weaker tone hidden next to a strong one surfaces once the strong one is gone (car take: 54 Hz, then 75 Hz).
+    // One more look; if something new shows, render again FROM THE ORIGINAL with both, so the audio is encoded once.
+    // The second look is a bonus: if it fails, the first clean (already on disk) stands (reviewer 2026-11-17).
+    try {
+      const d2 = dehum.decide(JSON.parse(await run(PYTHON, [path.join(__dirname, 'dehum.py'), outputPath, FF], 60000)), { voice: b.voice === true });
+      if (d2.clean) {
+        const tones = [...new Set([...d.tones, ...d2.tones])].sort((x, y) => x - y).slice(0, dehum.MAX_NOTCHES + 2);
+        await render(tones); d.tones = tones; d.reason = `hum at ${tones.join(', ')} Hz`;
+      }
+    } catch (e2) {
+      console.warn(`[dehum:${token}] second pass failed, keeping the first clean: ${e2.message}`);
+      await render(d.tones);   // a failed second render may have left a partial file — write the first clean again
+    }
+    tempVideos.set(token, { filePath: outputPath, createdAt: Date.now() });
+    console.log(`[dehum:${token}] ${d.reason}${b.voice === true ? ' (voice take: tones <= 100 Hz only)' : ''}`);
+    res.json({ success: true, videoUrl: `https://${req.get('host')}/api/temp-video/${token}`, token, tones: d.tones, reason: d.reason, detected: det });
+  } catch (err) {
+    console.error(`[dehum:${token}] error:`, err.message);
     res.status(500).json({ success: false, error: err.message });
   } finally {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
