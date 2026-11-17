@@ -697,5 +697,46 @@ t('headGlasses phrase: only glasses ON the head count', () => {
   assert.strictEqual(headGlassesPhrase(HG), HG);
 });
 
+// 🔊 RULE soundBed (VQL 2026-11-17-04)
+const MALL_SOUND = { bed: 'a busy mall corridor: indistinct voices near and far, footsteps on tile', events: [{ t: 6, sound: 'a coffee-cup lid taps' }, { t: 1.5, sound: 'heels click on the tile with each step' }, { t: 99, sound: 'a door chime' }], machine_off: '' };
+t('soundBed: a Sound line sits right before the Wan audio negatives, events in time order, past-the-end dropped', () => {
+  const r = compile({ ...LOBBY, sound: MALL_SOUND }, { ...base, model: 'wan' });
+  assert.ok(/Sound: a busy mall corridor: indistinct voices near and far, footsteps on tile; heels click on the tile with each step at 1\.5s, a coffee-cup lid taps at 6s\. No dialogue\. No background music\.$/.test(r.prompt), r.prompt.slice(-300));
+  assert.ok(!/door chime/.test(r.prompt));
+  assert.ok(r.log.some(l => l.rule === 'soundBed'));
+});
+t('soundBed: no sound field = byte-identical prompt (old specs unchanged)', () => {
+  assert.strictEqual(compile(LOBBY, { ...base, model: 'wan' }).prompt, compile({ ...LOBBY, sound: null }, { ...base, model: 'wan' }).prompt);
+  assert.ok(!/Sound:/.test(compile(LOBBY, { ...base, model: 'wan' }).prompt));
+});
+t('soundBed: music, songs, quotes and hum words never reach the prompt; machine_off only when given', () => {
+  const r = compile({ ...LOBBY, sound: { bed: 'a nightclub with loud house music', events: [{ t: 1, sound: 'the DJ drops the beat' }, { t: 2, sound: 'someone shouts "hey"' }, { t: 3, sound: 'a glass is set down on the bar' }, { t: 4, sound: 'a single tap drips' }], machine_off: 'fridge hum' } }, { ...base, model: 'wan' });
+  assert.ok(/Sound: a glass is set down on the bar at 3s, a single tap drips at 4s\./.test(r.prompt), r.prompt.slice(-250));
+  assert.ok(!/music|DJ|beat|"hey"|fridge/i.test(r.prompt.split('Sound:')[1].split('No dialogue')[0]));
+  const car = compile({ ...LOBBY, sound: { bed: 'a quiet parked car: faint street traffic through the closed windows', events: [], machine_off: 'engine and air-con off' } }, { ...base, model: 'wan' });
+  assert.ok(/Sound: a quiet parked car: faint street traffic through the closed windows; engine and air-con off\. No dialogue/.test(car.prompt), car.prompt.slice(-200));
+});
+t('soundBed: Wan only for now; Seedance prompts unchanged', () => {
+  assert.strictEqual(compile({ ...LOBBY, sound: MALL_SOUND }, { ...base, model: 'seedance' }).prompt, compile(LOBBY, { ...base, model: 'seedance' }).prompt);
+});
+t('soundBed: MAIN in a sound event becomes the influencer name', () => {
+  const r = compile({ ...LOBBY, sound: { bed: 'a quiet lobby', events: [{ t: 2, sound: 'fabric rustles as MAIN turns' }] } }, { ...base, model: 'wan' });
+  assert.ok(/fabric rustles as Kryfex turns at 2s/.test(r.prompt), r.prompt.slice(-200));
+});
+t('soundBed: the writer is asked for sound from the place, never the soundtrack', () => {
+  const sys = writerSystem({ personaGender: 'male' });
+  assert.ok(/"sound":\{"bed"/.test(sys) && /NOT the soundtrack/.test(sys) && /machine_off/.test(sys));
+  assert.ok(WRITER_RULES.soundFromScene);
+});
+
+t('soundBed (review): speech, live music and a missing time never reach the prompt', () => {
+  const r = compile({ ...LOBBY, sound: { bed: 'a metro carriage: indistinct voices and chatter, the train rattling', events: [
+    { t: 2, sound: 'MAIN talks to the camera' }, { t: 3, sound: 'a man shouts her name' }, { t: 4, sound: 'the announcer says next stop Central' },
+    { t: 1, sound: 'a guitar strums nearby' }, { t: 5, sound: 'drums pound in the stands' }, { t: null, sound: 'a towel drops' }, { t: 6, sound: 'the doors slide open' }] } }, { ...base, model: 'wan' });
+  const line = r.prompt.split('Sound:')[1].split('No dialogue')[0];
+  assert.ok(/indistinct voices and chatter, the train rattling; the doors slide open at 6s\.\s*$/.test(line), line);
+  assert.ok(!/talks|shouts|says|guitar|drums|towel|at 0s/.test(line), line);
+});
+
 console.log(`\nv2-compile: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

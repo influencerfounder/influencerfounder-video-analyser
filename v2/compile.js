@@ -34,6 +34,7 @@ const RULES = {
   identityFromRefs: 'Tattoos, hair, skin and face never come from the source text — the writer is told not to, and the compiler strips any that slip into the outfit (lobby run 1: the source man\'s sleeve tattoos landed in "accessories").',
   mainLabel: 'The writer\'s placeholder MAIN is always replaced by the influencer\'s name (lobby run 1: "walks beside MAIN").',
   phaseLength:    'Phases inside one take (no cut) shorter than 1.5 s are merged into a neighbour: Alibaba recommends 2-5 s segments and G63 run 1 came back as 13 one-second phases (1,119 words).',
+  soundBed:       'Wan gets one "Sound:" line before the audio negatives, written from the PLACE the video shows: the background bed, 2-4 timed sounds from visible actions, and — only where a machine would hum — what is off. Music and quoted words are stripped. Evidence (VQL 2026-11-17-04): with no sound described, 27 of 44 Wan takes measured as one frozen, bass-heavy bed with steady hum lines (car interiors 3/3, busy venues 12/14); Alibaba\'s guide asks for sound elements and how they change over time.',
   wanAudio:       'Wan adds dialogue and music unless told: "No dialogue. No background music." (Wan research, 2026-09-07).',
   phoneLayer:     'Every phone-look video ends with the old-phone layer (unfocus.js), students included (Mike, 2026-10-20). Cinema-look videos keep none.',
   castChange:     'Each clearly visible background person carries its one small change (v2/castChange.js, picked once at analysis) after its label, the same change the first frame drew, so a later shot does not pull the original look back (Mike, 2026-10-23, VQL case 2026-10-23-01). Product-only runs keep everyone as the source shows them.',
@@ -251,6 +252,28 @@ function trimEvents(ev, secs, hook, log, shotNo) {
  *         durationSec, refs:[{kind:'face'|'outfit_front'|'outfit_back'|'first_frame'|'location', note}],
  *         unfocus:bool, focus:[{from,to,low}] (focusshift.py) }
  */
+// RULE soundBed (VQL 2026-11-17-04) — the place's own sound, never a song. Whatever the writer returns is cleaned:
+// anything musical or quoted is dropped (Mike adds music inside Instagram, or posts with Wan's sound as is), events
+// past the rendered length are dropped, times are written like the timeline's. '' when nothing usable is left.
+const SOUND_BANNED = /\b(music\w*|songs?|beats?|bass\w*|melod\w*|sing(?:s|ing|er|ers)?\b|lyric\w*|dj|speakers?|soundtrack|radio|tune|rhythm\w*|hum\b|humming|buzz\w*|drone|drums?|drumming|guitars?|piano|band|concert|choir|chorus|vocals?|orchestra\w*|saxophone|violins?|anthem|playlist|karaoke)\b|["\u201c\u201d]/i;
+// Speech verbs — 'indistinct voices' / 'chatter' stay (wanted in a bed); anything someone SAYS goes (it would make a mouth
+// move over "No dialogue.", the SPEECH_MOTION_RULE failure). Reviewer 2026-11-17.
+const SOUND_SPEECH = /\b(talk\w*|speak\w*|spoke|say\w*|said|shout\w*|yell\w*|call(?:s|ed|ing)? (?:out|her|his|their|an?|the|to)|announc\w*|whisper\w*|ask\w*|chats?|chatting|narrat\w*|voice-?over|tells?|told|greets?|laughs? at)\b/i;
+function soundLine(S, { renderDur, whole, retold } = {}) {
+  const snd = S && typeof S.sound === 'object' && S.sound ? S.sound : null;
+  if (!snd) return '';
+  const ok = (x) => { const c = clean(x); return c && !/cannot be determined/i.test(c) && !SOUND_BANNED.test(c) && !SOUND_SPEECH.test(c) ? c.replace(/[.;\s]+$/, '') : ''; };
+  const bed = ok(snd.bed);
+  const evs = retold ? [] : (Array.isArray(snd.events) ? snd.events : [])
+    .map(e => ({ t: e && e.t != null && e.t !== '' ? Number(e.t) : NaN, s: ok(e && e.sound) }))
+    .filter(e => e.s && Number.isFinite(e.t) && e.t >= 0 && (!renderDur || e.t <= renderDur))
+    .sort((a, b) => a.t - b.t).slice(0, 4)
+    .map(e => `${e.s} at ${fmt(e.t, whole)}s`);
+  const off = clean(snd.machine_off) && !SOUND_BANNED.test(snd.machine_off) ? clean(snd.machine_off).replace(/[.;\s]+$/, '') : '';
+  if (!bed && !evs.length) return '';
+  return 'Sound: ' + [bed, evs.join(', '), off].filter(Boolean).join('; ') + '.';
+}
+
 function compile(spec, opts = {}) {
   const name = clean(opts.name) || 'the main person';
   // 📦 PRODUCT ONLY (2026-10-22, Mike: "the prompt is really short … only on product recreation videos"). No
@@ -646,9 +669,13 @@ function compile(spec, opts = {}) {
     tail.push(UNFOCUS_LAYER);   // the autofocus moment is added after generation (focusblur.js), never prompted
   }
   if (!multi) tail.push('Generate single shot.');
-  if (model === 'wan') tail.push('No dialogue. No background music.'); // RULE wanAudio
+  if (model === 'wan') {
+    const snd = soundLine(S, { renderDur, whole, retold: renderDur !== dur });   // RULE soundBed
+    if (snd) { tail.push(snd); log.push({ rule: 'soundBed', words: snd.split(/\s+/).length }); }
+    tail.push('No dialogue. No background music.'); // RULE wanAudio
+  }
   const prompt = nameMain([parts.join(' '), segs.join('\n'), tail.join(' ')].filter(Boolean).join('\n\n'), name);
   return { prompt, words: prompt.split(/\s+/).filter(Boolean).length, segments: shots.map(s => ({ start: s.start, end: s.end, cut_before: !!s.cut_before, ...(s.srcStart != null ? { srcStart: s.srcStart, srcEnd: s.srcEnd } : {}) })), log, rules: Object.keys(RULES), ...(renderDur !== dur ? { durationSec: renderDur, sourceSecs: dur } : {}) };
 }
 
-module.exports = { compile, RULES, RULE_GATE, headGlassesPhrase, headGlassesRewrite, signaturePhrase, endingFits, measuredCameraFor, cameraSentence, garmentClause, takeWear, stripIdentity, nameMain };
+module.exports = { compile, soundLine, RULES, RULE_GATE, headGlassesPhrase, headGlassesRewrite, signaturePhrase, endingFits, measuredCameraFor, cameraSentence, garmentClause, takeWear, stripIdentity, nameMain };
