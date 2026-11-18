@@ -9,7 +9,7 @@
 const REACTION_OVERLAY = /\breact|\bpeople'?s\s+(faces?|eyes)|\beveryone\b.{0,30}\b(look|star|stop)|\bheads?\s+turn|\bstar(e|ing)\b|\bjaw/i;
 const MAX_SHOTS = 8;
 const FRAMES_PER_SHOT = 4;
-const LOOK_WORDS = /\b(look|looks|looking|stare|stares|staring|glance|glances|gaze|gazes|eyes|double-take|watch|watches|watching|gawks?|neutral|expression|turns? (round|around|back))\b/i;
+const LOOK_WORDS = /\b(look|looks|looking|stare|stares|staring|glance|glances|gaze|gazes|eyes|double-take|watch|watches|watching|gawks?|turns? (round|around|back))\b/i;
 
 /** Pure: which shot indexes to check. Shots with people in them that are cutaways (no MAIN), or every shot with
  *  people when the overlay text announces reactions. */
@@ -36,12 +36,25 @@ const REACTIONS_SYSTEM = `You check ONE thing in a short video: where the OTHER 
 For each person in a shot, compare the frames one by one and decide: do they look at MAIN, or (in a shot WITHOUT MAIN) into the lens / toward one screen side? When? What does the face do (eyebrows raised, mouth open, wide-eyed, smiling, frowning, deadpan)? Do they stop, turn round, look back over the shoulder, do a double-take, touch the face?
 Then rewrite that person's events for that shot (at most 4 short present-tense items, in the order the frames show):
 - A look is an action: "turns round and stares at MAIN, eyebrows raised", "stares into the camera while walking toward it, mouth open", "looks back over the shoulder straight into the camera".
-- In a shot WITHOUT MAIN never write "MAIN" — write the look as into the camera or toward screen-left/right.
+- In a shot WITHOUT MAIN the camera stands where MAIN is: someone looking toward the lens there is looking at MAIN — write it as "into the camera", never "MAIN".
+- A person whose back faces the camera in one frame and whose face looks toward the lens in a later one has TURNED ROUND to look: say so ("stops, turns round and stares back into the camera").
 - A reaction the shot is built on comes first; fold a walk into it ("stares into the camera while walking past"), but keep real time order: a look that only comes at the end stays last.
 - Keep every other action they really do (walking, carrying, phone).
 - Write the face as it is: an ordinary glance is "glances at …"; a person who never looks gets NO look — then leave them out of your answer.
 - Never "neutral", never an invented stare, never a person who is not in the cast list, never MAIN's actions.
 Return ONLY JSON: {"shots":[{"start":<shot start exactly as given>,"others":[{"id":"P1","events":["…"]}]}]} — only the people whose look you saw; an empty list is a fine answer.`;
+
+/** Pure: one event cleaned — "neutral (expression)" dropped, and in a cutaway a look at MAIN becomes a look into the
+ *  camera (the camera stands where MAIN is). Returns '' when nothing is left. */
+function repairEvent(e, cutaway) {
+  let x = e.replace(/\s+/g, ' ').trim();
+  x = x.replace(/,?\s*(with\s+)?(an?\s+)?neutral(\s+(expression|face|look))?/gi, '').replace(/\s+,/g, ',').replace(/,\s*$/, '').trim();
+  if (cutaway) {
+    x = x.replace(/\b(back at|at|toward|towards)\s+MAIN\b/g, (m, p) => (/back/i.test(p) ? 'back into the camera' : 'into the camera'))
+      .replace(/\bMAIN's\s+direction\b/g, 'the camera');
+  }
+  return x.slice(0, 160);
+}
 
 /** Pure: merge the pass's answer into the spec. Only shots that were asked, only cast ids, MAIN never named in a shot
  *  without MAIN, at most 4 events of ≤160 chars. A person not yet listed in that shot is added only if in the cast.
@@ -50,25 +63,27 @@ function mergeReactions(spec, answer, askedIdx) {
   const out = JSON.parse(JSON.stringify(spec));
   const castIds = new Set((out.cast || []).map((c) => c && c.id).filter(Boolean));
   const rows = (answer && Array.isArray(answer.shots)) ? answer.shots : [];
-  const changed = [];
+  const changed = [], refused = [];
   for (const i of askedIdx) {
     const s = out.shots[i];
     if (!s) continue;
     const row = rows.find((r) => r && Math.abs(Number(r.start) - Number(s.start)) < 0.05);
     if (!row || !Array.isArray(row.others)) continue;
     for (const o of row.others) {
-      if (!o || !castIds.has(o.id) || !Array.isArray(o.events)) continue;
-      const ev = o.events.map((e) => String(e || '').replace(/\s+/g, ' ').trim().slice(0, 160)).filter(Boolean).slice(0, 4);
-      if (!ev.length || !ev.some((e) => LOOK_WORDS.test(e))) continue;            // the pass exists for looks; nothing else
-      if (ev.some((e) => /\bneutral\b/i.test(e))) continue;
-      if (s.main_visible === false && ev.some((e) => /\bMAIN\b/.test(e))) continue; // would pull MAIN into the cutaway
+      if (!o || !Array.isArray(o.events)) continue;
+      if (!castIds.has(o.id)) { refused.push({ start: s.start, id: String(o.id || '').slice(0, 8), why: 'not in the cast', events: [] }); continue; }
+      // 2.105.2: REPAIR rather than refuse (test run rj_mwltw0jnwro9: 8 shots asked, 1 rewritten — a stare toward
+      // MAIN in a cutaway, or a "neutral" tacked on, threw away a look the frames plainly showed).
+      const ev = o.events.map((e) => repairEvent(String(e || ''), s.main_visible === false)).filter(Boolean).slice(0, 4);
+      if (!ev.length || !ev.some((e) => LOOK_WORDS.test(e))) { refused.push({ start: s.start, id: o.id, why: 'no look', events: o.events.slice(0, 4).map((e) => String(e).slice(0, 160)) }); continue; }
+      if (s.main_visible === false && ev.some((e) => /\bMAIN\b/.test(e))) { refused.push({ start: s.start, id: o.id, why: 'MAIN in a cutaway', events: ev }); continue; }
       if (!Array.isArray(s.others)) s.others = [];
       const have = s.others.find((x) => x && x.id === o.id);
       if (have) have.events = ev; else s.others.push({ id: o.id, events: ev });
       changed.push({ start: s.start, id: o.id, events: ev });
     }
   }
-  return { spec: out, changed };
+  return { spec: out, changed, refused };
 }
 
 /** Run the pass. deps: { callWriter, parseSpec, validateSpec, frameAt, ff, video, tmp, path } */
@@ -97,7 +112,7 @@ async function reactionsPass({ spec, duration, key, kieKey, deadline, deps }) {
   if (!j) return { spec, changed: [], asked: idx.length, error: 'no JSON' };
   const m = mergeReactions(spec, j, idx);
   if (validateSpec(m.spec).length) return { spec, changed: [], asked: idx.length, error: 'merged spec invalid' };
-  return { spec: m.spec, changed: m.changed, asked: idx.length, usage: w.usage };
+  return { spec: m.spec, changed: m.changed, refused: m.refused, asked: idx.length, usage: w.usage };
 }
 
-module.exports = { pickReactionShots, reactionFrameTimes, mergeReactions, reactionsPass, REACTIONS_SYSTEM, REACTION_OVERLAY };
+module.exports = { repairEvent, pickReactionShots, reactionFrameTimes, mergeReactions, reactionsPass, REACTIONS_SYSTEM, REACTION_OVERLAY };

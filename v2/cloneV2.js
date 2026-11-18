@@ -17,7 +17,7 @@ const { compile } = require('./compile');
 const { pickCastChanges } = require('./castChange');
 const { reactionsPass } = require('./reactions');
 
-const V2_VERSION = 'v2-1.16.1';
+const V2_VERSION = 'v2-1.16.2';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 
@@ -822,7 +822,7 @@ function mount(app, deps) {
       try {
         const rp = await reactionsPass({ spec, duration, key, kieKey, deadline, deps: { callWriter, parseSpec, validateSpec, frameAt, ff: ffmpegBin, video, tmp, path } });
         spec = rp.spec;
-        reactions = { asked: rp.asked, changed: rp.changed, error: rp.error || null };
+        reactions = { asked: rp.asked, changed: rp.changed, refused: rp.refused || [], error: rp.error || null };
         if (rp.asked) console.log(`[clone-v2] reactions: ${rp.asked} shot(s) checked, ${rp.changed.length} rewritten${rp.error ? ' (' + rp.error + ')' : ''}${rp.changed.length ? ' — ' + rp.changed.map((c) => `[${c.start}s ${c.id}] ${c.events.join(' / ').slice(0, 140)}`).join(' | ') : ''}`);
       } catch (e) { reactions = { asked: 0, changed: [], error: String(e.message || e).slice(0, 160) }; console.warn('[clone-v2] reactions pass failed:', e.message); }
       mark('reactions');

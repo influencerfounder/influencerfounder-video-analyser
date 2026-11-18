@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 👀 REACTIONS PASS (2.105.0 / v2-1.16.0, VQL 2026-11-17-05): which shots are re-checked, and what the merge accepts.
 const assert = require('assert');
-const { pickReactionShots, mergeReactions, reactionFrameTimes, REACTIONS_SYSTEM } = require('../v2/reactions');
+const { repairEvent, pickReactionShots, mergeReactions, reactionFrameTimes, REACTIONS_SYSTEM } = require('../v2/reactions');
 const { validateSpec } = require('../v2/spec');
 let pass = 0, fail = 0;
 const t = (n, fn) => { try { fn(); pass++; console.log('  ok  ' + n); } catch (e) { fail++; console.log('  x   ' + n + ' :: ' + e.message); } };
@@ -30,12 +30,19 @@ t('merge: a seen look replaces the neutral line, cast ids only, nothing else tou
   assert.strictEqual(m.changed.length, 1);
   assert.deepStrictEqual(validateSpec(m.spec), []);
 });
-t('merge: MAIN named in a cutaway is refused, "neutral" is refused, no-look answer is refused', () => {
+t('merge REPAIRS: a look at MAIN in a cutaway becomes into the camera, "neutral" is dropped, no-look is refused and recorded', () => {
   const s = base();
-  for (const ev of [['stares at MAIN'], ['looks ahead, neutral'], ['walks away']]) {
-    const m = mergeReactions(s, { shots: [{ start: 3.6, others: [{ id: 'P1', events: ev }] }] }, [1]);
-    assert.strictEqual(m.changed.length, 0, ev.join());
-  }
+  let m = mergeReactions(s, { shots: [{ start: 3.6, others: [{ id: 'P1', events: ['stops, turns round and stares back at MAIN, eyebrows raised'] }] }] }, [1]);
+  assert.deepStrictEqual(m.spec.shots[1].others[0].events, ['stops, turns round and stares back into the camera, eyebrows raised']);
+  m = mergeReactions(s, { shots: [{ start: 3.6, others: [{ id: 'P1', events: ['glances back over the shoulder into the camera, neutral expression'] }] }] }, [1]);
+  assert.deepStrictEqual(m.spec.shots[1].others[0].events, ['glances back over the shoulder into the camera']);
+  m = mergeReactions(s, { shots: [{ start: 3.6, others: [{ id: 'P1', events: ['walks away'] }, { id: 'P9', events: ['stares'] }] }] }, [1]);
+  assert.strictEqual(m.changed.length, 0);
+  assert.deepStrictEqual(m.refused.map((r) => r.why), ['no look', 'not in the cast']);
+});
+t('repairEvent leaves a shot WITH MAIN alone and never touches "the main corridor"', () => {
+  assert.strictEqual(repairEvent('stares at MAIN, mouth open', false), 'stares at MAIN, mouth open');
+  assert.strictEqual(repairEvent('looks down the main corridor', true), 'looks down the main corridor');
 });
 t('merge: a cast person missing from a shot with MAIN may be added there', () => {
   const s = base(); s.overlay_text = 'reactions';
@@ -43,7 +50,7 @@ t('merge: a cast person missing from a shot with MAIN may be added there', () =>
   assert.deepStrictEqual(m.spec.shots[2].others, [{ id: 'P2', events: ['stares at MAIN, mouth open'] }]);
 });
 t('the pass prompt keeps the guards (no MAIN in cutaways, ordinary glance, no invented stare)', () => {
-  assert.ok(/WITHOUT MAIN never write "MAIN"/.test(REACTIONS_SYSTEM));
+  assert.ok(/WITHOUT MAIN the camera stands where MAIN is/.test(REACTIONS_SYSTEM) && /never "MAIN"/.test(REACTIONS_SYSTEM));
   assert.ok(/ordinary glance/.test(REACTIONS_SYSTEM) && /never an invented stare/.test(REACTIONS_SYSTEM));
 });
 t('reaction direction never goes into opening_changes (reviewer 2026-11-18)', () => {
