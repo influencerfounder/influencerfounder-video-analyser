@@ -9,7 +9,7 @@
 const REACTION_OVERLAY = /\breact|\bpeople'?s\s+(faces?|eyes)|\beveryone\b.{0,30}\b(look|star|stop)|\bheads?\s+turn|\bstar(e|ing)\b|\bjaw/i;
 const MAX_SHOTS = 8;
 const FRAMES_PER_SHOT = 4;
-const LOOK_WORDS = /\b(look|looks|looking|stare|stares|staring|glance|glances|gaze|gazes|eyes|double-take|neutral|expression|turns? (round|around|back))\b/i;
+const LOOK_WORDS = /\b(look|looks|looking|stare|stares|staring|glance|glances|gaze|gazes|eyes|double-take|watch|watches|watching|gawks?|neutral|expression|turns? (round|around|back))\b/i;
 
 /** Pure: which shot indexes to check. Shots with people in them that are cutaways (no MAIN), or every shot with
  *  people when the overlay text announces reactions. */
@@ -75,7 +75,7 @@ function mergeReactions(spec, answer, askedIdx) {
 async function reactionsPass({ spec, duration, key, kieKey, deadline, deps }) {
   const idx = pickReactionShots(spec);
   if (!idx.length) return { spec, changed: [], asked: 0 };
-  if (deadline && deadline - Date.now() < 70000) return { spec, changed: [], asked: idx.length, error: 'no time left' };
+  if (deadline && deadline - Date.now() < 130000) return { spec, changed: [], asked: idx.length, error: 'no time left' };
   const { callWriter, parseSpec, validateSpec, frameAt, ff, video, tmp, path } = deps;
   const shots = spec.shots;
   const content = [{ type: 'text', text: `CAST: ${JSON.stringify((spec.cast || []).map((c) => ({ id: c.id, label: c.label, look: c.look })))}\nOVERLAY TEXT: ${String(spec.overlay_text || '') || 'none'}` }];
@@ -85,12 +85,14 @@ async function reactionsPass({ spec, duration, key, kieKey, deadline, deps }) {
     const ts = reactionFrameTimes(Number(s.start), end);
     content.push({ type: 'text', text: `SHOT start ${s.start} s (to ${Math.round(end * 100) / 100} s), MAIN ${s.main_visible === false ? 'NOT in this shot' : 'in this shot'}. Current events of others: ${JSON.stringify(s.others || [])}. Frames at ${ts.join(', ')} s:` });
     for (const t of ts) {
+      if (deadline && deadline - Date.now() < 100000) return { spec, changed: [], asked: idx.length, error: 'no time left' };
       const b = await frameAt(ff, video, t, 640, path.join(tmp, `react-${i}-${t}.jpg`));
       if (b) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b.toString('base64') } });
     }
   }
   content.push({ type: 'text', text: 'Return only JSON.' });
-  const w = await callWriter({ system: REACTIONS_SYSTEM, content, key, kieKey, deadline, maxTokens: 1500 });
+  // 60 s kept back for the outfit pick and the openings, like the second-opinion judge (reviewer 2026-11-18).
+  const w = await callWriter({ system: REACTIONS_SYSTEM, content, key, kieKey, deadline: deadline ? deadline - 60000 : 0, maxTokens: 1500 });
   const j = parseSpec(w.text);
   if (!j) return { spec, changed: [], asked: idx.length, error: 'no JSON' };
   const m = mergeReactions(spec, j, idx);

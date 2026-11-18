@@ -46,5 +46,14 @@ t('the pass prompt keeps the guards (no MAIN in cutaways, ordinary glance, no in
   assert.ok(/WITHOUT MAIN never write "MAIN"/.test(REACTIONS_SYSTEM));
   assert.ok(/ordinary glance/.test(REACTIONS_SYSTEM) && /never an invented stare/.test(REACTIONS_SYSTEM));
 });
+t('reaction direction never goes into opening_changes (reviewer 2026-11-18)', () => {
+  const { userFacts } = require('../v2/cloneV2');
+  const f = userFacts({ userChanges: 'the bystanders stare at her amazed' }).join(' ');
+  assert.ok(/Never put other people's looks or reactions into opening_changes/.test(f));
+});
+t('the pass keeps 60 s back and will not start under 130 s', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../v2/reactions.js'), 'utf8');
+  assert.ok(/deadline - Date\.now\(\) < 130000/.test(src) && /deadline: deadline \? deadline - 60000/.test(src));
+});
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
