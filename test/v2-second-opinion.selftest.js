@@ -62,7 +62,7 @@ const t = async (n, fn) => { try { await fn(); pass++; console.log('  ok  ' + n)
     assert.ok(!/Gemini took too long/.test(src), 'the analysis must not wait for Gemini');
     assert.ok(/if \(soLate\) \{\s*const late = startLateSecondOpinion\(\{ lid: req\.body\.locationId,/.test(src), 'a late answer finishes in the background, bound to the lid');
     assert.ok(/app\.get\('\/api\/clone-v2\/second-opinion\/:id'/.test(src) && /rec\.lid && String\(req\.query\.lid \|\| ''\) !== rec\.lid/.test(src), 'lookup route, lid-bound');
-    assert.ok(/sourceVideoUrl, secondOpinion, writer:/.test(src));
+    assert.ok(/sourceVideoUrl, secondOpinion, reactions, writer:/.test(src));
     const idx = require('fs').readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
     assert.ok(/runRecorded, geminiShotLog,/.test(idx), 'the analyser passes its Gemini logger in');
   });
