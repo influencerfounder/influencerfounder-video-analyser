@@ -32,17 +32,18 @@ function reactionFrameTimes(start, end) {
   return [0.1, 0.37, 0.63, 0.9].slice(0, FRAMES_PER_SHOT).map((f) => Math.round((start + d * f) * 100) / 100);
 }
 
-const REACTIONS_SYSTEM = `You check ONE thing in a short video: where the OTHER people (not MAIN) look, and what their faces do. MAIN is the main person of the video. You get the cast (people already identified, by id), and for some shots their current events plus 4 frames spread over that shot, in time order.
-For each person in a shot, compare the frames one by one and decide: do they look at MAIN, or (in a shot WITHOUT MAIN) into the lens / toward one screen side? When? What does the face do (eyebrows raised, mouth open, wide-eyed, smiling, frowning, deadpan)? Do they stop, turn round, look back over the shoulder, do a double-take, touch the face?
-Then rewrite that person's events for that shot (at most 4 short present-tense items, in the order the frames show):
+const REACTIONS_SYSTEM = `You check ONE thing in a short video: where the OTHER people (not MAIN) look, and what their faces do. MAIN is the main person of the video. You get the cast (people already identified, by id) and, for some shots, 4 frames spread over that shot in time order.
+STEP 1 — for EVERY cast person you can see in a shot (never skip one), write "facing": one entry per frame, in order, each one of: "away" (back of the head to the camera), "lens" (face turned to the camera, eyes on it), "MAIN" (face turned to MAIN, in a shot with MAIN), "side" (profile, looking elsewhere), "down" (at a phone, a bag, the floor), "not visible".
+STEP 2 — "face": what the face does when it is turned to the lens or MAIN (eyebrows raised, mouth open, wide-eyed, smiling, frowning, staring, deadpan), or "" if it never is.
+STEP 3 — "events": that person's actions in the shot, at most 4 short present-tense items, in the order the frames show:
 - A look is an action: "turns round and stares at MAIN, eyebrows raised", "stares into the camera while walking toward it, mouth open", "looks back over the shoulder straight into the camera".
 - In a shot WITHOUT MAIN the camera stands where MAIN is: someone looking toward the lens there is looking at MAIN — write it as "into the camera", never "MAIN".
-- A person whose back faces the camera in one frame and whose face looks toward the lens in a later one has TURNED ROUND to look: say so ("stops, turns round and stares back into the camera").
+- "away" in one frame and "lens" in a later one = the person TURNED ROUND to look: say so ("stops, turns round and stares back into the camera").
 - A reaction the shot is built on comes first; fold a walk into it ("stares into the camera while walking past"), but keep real time order: a look that only comes at the end stays last.
 - Keep every other action they really do (walking, carrying, phone).
-- Write the face as it is: an ordinary glance is "glances at …"; a person who never looks gets NO look — then leave them out of your answer.
+- Write the face as it is: an ordinary glance is "glances at …"; no "lens"/"MAIN" in facing = no look in events.
 - Never "neutral", never an invented stare, never a person who is not in the cast list, never MAIN's actions.
-Return ONLY JSON: {"shots":[{"start":<shot start exactly as given>,"others":[{"id":"P1","events":["…"]}]}]} — only the people whose look you saw; an empty list is a fine answer.`;
+Return ONLY JSON: {"shots":[{"start":<shot start exactly as given>,"people":[{"id":"P1","facing":["away","away","lens","lens"],"face":"","events":["…"]}]}]}.`;
 
 /** Pure: one event cleaned — "neutral (expression)" dropped, and in a cutaway a look at MAIN becomes a look into the
  *  camera (the camera stands where MAIN is). Returns '' when nothing is left. */
@@ -68,14 +69,15 @@ function mergeReactions(spec, answer, askedIdx) {
     const s = out.shots[i];
     if (!s) continue;
     const row = rows.find((r) => r && Math.abs(Number(r.start) - Number(s.start)) < 0.05);
-    if (!row || !Array.isArray(row.others)) continue;
-    for (const o of row.others) {
+    const people = row && (Array.isArray(row.people) ? row.people : Array.isArray(row.others) ? row.others : null);
+    if (!people) continue;
+    for (const o of people) {
       if (!o || !Array.isArray(o.events)) continue;
       if (!castIds.has(o.id)) { refused.push({ start: s.start, id: String(o.id || '').slice(0, 8), why: 'not in the cast', events: [] }); continue; }
       // 2.105.2: REPAIR rather than refuse (test run rj_mwltw0jnwro9: 8 shots asked, 1 rewritten — a stare toward
       // MAIN in a cutaway, or a "neutral" tacked on, threw away a look the frames plainly showed).
       const ev = o.events.map((e) => repairEvent(String(e || ''), s.main_visible === false)).filter(Boolean).slice(0, 4);
-      if (!ev.length || !ev.some((e) => LOOK_WORDS.test(e))) { refused.push({ start: s.start, id: o.id, why: 'no look', events: o.events.slice(0, 4).map((e) => String(e).slice(0, 160)) }); continue; }
+      if (!ev.length || !ev.some((e) => LOOK_WORDS.test(e))) { refused.push({ start: s.start, id: o.id, why: 'no look' + (Array.isArray(o.facing) ? ' (facing ' + o.facing.slice(0, 4).join(',') + ')' : ''), events: o.events.slice(0, 4).map((e) => String(e).slice(0, 160)) }); continue; }
       if (s.main_visible === false && ev.some((e) => /\bMAIN\b/.test(e))) { refused.push({ start: s.start, id: o.id, why: 'MAIN in a cutaway', events: ev }); continue; }
       if (!Array.isArray(s.others)) s.others = [];
       const have = s.others.find((x) => x && x.id === o.id);
@@ -93,26 +95,29 @@ async function reactionsPass({ spec, duration, key, kieKey, deadline, deps }) {
   if (deadline && deadline - Date.now() < 130000) return { spec, changed: [], asked: idx.length, error: 'no time left' };
   const { callWriter, parseSpec, validateSpec, frameAt, ff, video, tmp, path } = deps;
   const shots = spec.shots;
+  let images = 0;
   const content = [{ type: 'text', text: `CAST: ${JSON.stringify((spec.cast || []).map((c) => ({ id: c.id, label: c.label, look: c.look })))}\nOVERLAY TEXT: ${String(spec.overlay_text || '') || 'none'}` }];
   for (const i of idx) {
     const s = shots[i];
     const end = i + 1 < shots.length ? Number(shots[i + 1].start) : duration;
     const ts = reactionFrameTimes(Number(s.start), end);
-    content.push({ type: 'text', text: `SHOT start ${s.start} s (to ${Math.round(end * 100) / 100} s), MAIN ${s.main_visible === false ? 'NOT in this shot' : 'in this shot'}. Current events of others: ${JSON.stringify(s.others || [])}. Frames at ${ts.join(', ')} s:` });
+    content.push({ type: 'text', text: `SHOT start ${s.start} s (to ${Math.round(end * 100) / 100} s), MAIN ${s.main_visible === false ? 'NOT in this shot' : 'in this shot'}. People the first analyst listed here: ${(s.others || []).map((o) => o && o.id).filter(Boolean).join(', ') || 'none'} (others from the cast may be there too). Frames at ${ts.join(', ')} s:` });
     for (const t of ts) {
       if (deadline && deadline - Date.now() < 100000) return { spec, changed: [], asked: idx.length, error: 'no time left' };
       const b = await frameAt(ff, video, t, 640, path.join(tmp, `react-${i}-${t}.jpg`));
+      if (b) images++;
       if (b) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b.toString('base64') } });
     }
   }
   content.push({ type: 'text', text: 'Return only JSON.' });
   // 60 s kept back for the outfit pick and the openings, like the second-opinion judge (reviewer 2026-11-18).
-  const w = await callWriter({ system: REACTIONS_SYSTEM, content, key, kieKey, deadline: deadline ? deadline - 60000 : 0, maxTokens: 1500 });
+  const w = await callWriter({ system: REACTIONS_SYSTEM, content, key, kieKey, deadline: deadline ? deadline - 60000 : 0, maxTokens: 2500 });
+  const raw = String(w.text || '').replace(/\s+/g, ' ').slice(0, 1500);
   const j = parseSpec(w.text);
-  if (!j) return { spec, changed: [], asked: idx.length, error: 'no JSON' };
+  if (!j) return { spec, changed: [], asked: idx.length, images, raw, error: 'no JSON' };
   const m = mergeReactions(spec, j, idx);
   if (validateSpec(m.spec).length) return { spec, changed: [], asked: idx.length, error: 'merged spec invalid' };
-  return { spec: m.spec, changed: m.changed, refused: m.refused, asked: idx.length, usage: w.usage };
+  return { spec: m.spec, changed: m.changed, refused: m.refused, asked: idx.length, images, raw, usage: w.usage };
 }
 
 module.exports = { repairEvent, pickReactionShots, reactionFrameTimes, mergeReactions, reactionsPass, REACTIONS_SYSTEM, REACTION_OVERLAY };

@@ -62,5 +62,18 @@ t('the pass keeps 60 s back and will not start under 130 s', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../v2/reactions.js'), 'utf8');
   assert.ok(/deadline - Date\.now\(\) < 130000/.test(src) && /deadline: deadline \? deadline - 60000/.test(src));
 });
+t('merge reads the 2.105.3 "people" answer with facing; a no-look person is refused with the facing kept', () => {
+  const s = base();
+  const m = mergeReactions(s, { shots: [{ start: 3.6, people: [
+    { id: 'P1', facing: ['away', 'away', 'lens', 'lens'], face: 'eyebrows raised', events: ['stops, turns round and stares back into the camera, eyebrows raised', 'walks on'] },
+    { id: 'P2', facing: ['down', 'down', 'down', 'down'], face: '', events: ['walks past on the phone'] }] }] }, [1]);
+  assert.deepStrictEqual(m.spec.shots[1].others.find((o) => o.id === 'P1').events, ['stops, turns round and stares back into the camera, eyebrows raised', 'walks on']);
+  assert.ok(/no look \(facing down,down,down,down\)/.test(m.refused[0].why), JSON.stringify(m.refused));
+});
+t('the pass asks for every person per frame and does not show the first analyst\'s events', () => {
+  assert.ok(/for EVERY cast person you can see in a shot \(never skip one\)/.test(REACTIONS_SYSTEM));
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../v2/reactions.js'), 'utf8');
+  assert.ok(!/Current events of others/.test(src));
+});
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
