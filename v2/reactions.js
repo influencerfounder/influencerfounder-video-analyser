@@ -45,10 +45,59 @@ STEP 3 — "events": that person's actions in the shot, at most 4 short present-
 - Never "neutral", never an invented stare, never a person who is not in the cast list, never MAIN's actions.
 Return ONLY JSON: {"shots":[{"start":<shot start exactly as given>,"people":[{"id":"P1","facing":["away","away","lens","lens"],"face":"","events":["…"]}]}]}.`;
 
-/** Pure: one event cleaned — "neutral (expression)" dropped, and in a cutaway a look at MAIN becomes a look into the
- *  camera (the camera stands where MAIN is). Returns '' when nothing is left. */
+// 2.105.4 (/toolscan 2026-11-21, live job rj_mwpakqps6v7q): "not looking up" / "not looking at the camera" came back as
+// events and matched LOOK_WORDS. A negated look is not a look, and written into the video prompt it names the very
+// thing that must not happen (Video Quality Lab R14: naming draws it). The event is read CLAUSE BY CLAUSE (reviewer
+// 2026-11-21: a cut "from the negation to the next comma" ate a real look joined by and/but — "not watching the road
+// and turns round to stare into the camera" — and left fragments like "could"): a clause that negates a look is
+// dropped whole, every other clause stays as written.
+const LOOK_VERB = String.raw`(?:look|glanc|star|watch|gaz|gawk|notic)(?:e|es|ed|s|ing)?\b`;
+const NEG_LOOK = new RegExp(String.raw`(?:\b(?:not|never|cannot)\b|n't\b|\b(?:avoid|refus)\w*(?:\s+to)?\b)\s+(?:(?:even|ever|once|really|still|to)\s+){0,2}${LOOK_VERB}` +
+  String.raw`|\bwithout\s+(?:(?:even|ever|once|really)\s+)?(?:(?:a|any)\s+(?:glance|look)\b|(?:look|glanc|star|watch|gaz|gawk|notic)ing\b)`, 'i');
+// A double negative is a stare ("never looks away from MAIN", "not looking anywhere but at the camera", "cannot stop
+// staring"): it stays.
+const HOLDS_LOOK = new RegExp(String.raw`${LOOK_VERB}\s+(?:away|elsewhere)\b|\b(?:anywhere|anything|nowhere)\s+(?:but|except|other than)\b|\b(?:stop|help)\s+(?:${LOOK_VERB}|but\b)`, 'i');
+const AUX = /^(?:is|are|was|were|be|been|being|does|do|did|could|can|would|will|should|may|might|must|still|and|but|while|then|tries|trying|try)$/i;
+const SPLIT = /(\s*[,;\u0001]\s*|\s+[—–-]\s+|\s+(?:and|but|while|then)\s+)/i;
+const THIRD = { look: 'looks', stare: 'stares', glance: 'glances', watch: 'watches', gaze: 'gazes', gawk: 'gawks', notice: 'notices' };
+function dropNegatedLooks(text) {
+  if (!NEG_LOOK.test(text.replace(/[‘’]/g, "'"))) return text;   // no negated look word: not one character changes
+  let x = text.replace(/[‘’]/g, "'").replace(/\s*\(([^)]*)\)/g, ', $1');
+  // "walks past not looking up" / "walks past without glancing at MAIN": the negation starts its own clause (\u0001 marks
+  // a boundary we made, so a clause that stays is joined back with a plain space).
+  x = x.replace(/(\S+)\s+(?=(?:not|never)\s+\w+ing\b|without\s)/gi, (m, prev) => (AUX.test(prev) || /[,;]$/.test(prev) || /^[—–-]$/.test(prev) ? m : prev + '\u0001'));
+  const parts = x.split(SPLIT);
+  const clauses = [], delims = [];
+  parts.forEach((p, i) => (i % 2 ? delims : clauses).push(p));
+  const neg = clauses.map((c) => NEG_LOOK.test(c) && !HOLDS_LOOK.test(c));
+  if (!neg.some(Boolean)) return x.replace(/\s*\u0001\s*/g, ' ');
+  let out = '', last = -1;
+  clauses.forEach((c, i) => {
+    if (neg[i] || !c.trim()) return;
+    let piece = c.trim();
+    // "not staring but instead smiling": the contrast word goes with the dropped half (reviewer round 2).
+    if (i > 0 && neg[i - 1] && /but/i.test(delims[i - 1])) piece = piece.replace(/^(?:instead|rather|only|just)\s+/i, '');
+    // "not looking ahead but back at MAIN": the kept half has lost its verb — give it the look verb of the dropped half.
+    if (i > 0 && neg[i - 1] && /but/i.test(delims[i - 1]) && /^(?:at|into|toward|towards|back|straight|up|over|directly|right)\b/i.test(piece)) {
+      const v = (new RegExp(LOOK_VERB, 'i').exec(clauses[i - 1].replace(/^.*?(?:not|never|n't|without)\s+/i, '')) || [''])[0].toLowerCase();
+      if (v) piece = (THIRD[v] || v) + ' ' + piece;
+    }
+    if (last >= 0) {
+      const d = delims[i - 1] || ', ';
+      out += (last === i - 1 ? (/\u0001/.test(d) ? ' ' : d) : (/but|\u0001/i.test(d) ? ', ' : d));
+    }
+    out += piece; last = i;
+  });
+  return out.replace(/\u0001/g, ' ').trim();
+}
+// The model's own per-frame answer: did this person's face turn to the lens or to MAIN in any frame?
+const sawLook = (facing) => facing.some((f) => /^\W*(?:(?:toward|towards|at|to|into)\s+(?:the\s+)?)?(?:lens|main|camera)\W*$/i.test(f));
+
+/** Pure: one event cleaned — "neutral (expression)" and a negated look dropped, and in a cutaway a look at MAIN becomes
+ *  a look into the camera (the camera stands where MAIN is). Returns '' when nothing is left. */
 function repairEvent(e, cutaway) {
   let x = e.replace(/\s+/g, ' ').trim();
+  x = dropNegatedLooks(x.slice(0, 600));   // an event ends at 160 chars; the cap keeps the clause reader fast on any input
   x = x.replace(/,?\s*(with\s+)?(an?\s+)?neutral(\s+(expression|face|look))?/gi, '').replace(/\s+,/g, ',').replace(/,\s*$/, '').trim();
   if (cutaway) {
     x = x.replace(/\b(back at|at|toward|towards)\s+MAIN\b/g, (m, p) => (/back/i.test(p) ? 'back into the camera' : 'into the camera'))
@@ -77,7 +126,11 @@ function mergeReactions(spec, answer, askedIdx) {
       // 2.105.2: REPAIR rather than refuse (test run rj_mwltw0jnwro9: 8 shots asked, 1 rewritten — a stare toward
       // MAIN in a cutaway, or a "neutral" tacked on, threw away a look the frames plainly showed).
       const ev = o.events.map((e) => repairEvent(String(e || ''), s.main_visible === false)).filter(Boolean).slice(0, 4);
-      if (!ev.length || !ev.some((e) => LOOK_WORDS.test(e))) { refused.push({ start: s.start, id: o.id, why: 'no look' + (Array.isArray(o.facing) ? ' (facing ' + o.facing.slice(0, 4).join(',') + ')' : ''), events: o.events.slice(0, 4).map((e) => String(e).slice(0, 160)) }); continue; }
+      // 2.105.4: the words alone let "looking down" through (rj_mwpakqps6v7q: "8 rewritten", nobody facing the lens or
+      // MAIN). When the model gave its per-frame facing, THAT decides whether there was a look; the words still have to
+      // name it. No facing in the answer (older shape) = the words decide, as before.
+      const facing = Array.isArray(o.facing) ? o.facing.map((f) => String(f || '').trim()).filter(Boolean) : [];
+      if (!ev.length || (facing.length && !sawLook(facing)) || !ev.some((e) => LOOK_WORDS.test(e))) { refused.push({ start: s.start, id: o.id, why: 'no look' + (Array.isArray(o.facing) ? ' (facing ' + o.facing.slice(0, 4).join(',') + ')' : ''), events: o.events.slice(0, 4).map((e) => String(e).slice(0, 160)) }); continue; }
       if (s.main_visible === false && ev.some((e) => /\bMAIN\b/.test(e))) { refused.push({ start: s.start, id: o.id, why: 'MAIN in a cutaway', events: ev }); continue; }
       if (!Array.isArray(s.others)) s.others = [];
       const have = s.others.find((x) => x && x.id === o.id);
