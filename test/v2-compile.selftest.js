@@ -902,6 +902,30 @@ t('phoneZoom: the writer\'s push-in word buys ONE size per take on a camera meas
   const r = pzRun({ shots: ['full body', 'medium wide', 'medium', 'medium close-up', 'close-up'].map((size, n) => ({ start: n * 2, size, camera: { move: n ? 'pushes in' : 'fixed' }, main_events: [['stands', 'smiles', 'nods', 'waves', 'laughs'][n]] })) }, { durationSec: 10, camera: [{ from: 0, to: 10, scale: 1.0 }] });
   assert.deepStrictEqual(r.log.filter(l => l.rule === 'phoneZoom').map(l => [l.to, l.held]), [['medium wide', false], ['medium wide', true], ['medium wide', true], ['medium wide', true]], timeline(r));
 });
+// First live run (rj_mwv2y3ibuht9, 2026-11-24): the writer named NO tighter size and wrote the camera as held.
+const LIVE = { cast: [{ id: 'P1', label: 'the grey-haired man in a pinstripe suit beside MAIN' }], shots: [
+  { start: 0, size: 'full body', angle: 'high angle', camera: { move: 'fixed' }, main_events: ['stands still at the centre of the circle, hands at sides', 'turns the head slightly toward the man on the left'], end_state: 'MAIN facing forward, two men in front mid-handshake' },
+  { start: 1.5, size: 'full body', angle: 'high angle', camera: { move: 'fixed' }, main_events: ['remains still, looking down toward the handshake in front', 'turns the head toward the man on the left', 'continues standing still as the camera moves closer', 'faces P1, appears to speak with a slight head tilt'], end_state: 'MAIN in profile facing P1, mid-conversation' }] };
+t('phoneZoom: measured-only — the writer names no tighter size, the measured 1.63x at 3-4 s is still written as the zoom, with its time', () => {
+  const r = pzRun(LIVE, { durationSec: 5, camera: REEL_CAM }), tl = timeline(r);
+  assert.ok(/^\[1\.5-5s\] At about 3s the person filming stays in the spot of the opening frame and zooms in on K: one quick, slightly jerky phone zoom, the picture shaking a little, until K is seen from the waist up\./m.test(tl), tl);
+  assert.ok(!GLIDE.test(tl) && !/camera moves closer/.test(tl), tl);
+  assert.ok(/End of the shot: K in profile facing [^;]*; the picture ends with K seen from the waist up, still filmed from the same spot\./.test(tl), tl);
+  assert.ok(r.log.some(l => l.rule === 'phoneZoom' && l.measuredOnly && l.to === 'medium'));
+  // one phase only: the zoom sits in the opening line's phase
+  const one = timeline(pzRun({ shots: [{ ...LIVE.shots[0], end_state: '' }] }, { durationSec: 5, camera: REEL_CAM }));
+  assert.ok(/^\[0-5s\] Full body, high angle, handheld, filmed from one spot\. At about 3s the person filming stays/m.test(one), one);
+});
+t('phoneZoom negative, measured-only: cinema look, a walking MAIN, a tracking camera, growth under 1.15x, and a later phase that names the size itself', () => {
+  untouched(pzRun({ ...LIVE, look: 'cinema' }, { durationSec: 5, camera: REEL_CAM }));
+  untouched(pzRun({ ...LIVE, shots: LIVE.shots.map((s, n) => (n ? s : { ...s, main_events: ['walks into the circle'] })) }, { durationSec: 5, camera: REEL_CAM }));
+  untouched(pzRun({ ...LIVE, shots: LIVE.shots.map(s => ({ ...s, camera: { move: 'follows' } })) }, { durationSec: 5, camera: REEL_CAM }));
+  untouched(pzRun(LIVE, { durationSec: 5, camera: [{ from: 0, to: 3, scale: 1 }, { from: 3, to: 4, zoom: 'in', scale: 1.1 }, { from: 4, to: 5, scale: 1 }] }));
+  // the writer's own tighter size wins the place: exactly one zoom, written where the size changes
+  const r = pzRun({ ...LIVE, shots: [...LIVE.shots.map(s => ({ ...s, main_events: s.main_events.filter(e => !/camera/.test(e)) })), { start: 4, size: 'medium', camera: { move: 'fixed' }, main_events: ['nods'] }] }, { durationSec: 7, camera: REEL_CAM });
+  assert.strictEqual((r.prompt.match(/zooms in/g) || []).length, 1, timeline(r));
+  assert.ok(/^\[4-7s\] The person filming stays/m.test(r.prompt), timeline(r));
+});
 t('phoneZoom: the measured ceiling — scale per take, pro-rated, and how many sizes it carries', () => {
   assert.strictEqual(measuredZoomScale([{ from: 0, to: 7, zoom: 'in' }], 0, 7), null, 'no "scale" = not measured');
   assert.strictEqual(measuredZoomScale([], 0, 7), null);

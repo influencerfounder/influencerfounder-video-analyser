@@ -665,13 +665,34 @@ function compile(spec, opts = {}) {
     // One sentence; the size in plain words (what of MAIN is seen), never "close-up". The filmer's HAND and the PHONE as
     // objects are never named: a hand-written take that said "one bystander … holding a phone up in one hand" drew a hand
     // holding a phone into the foreground (rj_mwv04lxcmcnp, 2026-11-24; naming draws it, VQL P9).
-    const pzZoom = (toRank) => {
+    const pzZoom = (toRank, at) => {
       const until = toRank >= 0 ? `, until ${name} is seen ${SIZE_PLAIN[toRank]}` : '';
       const t = pz.said
         ? `From the same spot the person filming zooms in a little more${until}`
         : `The person filming stays ${k === 0 ? 'in the spot of the opening frame' : 'where they stand at the start of this shot'} and zooms in ${toRank >= 0 ? '' : 'a little '}on ${name}: one quick, slightly jerky phone zoom, the picture shaking a little${until || `, the framing staying close to ${k === 0 ? 'the opening frame' : 'the start of this shot'}`}${inFront ? `; the people nearest the camera stay in the picture at the frame edges` : ''}`;
       pz.said = true;
-      return sentence(t);
+      return sentence(at ? `At about ${at}s ${t[0].toLowerCase()}${t.slice(1)}` : t);
+    };
+    // RULE phoneZoom, measured-only (2026-11-24, first live run rj_mwv2y3ibuht9): the writer named NO tighter size for
+    // the church reel this time (one "full body, fixed shot" for the whole clip, and "as the camera moves closer"
+    // inside an action), so nothing fired and the prompt had no zoom at all. The measurement alone carries it: on a
+    // phone-look take where MAIN stays put, a measured growth worth a whole size is written as the zoom, in the
+    // phase where the zoom-in was measured, when no phase of the take names a tighter size itself.
+    const laterTighter = (j, from) => idxs.slice(j + 1).some(x => { const r = sizeRank(known(shots[x].size)); return r >= 0 && from >= 0 && r < from; });
+    const measuredZoomIn = (x, idx) => {   // the strongest measured zoom-in segment that starts inside this phase
+      const A = srcA(x, idx), B = srcB(x);
+      return (Array.isArray(opts.camera) ? opts.camera : []).filter(g => g.zoom === 'in' && Number(g.scale) >= MIN_GROWTH && g.from >= A - 0.05 && g.from < B).sort((p, q) => q.scale - p.scale)[0] || null;
+    };
+    const pzMeasured = (x, idx, j, camS, bits, tA) => {
+      if (pz.said || pz.rank < 0 || OTHER_MOVE.test(camS)) return false;
+      const g = measuredZoomIn(x, idx); if (!g) return false;
+      const grown = measuredZoomScale(opts.camera, pz.t0, srcB(x)); if (grown == null || grown < MIN_GROWTH) return false;
+      const to = tightestRank(pz.rank, grown); if (!(to < pz.rank) || laterTighter(j, pz.rank)) return false;
+      const lateBy = g.from - srcA(x, idx);   // say when, if it is not at the start of the phase and the source is not re-told
+      const at = lateBy > 0.7 && x.srcStart == null ? fmt(tA + lateBy, whole) : '';
+      pz.on = true; bits.push(pzZoom(to, at)); pz.rank = to; pz.t0 = srcB(x);
+      log.push({ rule: 'phoneZoom', shot: idx + 1, measuredOnly: true, to: SIZE_ORDER[to], held: false, scale: Math.round(grown * 100) / 100 });
+      return true;
     };
     idxs.forEach((i, j) => {
       const s = shots[i];
@@ -701,7 +722,9 @@ function compile(spec, opts = {}) {
         if (!later && (takeScale == null || takeScale >= MIN_GROWTH)) bits.push(pzZoom(-1));
         log.push({ rule: 'phoneZoom', shot: i + 1, opening: true, scale: takeScale == null ? null : Math.round(takeScale * 100) / 100 });
       } else if (j === 0) {
-        bits.push(sentence([size, angle, camS].filter(Boolean).join(', ')));
+        const line = [];
+        if (canZoom && pzMeasured(s, i, j, camS, line, a)) { pzHere = true; pzSize = SIZE_ORDER[pz.rank]; bits.push(sentence([size, angle, 'handheld, filmed from one spot'].filter(Boolean).join(', ')), ...line); }
+        else bits.push(sentence([size, angle, camS].filter(Boolean).join(', ')));
       } else {
         // RULE framingInTake — inside one take the size is not restated as a new framing with a held
         // camera (only a cut can deliver that); a change is written as the framing moving within the
@@ -747,6 +770,8 @@ function compile(spec, opts = {}) {
           else bits.push(sentence(`within the same take the framing ${verb} to ${to}, ${camS}`));
           if (sizeChanged && rb >= 0) { pz.rank = rb; pz.t0 = srcB(s); }   // RULE phoneZoom — the written size, whoever wrote it
           log.push({ rule: 'framingInTake', shot: i + 1, from: prevFrame.size, to: size });
+        } else if (canZoom && !sizeChanged && pzMeasured(s, i, j, camS, bits, a)) {
+          pzHere = true; pzSize = SIZE_ORDER[pz.rank];
         } else if (camS !== prevFrame.cam) {
           bits.push(sentence(fixed ? 'the camera now holds still' : camS));
         }
