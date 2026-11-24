@@ -16,7 +16,16 @@ up to 1 s (windows restart at every cut) the median move is labelled:
 Thresholds are per second at 360 px width (validated on G63 / lobby / FIFA, 2026-10-04):
 pan/tilt >= 20 px/s (~5% of the width; 12-17 px/s readings on G63 12-14 s were noise), zoom >= 2.5 %/s. Consecutive equal labels merge.
 
-usage: cameramotion.py <video> [cut,cut,...]  ->  {"segments":[{"from":0,"to":1.2,"pan":"left","tilt":null,"zoom":"in"}...]}
+"scale" (2026-11-24, VQL P20): HOW FAR the picture grew over the segment — the product of the
+per-step scales (1.63 = the background ended 1.63x larger, 0.9 = it shrank). The label alone could
+not tell one step forward (church courtyard reel: 1.63x in the one second 3-4 s) from a slow
+drift (the original phone clip: 4.3 %/s for 7 s = 1.33x in total), and the compiler wrote both as
+a push-in to whatever size the writer guessed. The compiler (RULE phoneZoom) uses it as a ceiling
+for how much tighter a phone-shot take may end. Farneback under-reads fast or blurred moves (a
+generated glide to a soft-background face close-up read 1.12x), so it is a floor of the real
+move, never proof that nothing moved.
+
+usage: cameramotion.py <video> [cut,cut,...]  ->  {"segments":[{"from":0,"to":1.2,"pan":"left","tilt":null,"zoom":"in","scale":1.21}...]}
 """
 import sys, json
 import cv2
@@ -93,7 +102,7 @@ for (a, b) in sorted(per):
         fx, fy = -np.median(v[:, 0]) / sc, -np.median(v[:, 1]) / sc
         if abs(fx) < W / 2 and abs(fy) < H / 2:
             pan = tilt = None
-    rows.append({'from': a, 'to': b, 'pan': pan, 'tilt': tilt, 'zoom': zm})
+    rows.append({'from': a, 'to': b, 'pan': pan, 'tilt': tilt, 'zoom': zm, 'scale': float(np.prod(np.clip(v[:, 2], 0.8, 1.25)))})
 
 segs = []
 for r in rows:
@@ -102,6 +111,9 @@ for r in rows:
     if last and last['to'] == r['from'] and (last['pan'], last['tilt'], last['zoom']) == (r['pan'], r['tilt'], r['zoom']) \
             and not any(last['from'] < c <= r['from'] for c in cuts):
         last['to'] = r['to']
+        last['scale'] *= r['scale']
     else:
         segs.append(dict(r))
+for s in segs:
+    s['scale'] = round(s['scale'], 3)
 print(json.dumps({'segments': segs, 'seconds': round(dur, 2)}))

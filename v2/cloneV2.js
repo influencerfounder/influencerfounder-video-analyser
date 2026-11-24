@@ -17,7 +17,7 @@ const { compile } = require('./compile');
 const { pickCastChanges } = require('./castChange');
 const { reactionsPass } = require('./reactions');
 
-const V2_VERSION = 'v2-1.16.4';
+const V2_VERSION = 'v2-1.17.0';
 const WRITER_MODEL = process.env.V2_WRITER_MODEL || 'claude-sonnet-5';
 const FALLBACK_MODEL = 'claude-sonnet-4-6';
 

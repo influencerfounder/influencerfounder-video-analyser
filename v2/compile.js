@@ -40,6 +40,7 @@ const RULES = {
   castChange:     'Each clearly visible background person carries its one small change (v2/castChange.js, picked once at analysis) after its label, the same change the first frame drew, so a later shot does not pull the original look back (Mike, 2026-10-23, VQL case 2026-10-23-01). Product-only runs keep everyone as the source shows them.',
   oneHeaderPerTake: '"Shot N [a-bs]:" is Wan\'s own cut syntax, so only a measured cut opens a new Shot; phases inside one take are "[a-bs]" lines. Evidence (2026-10-30): plaza remake, 5 jumps in a one-take source; Classic writes no Shot labels in a take since 2026-10-01.',
   framingInTake:  'Inside one take a size change is written as the framing moving within the take, never as a new size with a held camera (which only a cut can deliver); an unchanged framing is not repeated. Evidence: plaza 9.0 s medium → close-up = a jump.',
+  phoneZoom:      'PHONE-LOOK sources only (look "phone", the AUTHENTIC lane), and only where the picture gets tighter on MAIN inside one take while MAIN stays where they are for that whole take: the tightening is written as the person filming zooming the phone in from the spot of the opening frame — never "the camera pushes in / moves closer", never "MAIN has come closer" for someone who did not walk — and the take may end only as much tighter as the measured camera grew the picture (cameramotion "scale"); a tighter size the measurement does not carry is not written. Cinema-look sources, a framing that does not tighten, and a walking MAIN (a follow shot, or MAIN walking up to a held phone) get 0 characters and keep their old wording. Evidence: VQL P20 — church courtyard 2026-11-20 and 2026-11-24 (source ends waist-up with the men\'s backs in front, three takes glided to a centred face close-up; Mike: "like this is shot with a pro holywood camera … just a phone zoom from one position"). Rule gate NOT met and waived on Mike\'s direct instruction: one scene in two files, no scorecard measure yet.',
   fewerActions:   'Later phases (never the hook) shed repeats, "continues/keeps" restatements and "slightly" micro-moves down to ~1.5 actions per second; object actions and the last action stay. Evidence: plaza phase of 19 actions in 4.9 s; the sunglasses went on between two frames.',
   propsPlaced:    'An object MAIN puts on, takes off, picks up or hands over later is placed in the opening ("At the start: sunglasses folded in the right hand"), so it does not pop in. Evidence: plaza sunglasses (2026-10-30) — the source hid the put-on behind a passer-by, our take had neither the passer-by nor the starting place.',
   layeredOutfit:  'A layer worn over the top (outer_layer) is named with the top in the outfit sentence and in every take after a cut ("<layer> over <top> that covers the chest"); a back shot names the layer\'s back. 0 words without a layer. Evidence: Classic LAYERED_OUTFIT_RULE 2.51.0 (Rolls tank under an open jacket, kept 1/1) + VQL 2026-11-05-01 (red-carpet leather jacket named once, both close-ups after a cut shirtless).',
@@ -213,6 +214,80 @@ function sizePhrase(size) {
   const s = clean(size).toLowerCase().replace(/\s*shot$/, '');
   if (/close-up$/.test(s)) return `${/^extreme/.test(s) ? 'an' : 'a'} ${s}`;
   return `${/^[aeiou]/.test(s) ? 'an' : 'a'} ${s} shot`;
+}
+
+// RULE phoneZoom (2026-11-24, VQL P20 — church courtyard 11-20 + 11-24, Mike: "I keep saying i don't want this kind of
+// camera moves like this is shot with a pro holywood camera … just a phone zoom from one position someone holding a
+// phone", then "use a filter please so we don't effect every video", "So only with authentic label").
+// TRIGGERED, never always-on: it fires only on a phone-look source (the writer's look "phone" = Classic's lane
+// AUTHENTIC), inside one take, where the picture gets tighter on a MAIN who is not walking. Everything else — a cinema
+// source (a real dolly can be what the original did), a framing that does not tighten, a follow shot, MAIN walking up
+// to a held phone — compiles exactly as before, with 0 characters from this rule.
+// How much of the person each size shows, as a zoom factor against "full body" (the index is SIZE_ORDER's).
+const SIZE_ZOOM = [10, 5, 3, 2, 1.33, 1, 0.67, 0.4];
+// The measurement is of the BACKGROUND (outer band) and under-reads fast moves; the person in front grows a little
+// more than what is behind them. Church reel: measured 1.63x, she goes from head-to-feet to waist-up (2x).
+const ZOOM_SLACK = 1.25;
+const SIZE_PLAIN = ['with only the face in the picture', 'from the shoulders up', 'from the chest up', 'from the waist up', 'from the knees up', 'from head to feet', 'from head to feet with room around', 'small in the frame'];
+// The writer's camera words that mean "toward the subject" (cameraSentence also writes "pushes in" for a measured zoom in).
+const PUSH_IN = /\b(push(?:es|ing)? (?:in|forward|closer)|mov(?:es|ing) (?:in|closer|forward|toward)|zoom(?:s|ing)? in|clos(?:es|ing) in|creeps? (?:in|forward)|steps? (?:in|closer|forward)|approach(?:es|ing)?)\b/i;
+// The writer's words for a camera that TRAVELS with or through the scene (its own enum has "tracks forward" and
+// "follows"): a take that carries one is a walking shot by the writer's own account and the rule stays out of it,
+// whatever MAIN's verbs say (reviewer round 2: "tracks forward" + "crosses the street" fired).
+const TRAVEL_CAM = /\b(track|follow|doll|walk|lead|travel|steadicam|gimbal)/i;
+// MAIN changing place: then a tighter picture can be MAIN's own doing (walking up to a held phone) or a follow shot,
+// and this rule stays out of the WHOLE take (the writer states an ongoing walk once and need not restate it, so one
+// phase or the one before is not enough — reviewer 2026-11-24: a follow shot into a store fired at 8 s). Read on MAIN's
+// events with the camera's own clauses removed. Moving on the spot (leans, bends, dances, jumps, "runs a hand through
+// the hair", "passes a hand through the hair", "steps" as a noun) is not travel.
+const MAIN_TRAVELS = /\b(?:walk|stroll|stride|strut|jog|sprint|march|approach|climb|crawl|rush|hurr|wander|descend|ascend|advanc|follow|swim|pedal|travel|return)\w*|\b(?:rid(?:es|ing)|driv(?:es|ing)|skat(?:es|ing)|cycl(?:es|ing)|pac(?:es|ing)|skip(?:s|ping)|near(?:s|ing)|lead(?:s|ing)|exit(?:s|ing)|leav(?:es|ing))\b|\brun(?:s|ning)?\b(?! (?:a|an|one|his|her|their|both|the|two) (?:hands?|fingers?|thumb|palm))|\bstep(?:s|ping)? (?:forward|back|toward|towards|closer|out|in|into|onto|off|away|up|down|aside|through|past)\b|\b(?:enter(?:s|ing)?|cross(?:es|ing)?) (?:the|a|an|to|over|through|by|from)\b(?! (?:arms?|legs?|ankles?|fingers?|hands?))|\b(?:com(?:es|ing) (?:toward|towards|closer|forward|up to|out|in)|go(?:es|ing) (?:toward|towards|to|into|out|up|down)|get(?:s|ting) (?:out|in|closer|up from|off|on)|head(?:s|ing) (?:toward|towards|to|for|into|out)|mov(?:es|ing) (?:toward|towards|closer|forward|away|back|to|into|out|past|off|across)|back(?:s|ing) (?:away|up|off)|mak(?:es|ing) (?:his|her|their) way|roll(?:s|ing) (?:past|up|away|in)|jump(?:s|ing) (?:down|off|out|over)|danc(?:es|ing) (?:across|toward|towards|over)|pass(?:es|ing) (?:by|the camera|in front|behind|through|between))\b|\bout of (?:the )?frame\b/i;
+// A camera that is doing something else than coming in or holding: the rule leaves those phases alone.
+const OTHER_MOVE = /\b(pull|back|pan|tilt|orbit|arc|circl|follow|crane|whip|swing|rotat|turn|track(?!s? (?:in|forward)))/i;
+// Under this the measured picture did not grow: handheld drift and flow noise (the slack alone would let 1.07x count).
+const MIN_GROWTH = 1.15;
+// Someone standing between the phone and MAIN, by the writer's own words (cast label / look / what they do).
+const IN_FRONT = /\b(foreground|backs? to(?:ward)? the camera|seen from behind|in front of the camera|nearest the camera|closest to the camera)\b/i;
+// Camera talk that leaked into an action or an end state ("stands still as the camera moves closer").
+const CAMERA_CLAUSE = /,?\s*\b(?:as|while|when)\s+the\s+(?:camera|phone|person filming|filmer)\s+(?:mov|push|zoom|glid|track|doll|step|com|clos|approach|creep)\w*[^,;.]*/gi;
+function noCameraTalk(text) { return clean(String(text || '').replace(CAMERA_CLAUSE, '')); }
+// "close-up of Dorzy looking into the camera" → "Dorzy looking into the camera" when the take may not end that tight.
+function noTighterSize(text, rank) {
+  let t = String(text || '');
+  // The WORD close-up never stays in a take written as a phone zoom (the size is said in plain words): the phrase goes,
+  // what it was about stays.
+  if (rank > 2) t = t.replace(/\b(?:an?\s+|the\s+)?medium close[- ]?up\s+(?:of|on)\s+/gi, '').replace(/,?\s*\b(?:in|at|to)\s+(?:an?\s+|the\s+)?medium close[- ]?up\b/gi, '');
+  t = t.replace(/\b(?:an?\s+|the\s+)?(?:tight\s+)?(?<!medium )(?<!extreme )close[- ]?up\s+(?:of|on)\s+/gi, '').replace(/,?\s*\b(?:in|at|to)\s+(?:an?\s+|the\s+)?(?:tight\s+)?(?<!medium )(?<!extreme )close[- ]?up\b/gi, '');
+  if (rank > 1) t = t.replace(/,?\s*\bin\s+(?:a\s+)?(?:close|tight)\s+framing\b/gi, '');
+  // The same in plain words: "from the waist up" where the take may only reach knees-up.
+  const PLAIN = { neck: 1, shoulders: 1, chest: 2, waist: 3, hips: 3, thighs: 4, knees: 4 };
+  if (rank >= 0) t = t.replace(/\bfrom the (neck|shoulders|chest|waist|hips|thighs|knees) up\b/gi, (m, w) => (PLAIN[w.toLowerCase()] < rank ? SIZE_PLAIN[rank] : m));
+  // What is left that still asks for a tighter picture than allowed ("the close-up holds on MAIN, the face filling the
+  // frame", "extreme close-up of the eyes"): the whole clause goes.
+  const tight = rank > 2 ? /close[- ]?up|fill(?:s|ing)? the (?:frame|screen|picture)|tight (?:on|framing|shot)/i
+    : rank > 1 ? /(?<!medium )close[- ]?up|fill(?:s|ing)? the (?:frame|screen|picture)|tight (?:on|framing|shot)/i
+      : rank > 0 ? /extreme close[- ]?up|fill(?:s|ing)? the (?:frame|screen|picture)/i : null;
+  if (tight) t = t.split(/\s*[,;]\s*/).filter(c => !tight.test(c)).join(', ');
+  return clean(t);
+}
+// How much the measured camera grew the picture over [a, b] (source seconds): the product of the segments' "scale",
+// each for the share of it that falls in the window. null = not measured (no camera timeline, or one from before
+// cameramotion.py reported "scale") — then there is no ceiling and the writer's size stands.
+function measuredZoomScale(camSegs, a, b) {
+  if (!Array.isArray(camSegs) || !camSegs.length || !(b > a)) return null;
+  let logSum = 0, seen = false;
+  for (const g of camSegs) {
+    if (!(Number(g.scale) > 0) || !(g.to > g.from)) continue;
+    seen = true;
+    const over = Math.max(0, Math.min(b, g.to) - Math.max(a, g.from));
+    if (over) logSum += Math.log(Number(g.scale)) * (over / (g.to - g.from));
+  }
+  return seen ? Math.exp(logSum) : null;
+}
+// The tightest size a take that opens at `fromRank` may reach when the picture grew `scale` times.
+function tightestRank(fromRank, scale) {
+  let r = fromRank;
+  while (r > 0 && SIZE_ZOOM[r - 1] / SIZE_ZOOM[fromRank] <= scale * ZOOM_SLACK) r--;
+  return r;
 }
 
 // RULE fewerActions (2026-10-30, VQL 2026-10-30-01): a later phase that lists 19 actions in 4.9 s
@@ -572,8 +647,32 @@ function compile(spec, opts = {}) {
   const segs = [];
   let prevFrame = null;   // { size, angle, cam } of the phase before, inside the current take
   let prevTb = null;      // whole-second rounding must stay contiguous (reviewer 2026-10-30: Seedance printed Shot 1 [0-3s] then Shot 2 [2-10s])
+  // RULE phoneZoom — phone-look sources only (never 📦 product-only: there is no person to zoom in on).
+  const phoneLane = S.look !== 'cinema' && !productOnly;
+  const mainEventsOf = (x) => noCameraTalk((Array.isArray(x.main_events) ? x.main_events : []).join(' ; '));
   takes.forEach((idxs, k) => {
     const lines = [];
+    // RULE phoneZoom — per take: is MAIN changing place anywhere in it (then the rule stays out of the whole take), the
+    // size the prompt has written so far (kept in step by BOTH wordings), and the source time that size dates from (the
+    // measured growth since then is what a new zoom may spend).
+    const s0 = shots[idxs[0]], sN = shots[idxs[idxs.length - 1]];
+    const srcA = (x, idx) => x.srcStart ?? (idx === 0 ? 0 : x.start), srcB = (x) => x.srcEnd ?? x.end;
+    const rank0 = sizeRank(known(s0.size));
+    const takeScale = measuredZoomScale(opts.camera, srcA(s0, idxs[0]), srcB(sN));
+    const takeTravels = idxs.some(x => MAIN_TRAVELS.test(mainEventsOf(shots[x])) || TRAVEL_CAM.test(clean(shots[x].camera && shots[x].camera.move)));
+    const inFront = IN_FRONT.test(cast.map(p => `${p.label} ${known(p.look) ? p.look : ''}`).join(' ; ') + ' ; ' + idxs.map(x => (Array.isArray(shots[x].others) ? shots[x].others : []).map(o => (Array.isArray(o.events) ? o.events : []).join(' ')).join(' ')).join(' '));
+    const pz = { on: false, said: false, bonus: false, rank: rank0, t0: srcA(s0, idxs[0]) };
+    // One sentence; the size in plain words (what of MAIN is seen), never "close-up". The filmer's HAND and the PHONE as
+    // objects are never named: a hand-written take that said "one bystander … holding a phone up in one hand" drew a hand
+    // holding a phone into the foreground (rj_mwv04lxcmcnp, 2026-11-24; naming draws it, VQL P9).
+    const pzZoom = (toRank) => {
+      const until = toRank >= 0 ? `, until ${name} is seen ${SIZE_PLAIN[toRank]}` : '';
+      const t = pz.said
+        ? `From the same spot the person filming zooms in a little more${until}`
+        : `The person filming stays ${k === 0 ? 'in the spot of the opening frame' : 'where they stand at the start of this shot'} and zooms in ${toRank >= 0 ? '' : 'a little '}on ${name}: one quick, slightly jerky phone zoom, the picture shaking a little${until || `, the framing staying close to ${k === 0 ? 'the opening frame' : 'the start of this shot'}`}${inFront ? `; the people nearest the camera stay in the picture at the frame edges` : ''}`;
+      pz.said = true;
+      return sentence(t);
+    };
     idxs.forEach((i, j) => {
       const s = shots[i];
       const a = i === 0 ? 0 : s.start, b = s.end;
@@ -587,7 +686,21 @@ function compile(spec, opts = {}) {
       const bits = [];
       const size = known(s.size), angle = known(s.angle);
       const camS = cameraSentence(s.camera, measuredCameraFor(opts.camera, s.srcStart ?? a, s.srcEnd ?? b), log, i + 1); // RULES measuredCamera + fixedShot
-      if (j === 0) {
+      // RULE phoneZoom — may this phase be written as a phone zoom? Phone lane, MAIN in the picture, and MAIN not
+      // changing place anywhere in this take (then the old wording stands: a follow shot, or MAIN walking up to a
+      // held phone).
+      const canZoom = phoneLane && !takeTravels && s.main_visible !== false;
+      let pzHere = false, pzSize = '';   // did the rule write this phase, and which size does the page now show
+      const pushIn = PUSH_IN.test(camS);
+      if (j === 0 && canZoom && pushIn) {
+        // The take opens on a move toward MAIN. Where a later phase of the take gets tighter, the zoom is written
+        // there; a take that never names a tighter size gets the small zoom here.
+        const later = idxs.slice(1).some(x => { const r = sizeRank(known(shots[x].size)); return r >= 0 && rank0 >= 0 && r < rank0; });
+        pz.on = true; pzHere = true;
+        bits.push(sentence([size, angle, 'handheld, filmed from one spot'].filter(Boolean).join(', ')));
+        if (!later && (takeScale == null || takeScale >= MIN_GROWTH)) bits.push(pzZoom(-1));
+        log.push({ rule: 'phoneZoom', shot: i + 1, opening: true, scale: takeScale == null ? null : Math.round(takeScale * 100) / 100 });
+      } else if (j === 0) {
         bits.push(sentence([size, angle, camS].filter(Boolean).join(', ')));
       } else {
         // RULE framingInTake — inside one take the size is not restated as a new framing with a held
@@ -596,7 +709,34 @@ function compile(spec, opts = {}) {
         const fixed = /^fixed shot/.test(camS);
         const sizeChanged = size && prevFrame && prevFrame.size && size.toLowerCase() !== prevFrame.size.toLowerCase();
         const angleChanged = angle && prevFrame && prevFrame.angle && angle.toLowerCase() !== prevFrame.angle.toLowerCase();
-        if (sizeChanged || angleChanged) {
+        const ra0 = sizeChanged ? sizeRank(prevFrame.size) : -1, rb0 = sizeChanged ? sizeRank(size) : -1;
+        const tighter = ra0 >= 0 && rb0 >= 0 && rb0 < ra0;
+        // The camera came in: the camera sentence says so (the writer's word or the measured zoom), or — with a camera
+        // that holds or is only "handheld" — the MEASURED picture grew since the framing now on the page was written.
+        // A camera doing something else (pulls back, pans, follows) is left alone. With no measured growth and no
+        // push-in the old wording stands ("MAIN has come closer").
+        const pzFrom = pz.rank >= 0 ? pz.rank : ra0;
+        const grown = measuredZoomScale(opts.camera, pz.t0, srcB(s));
+        // How tight the measurement lets it get from here. The writer's OWN push-in word is worth one size even when
+        // the flow saw less (it under-reads a fast pinch zoom; the measurement is a floor of the real move).
+        let cap = grown == null || pzFrom < 0 ? null : (grown >= MIN_GROWTH ? tightestRank(pzFrom, grown) : pzFrom);
+        const bonus = cap != null && cap > 0 && cap === pzFrom && !pz.bonus && PUSH_IN.test(clean(s.camera && s.camera.move));   // once per take: four "pushes in" phases on a measured-still camera walked full body down to head and shoulders (reviewer round 2)
+        if (bonus) cap = pzFrom - 1;
+        const grew = cap != null && cap < pzFrom;
+        if (canZoom && ((tighter && (pushIn || (!OTHER_MOVE.test(camS) && (grew || pz.on)))) || (pushIn && !tighter && !(ra0 >= 0 && rb0 >= 0 && rb0 > ra0)))) {   // a push-in with no readable tighter size is the small zoom, never "framing moves to …, the camera pushes in";   // pz.on: a take already written as a zoom never falls back to "has come closer"
+          // RULE phoneZoom — the picture gets tighter on a MAIN who stays put: a phone zoom from the filmer's spot,
+          // no further than the measured camera carried it. A tighter size the measurement does not carry is not
+          // written at all (the take keeps the framing it has).
+          pz.on = true; pzHere = true;
+          const from = pzFrom;
+          const want = tighter ? rb0 : -1;
+          const to = want >= 0 && cap != null ? Math.max(want, cap) : want;
+          if (want >= 0 && to < from) { bits.push(pzZoom(to)); pz.rank = to; pz.t0 = srcB(s); if (bonus) pz.bonus = true; pzSize = SIZE_ORDER[to]; }
+          else if (want >= 0) pzSize = prevFrame.size;   // held: the page still shows the size before
+          else if (want < 0 && !pz.said && !idxs.slice(j + 1).some(x => { const r = sizeRank(known(shots[x].size)); return r >= 0 && from >= 0 && r < from; }) && (takeScale == null || takeScale >= MIN_GROWTH)) bits.push(pzZoom(-1));
+          if (angleChanged) bits.push(sentence(`the view is now ${angle}`));
+          log.push({ rule: 'phoneZoom', shot: i + 1, from: prevFrame.size, wanted: size || null, to: want >= 0 ? SIZE_ORDER[Math.max(to, 0)] : null, held: want >= 0 && !(to < from), scale: takeScale == null ? null : Math.round(takeScale * 100) / 100 });
+        } else if (sizeChanged || angleChanged) {
           const to = [size ? sizePhrase(size) : '', angleChanged ? angle : ''].filter(Boolean).join(', ');
           const ra = sizeRank(prevFrame.size), rb = sizeRank(size);
           const verb = sizeChanged && ra >= 0 && rb >= 0 ? (rb < ra ? 'tightens' : rb > ra ? 'widens' : 'moves') : 'moves';
@@ -605,14 +745,17 @@ function compile(spec, opts = {}) {
           const dist = fixed && sizeChanged && s.main_visible !== false && prevFrame.mainVisible && verb !== 'moves' ? `${name} has ${verb === 'tightens' ? 'come closer' : 'moved further away'}: ` : '';
           if (fixed) bits.push(sentence(`${dist}within the same take the framing is now ${to}, the camera still does not move`));
           else bits.push(sentence(`within the same take the framing ${verb} to ${to}, ${camS}`));
+          if (sizeChanged && rb >= 0) { pz.rank = rb; pz.t0 = srcB(s); }   // RULE phoneZoom — the written size, whoever wrote it
           log.push({ rule: 'framingInTake', shot: i + 1, from: prevFrame.size, to: size });
         } else if (camS !== prevFrame.cam) {
           bits.push(sentence(fixed ? 'the camera now holds still' : camS));
         }
       }
-      prevFrame = { size: size || (prevFrame && prevFrame.size) || '', angle: angle || (prevFrame && prevFrame.angle) || '', cam: camS, mainVisible: s.main_visible !== false };
+      prevFrame = { size: (pzHere && pzSize) || size || (prevFrame && prevFrame.size) || '', angle: angle || (prevFrame && prevFrame.angle) || '', cam: pzHere && pushIn ? 'phone zoom' : camS, mainVisible: s.main_visible !== false };
       const hook = i === 0;
-      const ev = trimEvents((Array.isArray(s.main_events) ? s.main_events : []).map(noTempo).filter(Boolean), b - a, hook, log, i + 1); // RULES noTempoWords + fewerActions
+      // RULE phoneZoom — in a take written as a phone zoom, camera talk inside an action ("stands still as the camera
+      // moves closer") would bring the glide back.
+      const ev = trimEvents((Array.isArray(s.main_events) ? s.main_events : []).map(noTempo).map(x => (pz.on ? noCameraTalk(x) : x)).filter(Boolean), b - a, hook, log, i + 1); // RULES noTempoWords + fewerActions
       if (hook && (props.length || glassesStart) && s.main_visible !== false) bits.push(sentence(`At the start: ${[...props, glassesStart].filter(Boolean).join('; ')}`)); // RULES propsPlaced + headGlasses
       if (ev.length && s.main_visible !== false) bits.push(sentence(`${name} ${ev.join(', then ')}`));
       else if (s.main_visible === false && !productOnly) bits.push(sentence(`${name} is not in ${idxs.length > 1 ? 'the frame' : 'this shot'}`));
@@ -644,8 +787,12 @@ function compile(spec, opts = {}) {
       // (main session, Kryfex AR15 bag takes, 2026-11-12).
       const sigHere = sig && lastInTake && k === takes.length - 1 && s.main_visible !== false;
       if (known(s.end_state)) {
-        const es = noTempo(s.end_state).replace(/^(the shot ends with|end of the shot:?)\s*/i, '').replace(/[.!?\s]+$/, '');
-        bits.push(sentence(lastInTake ? `End of the shot: ${es}${sigHere ? `; in the final second ${name} ends with ${sig}` : ''}` : `At ${tb}s: ${es}`));
+        let es = noTempo(s.end_state).replace(/^(the shot ends with|end of the shot:?)\s*/i, '').replace(/[.!?\s]+$/, '');
+        // RULE phoneZoom — the end state may not ask for a tighter picture than the take was allowed to reach, and
+        // the take's last line says where the framing ends (the ceiling, in plain words).
+        if (pz.on) es = [noTighterSize(noCameraTalk(es), pz.rank >= 0 ? pz.rank : 3).replace(/[.!?,;\s]+$/, '').replace(new RegExp(`^(?:MAIN|${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})$`, 'i'), ''), lastInTake && pz.rank >= 0 && pz.said ? `the picture ends with ${name} seen ${SIZE_PLAIN[pz.rank]}, still filmed from the same spot` : ''].filter(Boolean).join('; ');
+        if (es || !pz.on) bits.push(sentence(lastInTake ? `End of the shot: ${es}${sigHere ? `; in the final second ${name} ends with ${sig}` : ''}` : `At ${tb}s: ${es}`));
+        else if (sigHere) bits.push(sentence(`End of the shot: in the final second ${name} ends with ${sig}`));
       } else if (sigHere) bits.push(sentence(`End of the shot: in the final second ${name} ends with ${sig}`));
       if (sigHere) log.push({ rule: 'signatureEnding', shot: i + 1 });
       if (lastInTake && k < takes.length - 1) bits.push('Hard cut.');
@@ -678,4 +825,4 @@ function compile(spec, opts = {}) {
   return { prompt, words: prompt.split(/\s+/).filter(Boolean).length, segments: shots.map(s => ({ start: s.start, end: s.end, cut_before: !!s.cut_before, ...(s.srcStart != null ? { srcStart: s.srcStart, srcEnd: s.srcEnd } : {}) })), log, rules: Object.keys(RULES), ...(renderDur !== dur ? { durationSec: renderDur, sourceSecs: dur } : {}) };
 }
 
-module.exports = { compile, soundLine, RULES, RULE_GATE, headGlassesPhrase, headGlassesRewrite, signaturePhrase, endingFits, measuredCameraFor, cameraSentence, garmentClause, takeWear, stripIdentity, nameMain };
+module.exports = { compile, measuredZoomScale, tightestRank, soundLine, RULES, RULE_GATE, headGlassesPhrase, headGlassesRewrite, signaturePhrase, endingFits, measuredCameraFor, cameraSentence, garmentClause, takeWear, stripIdentity, nameMain };

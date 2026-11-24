@@ -2,7 +2,7 @@
 // 🧪 RECREATE v2 compiler — one check per RULE in v2/compile.js (the rule gate's "(c) a selftest").
 // The spec below is shaped like a real lobby analysis (5 measured cuts, back print + plain front).
 const assert = require('assert');
-const { compile, RULES, measuredCameraFor } = require('../v2/compile');
+const { compile, RULES, measuredCameraFor, measuredZoomScale, tightestRank } = require('../v2/compile');
 const { writerSystem, parseSpec, validateSpec, WRITER_RULES } = require('../v2/spec');
 let pass = 0, fail = 0;
 const t = (n, fn) => { try { fn(); pass++; console.log('  ok  ' + n); } catch (e) { fail++; console.log('  x   ' + n + ' :: ' + e.message); } };
@@ -736,6 +736,183 @@ t('soundBed (review): speech, live music and a missing time never reach the prom
   const line = r.prompt.split('Sound:')[1].split('No dialogue')[0];
   assert.ok(/indistinct voices and chatter, the train rattling; the doors slide open at 6s\.\s*$/.test(line), line);
   assert.ok(!/talks|shouts|says|guitar|drums|towel|at 0s/.test(line), line);
+});
+
+// ── RULE phoneZoom (2026-11-24, VQL P20) ──
+// Shaped like the church courtyard reel (Dorzy's DecQKAmotL6): one handheld take, she stands in a circle of men, the
+// person filming comes in once at 3-4 s and the reel ends waist-up with the men's backs still in front. The writer's
+// spec is the kind that produced the glide: sizes that climb to a close-up, the camera written as held, and camera
+// talk inside an action. The two camera timelines are what cameramotion.py measured on the real files (2026-11-24):
+// her reel (rlsrc_rj_mwuzfjbwsbyw) and the original phone clip (rlsrc_1794490891087).
+const CHURCH = {
+  look: 'phone', setting: 'a gravel churchyard forecourt in front of a flint-stone church, overcast daylight',
+  outfit: { top_name: 'a long black coat', top_front: 'plain black', bottom: 'black trousers', shoes: 'black shoes' },
+  cast: [{ id: 'P1', label: 'the man in the pinstripe suit' }, { id: 'P5', label: 'the two men in navy coats with their backs to the camera' }], people_move: true,
+  shots: [
+    { start: 0, size: 'full body', angle: 'high angle', camera: { move: 'handheld' }, main_events: ['turns the head toward the handshake'], others: [{ id: 'P5', events: ['shake hands in front of MAIN'] }], end_state: 'the two men mid-handshake, MAIN at the centre' },
+    { start: 1.5, size: 'medium', camera: { move: 'fixed' }, main_events: ['stands still as the camera moves closer', 'clasps the hands in front'], end_state: 'MAIN from the waist up' },
+    { start: 4, size: 'medium close-up', camera: { move: 'fixed' }, main_events: ['looks straight into the camera'], end_state: 'close-up of MAIN looking into the camera' },
+  ],
+};
+const REEL_CAM = [{ from: 0, to: 3, scale: 1.001 }, { from: 3, to: 4, zoom: 'in', scale: 1.627 }, { from: 4, to: 5, scale: 1.023 }];
+const CLIP_CAM = [{ from: 0, to: 7, zoom: 'in', scale: 1.332 }];
+const church = (spec, camera, extra) => compile(spec, { name: 'Dorzy', gender: 'female', cuts: [], camera, durationSec: 7, model: 'wan', ...(extra || {}) });
+const GLIDE = /the camera (pushes in|moves closer|moves in)|has come closer|steps? (closer|forward)|close-up|close framing|framing tightens/i;
+const timeline = (r) => r.prompt.split('\n').filter(l => /^(\[|Shot )/.test(l)).join('\n');
+t('phoneZoom: church reel (phone look) — the tightening is one phone zoom from the filmer\'s spot, ending where the source ends', () => {
+  const r = church(CHURCH, REEL_CAM), tl = timeline(r);
+  assert.ok(/^\[1\.5-4s\] The person filming stays in the spot of the opening frame and zooms in on Dorzy: one quick, slightly jerky phone zoom, the picture shaking a little, until Dorzy is seen from the waist up; the people nearest the camera stay in the picture at the frame edges\./m.test(tl), tl);
+  assert.ok(!GLIDE.test(tl), 'no push-in / come-closer / close-up words: ' + tl);
+  assert.ok(/Dorzy stands still, then clasps the hands in front\./.test(tl), 'camera talk is taken out of the action: ' + tl);
+  // the writer's medium close-up is more than the measured 1.63x carries: not written, and the last line says where it ends
+  assert.ok(/^\[4-7s\] Dorzy looks straight into the camera\. End of the shot: Dorzy looking into the camera; the picture ends with Dorzy seen from the waist up, still filmed from the same spot\./m.test(tl), tl);
+  assert.strictEqual((tl.match(/zooms in/g) || []).length, 1, 'one zoom: ' + tl);
+  // the filmer's hand and phone are never named as things in the scene (a hand-written take that did drew them: rj_mwv04lxcmcnp)
+  assert.ok(!/\bhand\b[^.]*\bphone\b|holding a phone|bystander/i.test(tl.replace(/clasps the hands/g, '')), tl);
+  const lg = r.log.filter(l => l.rule === 'phoneZoom');
+  assert.deepStrictEqual(lg.map(l => [l.shot, l.to, l.held]), [[2, 'medium', false], [3, 'medium', true]]);
+});
+t('phoneZoom: the original clip drifts in 1.33x over 7 s — the take may only reach knees-up, and "waist up" in the end state follows', () => {
+  const r = church(CHURCH, CLIP_CAM), tl = timeline(r);
+  assert.ok(/until Dorzy is seen from the knees up;/.test(tl), tl);
+  assert.ok(/At 4s: Dorzy from the knees up\./.test(tl) && !/waist up|chest up/.test(tl), tl);
+  assert.ok(/the picture ends with Dorzy seen from the knees up, still filmed from the same spot\./.test(tl), tl);
+  assert.ok(!GLIDE.test(tl), tl);
+  assert.ok(r.log.some(l => l.rule === 'measuredCamera' && l.measured === 'zoom in'), 'the measured zoom still reaches cameraSentence');
+});
+t('phoneZoom: a camera timeline from before "scale" existed — phone wording still, the writer\'s size stands (no ceiling to apply)', () => {
+  const tl = timeline(church(CHURCH, [{ from: 0, to: 7, zoom: 'in' }]));
+  assert.ok(/zooms in on Dorzy:[^\n]*until Dorzy is seen from the waist up/.test(tl) && /zooms in a little more, until Dorzy is seen from the chest up/.test(tl), tl);
+  assert.ok(!/the camera pushes in|has come closer/.test(tl), tl);
+});
+t('phoneZoom: an opening push-in with no tighter size later = the small zoom, once, in the first line\'s take', () => {
+  const spec = { look: 'phone', outfit: {}, shots: [{ start: 0, size: 'medium', camera: { move: 'pushes in' }, main_events: ['raises a glass'] }, { start: 3, size: 'medium', camera: { move: 'fixed' }, main_events: ['smiles'] }] };
+  const tl = timeline(compile(spec, { name: 'K', cuts: [], durationSec: 6, model: 'wan' }));
+  assert.ok(/^\[0-3s\] Medium, handheld, filmed from one spot\. The person filming stays in the spot of the opening frame and zooms in a little on K: one quick, slightly jerky phone zoom, the picture shaking a little, the framing staying close to the opening frame\./m.test(tl), tl);
+  assert.ok(!/people nearest/.test(tl), 'no cast = no foreground sentence: ' + tl);
+  assert.ok(/^\[3-6s\] The camera now holds still\./m.test(tl), tl);
+});
+// The negatives: each compiles exactly as before — no phoneZoom log entry and none of its words.
+const PZ_WORDS = /person filming|phone zoom|zooms in|filmed from one spot|same spot|picture ends with/i;
+const untouched = (r) => { assert.ok(!r.log.some(l => l.rule === 'phoneZoom'), JSON.stringify(r.log.filter(l => l.rule === 'phoneZoom'))); assert.ok(!PZ_WORDS.test(r.prompt), timeline(r)); };
+t('phoneZoom negative: a CINEMA-look source with the same push-in keeps "the camera pushes in" (a real dolly can be the original)', () => {
+  const r = church({ ...CHURCH, look: 'cinema' }, CLIP_CAM);
+  untouched(r);
+  assert.ok(/^\[1\.5-4s\] Within the same take the framing tightens to a medium shot, the camera pushes in\./m.test(r.prompt), timeline(r));
+  assert.ok(/^\[4-7s\] Within the same take the framing tightens to a medium close-up, the camera pushes in\./m.test(r.prompt), timeline(r));
+  // … also when the owner's unfocus switch gives it the phone look: the LABEL decides, not the layer
+  untouched(church({ ...CHURCH, look: 'cinema' }, CLIP_CAM, { unfocus: true }));
+});
+t('phoneZoom negative: a fixed framing (phone look, nothing tightens, nothing measured moving) = 0 characters', () => {
+  const spec = { ...CHURCH, shots: CHURCH.shots.map(s => ({ ...s, size: 'full body', main_events: s.main_events.map(e => e.replace(' as the camera moves closer', '')), end_state: '' })) };
+  const r = church(spec, [{ from: 0, to: 7, scale: 1.01 }]);
+  untouched(r);
+  assert.strictEqual((timeline(r).match(/framing|zoom|closer/g) || []).length, 0, timeline(r));
+});
+t('phoneZoom negative: a follow shot — MAIN walks, the person filming walks backwards in front (meetup reel DfzvEwpoSaR) — keeps its wording', () => {
+  // measured on the real source (rlsrc_rj_mwup7fx3u355): pans left and the picture SHRINKS (0.63x), no zoom in
+  const cam = [{ from: 0, to: 8, pan: 'left', scale: 1.04 }, { from: 8, to: 15, pan: 'left', zoom: 'out', scale: 0.61 }, { from: 15, to: 18, scale: 1.0 }];
+  const spec = { look: 'phone', outfit: {}, cast: [{ id: 'P1', label: 'the bald man in the grey coat' }], shots: [
+    { start: 0, size: 'medium wide', camera: { move: 'tracks backward' }, main_events: ['walks toward the camera through the crowd'] },
+    { start: 7, size: 'medium', camera: { move: 'tracks backward' }, main_events: ['continues walking toward the camera', 'nods to a man on screen-left'] },
+    { start: 16, size: 'medium close-up', camera: { move: 'fixed' }, main_events: ['continues walking toward the camera', 'looks into the camera'] }] };
+  const r = compile(spec, { name: 'K', cuts: [], camera: cam, durationSec: 18, model: 'wan' });
+  untouched(r);
+  assert.ok(/^\[16-18s\] K has come closer: within the same take the framing is now a medium close-up, the camera still does not move\./m.test(r.prompt), timeline(r));
+});
+t('phoneZoom negative: MAIN walks up to a held phone (plaza), and a held camera with NO measured growth, keep "has come closer"', () => {
+  untouched(plaza());
+  // MAIN stands, the camera is written as held, the picture did not grow: the old sentence stands (nothing measured says the phone came in)
+  const spec = { ...CHURCH, shots: CHURCH.shots.map(s => ({ ...s, main_events: s.main_events.map(e => e.replace(' as the camera moves closer', '')) })) };
+  const r = church(spec, [{ from: 0, to: 7, scale: 1.02 }]);
+  untouched(r);
+  assert.ok(/Dorzy has come closer: within the same take the framing is now a medium shot/.test(r.prompt), timeline(r));
+  untouched(church(spec, []));   // not measured at all
+});
+t('phoneZoom negative: across a CUT a tighter size is a new shot, never a zoom; a 📦 product-only run has nobody to zoom in on', () => {
+  const cut = { ...CHURCH, shots: CHURCH.shots.map((s, i) => ({ ...s, cut_before: i > 0 })) };
+  untouched(compile(cut, { name: 'Dorzy', cuts: [1.5, 4], camera: [{ from: 0, to: 1.5, scale: 1 }, { from: 1.5, to: 4, scale: 1 }, { from: 4, to: 7, scale: 1 }], durationSec: 7, model: 'wan' }));
+  untouched(church(CHURCH, CLIP_CAM, { productOnly: true, productName: 'the watch' }));
+});
+// Reviewer round 1 (2026-11-24): each input below produced a wrong or contradictory line before the fix.
+const pzRun = (spec, o) => compile({ look: 'phone', outfit: {}, ...spec }, { name: 'K', cuts: [], model: 'wan', ...o });
+t('phoneZoom negative: a follow shot whose walking is said ONCE (writer rule 5) stays untouched for the whole take', () => {
+  const r = pzRun({ shots: [{ start: 0, size: 'medium', camera: { move: 'tracks forward' }, main_events: ['walks into the store'] }, { start: 4, size: 'medium', camera: { move: 'tracks forward' }, main_events: ['looks left at the shelf'] }, { start: 8, size: 'medium', camera: { move: 'tracks forward' }, main_events: ['touches a jacket on the rack'] }] }, { durationSec: 12, camera: [{ from: 0, to: 12, zoom: 'in', scale: 3.2 }] });
+  untouched(r);
+  assert.ok(/^\[0-4s\] Medium, the camera tracks forward\./m.test(r.prompt), timeline(r));
+  // … and MAIN walking up to a held phone, then standing: both later sizes stay "has come closer", never a zoom to a WIDER size
+  const w = pzRun({ shots: [{ start: 0, size: 'full body', camera: { move: 'fixed' }, main_events: ['walks toward the camera'] }, { start: 3, size: 'medium', camera: { move: 'fixed' }, main_events: ['waves'] }, { start: 6, size: 'medium close-up', camera: { move: 'fixed' }, main_events: ['looks into the camera'] }] }, { durationSec: 9, camera: [{ from: 0, to: 9, scale: 1.09 }] });
+  untouched(w);
+  assert.strictEqual((w.prompt.match(/K has come closer/g) || []).length, 2, timeline(w));
+});
+t('phoneZoom: the writer\'s own phone camera word "handheld sway" + measured growth fires, and a "close-up … filling the frame" end state goes', () => {
+  const r = pzRun({ cast: [{ id: 'P5', label: 'the two men in navy coats with their backs to the camera' }], shots: [{ start: 0, size: 'full body', camera: { move: 'handheld sway' }, main_events: ['turns the head'] }, { start: 1.5, size: 'medium', camera: { move: 'handheld sway' }, main_events: ['clasps the hands'] }, { start: 4, size: 'medium close-up', camera: { move: 'handheld sway' }, main_events: ['looks into the camera'], end_state: 'the close-up holds on MAIN, the face filling the frame' }] }, { durationSec: 5, camera: REEL_CAM });
+  const tl = timeline(r);
+  assert.ok(/zooms in on K:[^\n]*until K is seen from the waist up; the people nearest the camera stay in the picture at the frame edges\./.test(tl), tl);
+  assert.ok(!GLIDE.test(tl) && !/filling the frame/.test(tl), tl);
+  assert.ok(/End of the shot: the picture ends with K seen from the waist up, still filmed from the same spot\./.test(tl), tl);
+});
+t('phoneZoom: the written size stays in step — a pull-back then a push-in comes back to the size the measurement carries', () => {
+  const r = pzRun({ shots: [{ start: 0, size: 'medium', camera: { move: 'fixed' }, main_events: ['smiles'] }, { start: 3, size: 'full body', camera: { move: 'pulls back' }, main_events: ['spreads the arms'] }, { start: 6, size: 'medium', camera: { move: 'pushes in' }, main_events: ['nods'], end_state: 'MAIN from the waist up' }] }, { durationSec: 9, camera: [{ from: 0, to: 3, scale: 1 }, { from: 3, to: 6, zoom: 'out', scale: 0.62 }, { from: 6, to: 9, zoom: 'in', scale: 1.6 }] });
+  const tl = timeline(r);
+  assert.ok(/^\[3-6s\] Within the same take the framing widens to a full body shot, the camera pulls back\./m.test(tl), tl);
+  assert.ok(/^\[6-9s\] The person filming stays[^\n]*until K is seen from the waist up\./m.test(tl) && !/pushes in/.test(tl), tl);
+});
+t('phoneZoom: moving on the spot is not travel (no half-converted take), no foreground sentence without someone in front, a later take names its own start', () => {
+  const a = timeline(pzRun({ cast: [{ id: 'P1', label: 'the shop assistant behind the counter' }], shots: [{ start: 0, size: 'full body', camera: { move: 'fixed' }, main_events: ['stands on the steps'] }, { start: 2, size: 'medium', camera: { move: 'pushes in' }, main_events: ['passes a hand through the hair'] }] }, { durationSec: 6, camera: [{ from: 0, to: 6, zoom: 'in', scale: 2 }] }));
+  assert.ok(/^\[0-2s\] Full body, handheld, filmed from one spot\./m.test(a) && /^\[2-6s\] The person filming stays in the spot of the opening frame and zooms in on K:[^\n]*until K is seen from the waist up\. K passes/m.test(a), a);
+  assert.ok(!/people nearest|pushes in/.test(a), a);
+  const b = timeline(pzRun({ shots: [{ start: 0, size: 'wide', camera: { move: 'fixed' }, main_events: ['sits'] }, { start: 3, cut_before: true, size: 'medium', camera: { move: 'pushes in' }, main_events: ['lifts a cup'] }] }, { durationSec: 6, cuts: [3], camera: [{ from: 0, to: 3, scale: 1 }, { from: 3, to: 6, zoom: 'in', scale: 1.3 }] }));
+  assert.ok(/^Shot 2 \[3-6s\]: Medium, handheld, filmed from one spot\. The person filming stays where they stand at the start of this shot and zooms in a little on K:/m.test(b) && !/opening frame/.test(b), b);
+});
+t('phoneZoom: the writer\'s own push-in word is worth ONE size when the flow saw almost nothing (it under-reads a fast pinch zoom); drift under 1.15x is not growth', () => {
+  const r = pzRun({ shots: [{ start: 0, size: 'full body', camera: { move: 'fixed' }, main_events: ['stands'] }, { start: 2, size: 'medium close-up', camera: { move: 'pushes in' }, main_events: ['smiles'], end_state: 'MAIN from the chest up' }] }, { durationSec: 6, camera: [{ from: 0, to: 6, scale: 1.05 }] });
+  assert.ok(/until K is seen from the knees up\. K smiles\. End of the shot: K from the knees up;/.test(r.prompt), timeline(r));
+  // a camera written as held + 1.1x of drift over the take: not growth, the old sentence stands
+  untouched(pzRun({ shots: [{ start: 0, size: 'full body', camera: { move: 'fixed' }, main_events: ['stands'] }, { start: 2, size: 'medium', camera: { move: 'fixed' }, main_events: ['smiles'] }] }, { durationSec: 6, camera: [{ from: 0, to: 6, scale: 1.1 }] }));
+});
+t('phoneZoom: a size the table does not know never falls back to "the camera pushes in", and a close-up end state still goes', () => {
+  const tl = timeline(pzRun({ shots: [{ start: 0, size: 'cowboy shot', camera: { move: 'fixed' }, main_events: ['stands'] }, { start: 2, size: 'close-up', camera: { move: 'pushes in' }, main_events: ['smiles'], end_state: 'close-up of MAIN' }] }, { durationSec: 6, camera: [{ from: 0, to: 6, zoom: 'in', scale: 1.3 }] }));
+  assert.ok(!GLIDE.test(tl) && !/framing moves/.test(tl), tl);
+  assert.strictEqual((tl.match(/zooms in/g) || []).length, 1, tl);
+});
+// Reviewer round 2 (2026-11-24).
+t('phoneZoom negative: a camera the writer calls travelling ("tracks forward", "follows") keeps the whole take untouched, whatever MAIN\'s verbs are', () => {
+  const r = pzRun({ shots: [{ start: 0, size: 'full body', camera: { move: 'tracks forward' }, main_events: ['crosses the street'] }, { start: 3, size: 'medium', camera: { move: 'tracks forward' }, main_events: ['descends the stairs'] }] }, { durationSec: 6, camera: [{ from: 0, to: 6, zoom: 'in', scale: 2 }] });
+  untouched(r);
+  // the verbs alone would also have held it off, with a camera written as held
+  for (const ev of ['crosses the street', 'descends the stairs', 'wanders between the tables', 'backs away', 'follows the waiter', 'turns and leaves', 'gets out of the car', 'makes her way to the bar'])
+    untouched(pzRun({ shots: [{ start: 0, size: 'full body', camera: { move: 'fixed' }, main_events: [ev] }, { start: 3, size: 'medium', camera: { move: 'pushes in' }, main_events: ['smiles'] }] }, { durationSec: 6, camera: [{ from: 0, to: 6, zoom: 'in', scale: 2 }] }));
+  // … and on-the-spot actions with the same words are NOT travel
+  for (const ev of ['crosses the arms', 'crosses the legs', 'runs a hand through the hair', 'stands on the steps'])
+    assert.ok(pzRun({ shots: [{ start: 0, size: 'full body', camera: { move: 'fixed' }, main_events: [ev] }, { start: 3, size: 'medium', camera: { move: 'pushes in' }, main_events: ['smiles'] }] }, { durationSec: 6, camera: [{ from: 0, to: 6, zoom: 'in', scale: 2 }] }).log.some(l => l.rule === 'phoneZoom'), ev);
+});
+t('phoneZoom: after the zoom an unknown size word is said once (as before), and a push-in whose size WIDENS keeps the old wording', () => {
+  const r = pzRun({ shots: [{ start: 0, size: 'full body', camera: { move: 'fixed' }, main_events: ['stands'] }, { start: 2, size: 'medium', camera: { move: 'pushes in' }, main_events: ['smiles'] }, { start: 4, size: 'cowboy shot', camera: { move: 'fixed' }, main_events: ['nods'] }, { start: 6, size: 'cowboy shot', camera: { move: 'fixed' }, main_events: ['waves'] }, { start: 8, size: 'cowboy shot', camera: { move: 'fixed' }, main_events: ['laughs'] }] }, { durationSec: 10, camera: [{ from: 0, to: 2, scale: 1 }, { from: 2, to: 4, zoom: 'in', scale: 2 }, { from: 4, to: 10, scale: 1 }] });
+  assert.strictEqual((r.prompt.match(/cowboy shot/g) || []).length, 1, timeline(r));
+  const w = timeline(pzRun({ shots: [{ start: 0, size: 'medium', camera: { move: 'fixed' }, main_events: ['stands'] }, { start: 3, size: 'full body', camera: { move: 'pushes in' }, main_events: ['smiles'] }] }, { durationSec: 6, camera: [] }));
+  assert.ok(/framing widens to a full body shot, the camera pushes in/.test(w), w);
+});
+t('phoneZoom: a measured zoom all the way to the face is written through in plain words, and the word close-up still never stays', () => {
+  const tl = timeline(pzRun({ shots: [{ start: 0, size: 'full body', camera: { move: 'fixed' }, main_events: ['stands'] }, { start: 2, size: 'close-up', camera: { move: 'zooms in' }, main_events: ['smiles'], end_state: 'close-up of MAIN smiling, extreme close-up of the eyes' }] }, { durationSec: 6, camera: [{ from: 0, to: 6, zoom: 'in', scale: 6 }] }));
+  assert.ok(/until K is seen from the shoulders up\./.test(tl) && /End of the shot: K smiling; the picture ends with K seen from the shoulders up, still filmed from the same spot\./.test(tl), tl);
+  assert.ok(!/close-up/i.test(tl), tl);
+});
+t('phoneZoom: the writer\'s push-in word buys ONE size per take on a camera measured as still, not one per phase', () => {
+  const r = pzRun({ shots: ['full body', 'medium wide', 'medium', 'medium close-up', 'close-up'].map((size, n) => ({ start: n * 2, size, camera: { move: n ? 'pushes in' : 'fixed' }, main_events: [['stands', 'smiles', 'nods', 'waves', 'laughs'][n]] })) }, { durationSec: 10, camera: [{ from: 0, to: 10, scale: 1.0 }] });
+  assert.deepStrictEqual(r.log.filter(l => l.rule === 'phoneZoom').map(l => [l.to, l.held]), [['medium wide', false], ['medium wide', true], ['medium wide', true], ['medium wide', true]], timeline(r));
+});
+t('phoneZoom: the measured ceiling — scale per take, pro-rated, and how many sizes it carries', () => {
+  assert.strictEqual(measuredZoomScale([{ from: 0, to: 7, zoom: 'in' }], 0, 7), null, 'no "scale" = not measured');
+  assert.strictEqual(measuredZoomScale([], 0, 7), null);
+  assert.ok(Math.abs(measuredZoomScale(REEL_CAM, 0, 5) - 1.001 * 1.627 * 1.023) < 1e-6);
+  assert.ok(Math.abs(measuredZoomScale([{ from: 0, to: 4, scale: 4 }], 0, 2) - 2) < 1e-6, 'half of a segment = the square root of its scale');
+  // full body (5): 1.33x → knees-up (4), 1.63x → waist-up (3), 1.0x → stays, 4x → head and shoulders (1)
+  assert.deepStrictEqual([1.332, 1.627, 1.0, 0.63, 4].map(x => tightestRank(5, x)), [4, 3, 5, 5, 1]);
+});
+t('phoneZoom: cameramotion.py reports "scale" per segment and multiplies it when equal segments merge', () => {
+  const py = require('fs').readFileSync(require('path').join(__dirname, '..', 'v2', 'cameramotion.py'), 'utf8');
+  assert.ok(/'scale': float\(np\.prod\(/.test(py) && /last\['scale'\] \*= r\['scale'\]/.test(py));
 });
 
 console.log(`\nv2-compile: ${pass} passed, ${fail} failed`);
